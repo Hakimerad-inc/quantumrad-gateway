@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+*.whl
+
+# uv
+.venv/
+uv.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Windows
+*.exe
+*.spec
+*.dll
+*.pdb
+*.msi
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Packaging (PyInstaller)
+build/
+dist/
+
+# Runtime
+spool/
+*.db
+*.db-wal
+*.db-shm
+mercure-gateway.json

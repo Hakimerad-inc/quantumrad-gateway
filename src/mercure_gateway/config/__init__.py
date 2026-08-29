@@ -1,13 +1,17 @@
 """Pydantic v2 configuration models for ``mercure-gateway.json``.
 
-The schema mirrors the draft configuration in the product spec (PRD §5.5):
+The schema mirrors the draft configuration in the product spec (PRD §5.5)
+and the product refinement spec:
 ``general``, ``receiver``, ``destinations[]`` (per-target-type fields),
-``forwarding_rules[]``, ``reports``, ``audit`` and ``storage``.
+``forwarding``, ``forwarding_rules[]``, ``reports``, ``audit``, ``storage``,
+``web_ui``, ``credentials``, and ``usb_mode``.
 
 Deviation note (per quality bar):
 - PRD §5.5 lists target types DICOM / DICOM-TLS / DICOMweb / SFTP / rsync / Folder / S3 / XNAT.
   ``dicom_tls`` is modelled as an explicit destination type here (``type="dicom_tls"``)
   so TLS settings stay on the target, matching mercure's target-type conventions.
+- Refinement additions: ``forwarding`` (concurrency), ``web_ui`` (localhost SPA),
+  ``credentials`` (encrypted per-destination blocks), ``usb_mode`` (portable USB variant).
 """
 
 from __future__ import annotations
@@ -20,11 +24,14 @@ from pydantic import BaseModel, Field
 __all__ = [
     "AuditConfig",
     "BaseDestination",
+    "CredentialEntry",
+    "CredentialsConfig",
     "DICOMDestination",
     "DICOMTLSDestination",
     "DICOMwebDestination",
     "Destination",
     "FolderDestination",
+    "ForwardingConfig",
     "ForwardingRule",
     "GatewayConfig",
     "GeneralConfig",
@@ -36,6 +43,8 @@ __all__ = [
     "S3Destination",
     "SFTPDestination",
     "StorageConfig",
+    "USBModeConfig",
+    "WebUIConfig",
     "XNATDestination",
     "default_config",
     "load_config",
@@ -57,6 +66,13 @@ class ReceiverConfig(BaseModel):
     ae_title: str = Field(default="GATEWAY", min_length=1, max_length=16)
     port: int = Field(default=11112, ge=1, le=65535)
     accept_compressed: bool = True
+    decompress_common: bool = Field(
+        default=True,
+        description=(
+            "Decompress common compressed syntaxes (JPEG 2000, JPEG-LS, RLE) on receive. "
+            "Rare/proprietary syntaxes are passed through as-is."
+        ),
+    )
     allowed_ae_titles: list[str] = Field(
         default_factory=list, description="Empty = accept any AE title."
     )
@@ -184,6 +200,9 @@ class ReportQuerySource(BaseModel):
     aet: str = Field(min_length=1, max_length=16)
 
 
+_DEFAULT_REPORT_TYPES: list[Literal["sr", "pdf"]] = ["sr", "pdf"]
+
+
 class ReportConfig(BaseModel):
     """Report-retrieval configuration."""
 
@@ -191,6 +210,14 @@ class ReportConfig(BaseModel):
     query_source: ReportQuerySource | None = None
     poll_interval_sec: int = Field(default=300, ge=10)
     on_retrieval: Literal["store", "store_and_forward"] = "store"
+    report_types: list[Literal["sr", "pdf"]] = Field(
+        default_factory=lambda: list(_DEFAULT_REPORT_TYPES),
+        description=(
+            "Which report SOP classes to retrieve. "
+            "'sr' = DICOM Structured Report (1.2.840.10008.5.1.4.1.1.88.33); "
+            "'pdf' = Encapsulated PDF (1.2.840.10008.5.1.4.1.1.104.2)."
+        ),
+    )
 
 
 class HubReporting(BaseModel):
@@ -215,6 +242,128 @@ class StorageConfig(BaseModel):
     spool_dir: str = "C:\\mercure-gateway\\spool"
     max_spool_gb: int = Field(default=20, ge=1)
     retention_delivered_days: int = Field(default=3, ge=0)
+    disk_full_warning_pct: int = Field(
+        default=90, ge=50, le=100,
+        description="Capacity percentage at which a disk-full warning is emitted.",
+    )
+    purge_on_disk_full: bool = Field(
+        default=False,
+        description=(
+            "Automatically purge oldest delivered studies when capacity exceeds "
+            "'disk_full_warning_pct'. Undelivered/FAILED studies are never purged."
+        ),
+    )
+
+
+class ForwardingConfig(BaseModel):
+    """Concurrent forwarding worker settings (product refinement spec §2.2)."""
+
+    concurrency: int = Field(
+        default=3, ge=1, le=16,
+        description="Maximum number of concurrent forwarding workers.",
+    )
+    queue_poll_interval_ms: int = Field(
+        default=500, ge=100, le=5000,
+        description="How often workers poll for new tasks (milliseconds).",
+    )
+
+
+class WebUIConfig(BaseModel):
+    """Web admin panel settings (product refinement spec §7)."""
+
+    host: str = Field(
+        default="127.0.0.1",
+        description="Bind address for the web admin panel. Use 0.0.0.0 for network access.",
+    )
+    port: int = Field(default=8080, ge=1, le=65535)
+    auth_enabled: bool = Field(
+        default=False,
+        description=(
+            "Require password authentication for the web UI. "
+            "Disabled by default for localhost-only access; enable for shared machines."
+        ),
+    )
+    auth_password_hash: str = Field(
+        default="",
+        description="Bcrypt hash of the web UI password. Set via the setup wizard.",
+    )
+
+
+class CredentialEntry(BaseModel):
+    """Encrypted credential block for a single destination."""
+
+    type: str = Field(min_length=1, description="Destination type (e.g. \"sftp\", \"s3\").")
+    username: str | None = None
+    password_encrypted: str | None = Field(
+        default=None,
+        description="AES-256-GCM encrypted password (\"AES256GCM:...\").",
+    )
+    private_key_encrypted: str | None = Field(
+        default=None,
+        description="AES-256-GCM encrypted private key (SSH/SFTP).",
+    )
+    passphrase_encrypted: str | None = Field(
+        default=None,
+        description="AES-256-GCM encrypted passphrase for the private key.",
+    )
+    api_key_encrypted: str | None = Field(
+        default=None,
+        description="AES-256-GCM encrypted API key (S3, XNAT, DICOMweb, hub reporting).",
+    )
+
+
+class CredentialsConfig(BaseModel):
+    """Encrypted credential storage (product refinement spec §2.5).
+
+    Credentials are stored as AES-256-GCM encrypted blocks, decrypted with a
+    master password on startup via PBKDF2 (100k iterations, SHA-256).  When
+    ``encrypted`` is false, credentials are stored in plaintext (dev/test only).
+    """
+
+    encrypted: bool = Field(
+        default=True,
+        description="Encrypt credential values at rest.  Disable for dev/test only.",
+    )
+    entries: dict[str, CredentialEntry] = Field(
+        default_factory=dict,
+        description="Per-destination credential blocks, keyed by destination name.",
+    )
+
+
+class USBModeConfig(BaseModel):
+    """USB dongle variant settings (usb-dongle-gateway-spec §6)."""
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable USB-specific behavior (aggressive retention, storage budget, "
+            "hot-unplug monitoring).  Auto-detected when spool is on removable media."
+        ),
+    )
+    storage_budget_gb: int = Field(
+        default=18, ge=1,
+        description="Maximum data partition usage in GB (shared data partition).",
+    )
+    retention_delivered_hours: int = Field(
+        default=24, ge=1,
+        description="Aggressive retention for USB: delivered studies purged after N hours.",
+    )
+    hot_unplug_safe: bool = Field(
+        default=True,
+        description="Enable graceful shutdown on USB removal detection.",
+    )
+    auto_start_on_boot: bool = Field(
+        default=True,
+        description="Auto-start gateway on USB boot or plug-in.",
+    )
+    led_enabled: bool = Field(
+        default=False,
+        description="Hardware LED status indicator support (requires compatible device).",
+    )
+    led_pin: str = Field(
+        default="GPIO18",
+        description="GPIO pin for LED control in Linux mode (BCM numbering).",
+    )
 
 
 class GatewayConfig(BaseModel):
@@ -223,10 +372,14 @@ class GatewayConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     receiver: ReceiverConfig = Field(default_factory=ReceiverConfig)
     destinations: list[Destination] = Field(default_factory=list)
+    forwarding: ForwardingConfig = Field(default_factory=ForwardingConfig)
     forwarding_rules: list[ForwardingRule] = Field(default_factory=list)
     reports: ReportConfig = Field(default_factory=ReportConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    web_ui: WebUIConfig = Field(default_factory=WebUIConfig)
+    credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
+    usb_mode: USBModeConfig = Field(default_factory=USBModeConfig)
 
 
 def default_config() -> GatewayConfig:

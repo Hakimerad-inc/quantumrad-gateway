@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>mercure-gateway</title>
+  <style>
+    :root {
+      --bg: #0f172a; --surface: #1e293b; --surface2: #263248;
+      --border: #334155; --text: #e2e8f0; --muted: #94a3b8;
+      --accent: #38bdf8; --accent-dim: rgba(56,189,248,0.12);
+      --green: #22c55e; --yellow: #eab308; --red: #ef4444;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+
+    /* Layout */
+    .shell { display: flex; height: 100vh; }
+    .sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .sidebar-header { padding: 20px 16px 12px; border-bottom: 1px solid var(--border); }
+    .sidebar-header h1 { font-size: 13px; font-weight: 600; color: var(--accent); letter-spacing: 1px; text-transform: uppercase; }
+    .sidebar-header .version { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .sidebar nav { flex: 1; padding: 8px 0; }
+    .sidebar nav a {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 16px; color: var(--muted); text-decoration: none; font-size: 13px;
+      border-left: 3px solid transparent; transition: all 0.15s;
+    }
+    .sidebar nav a:hover { color: var(--text); background: var(--accent-dim); }
+    .sidebar nav a.active { color: var(--text); background: var(--accent-dim); border-left-color: var(--accent); font-weight: 500; }
+    .sidebar nav a .icon { width: 18px; text-align: center; font-size: 15px; }
+    .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+
+    /* Main */
+    .main { flex: 1; overflow-y: auto; padding: 24px 32px; }
+    .main h2 { font-size: 18px; font-weight: 600; margin-bottom: 16px; }
+
+    /* Cards */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin-bottom: 12px; }
+    .card-header { font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; margin-bottom: 12px; }
+
+    /* Stats row */
+    .stats { display: flex; gap: 32px; flex-wrap: wrap; }
+    .stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat .value { font-size: 28px; font-weight: 700; line-height: 1.2; }
+    .stat .value.green { color: var(--green); }
+    .stat .value.yellow { color: var(--yellow); }
+    .stat .value.red { color: var(--red); }
+    .stat .value.accent { color: var(--accent); }
+
+    /* Status indicators */
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .status-dot.green { background: var(--green); }
+    .status-dot.yellow { background: var(--yellow); }
+    .status-dot.red { background: var(--red); }
+    .status-dot.gray { background: var(--muted); }
+
+    /* Badges */
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; }
+    .badge.green { background: rgba(34,197,94,0.15); color: var(--green); }
+    .badge.yellow { background: rgba(234,179,8,0.15); color: var(--yellow); }
+    .badge.red { background: rgba(239,68,68,0.15); color: var(--red); }
+    .badge.gray { background: rgba(148,163,184,0.15); color: var(--muted); }
+    .badge.blue { background: var(--accent-dim); color: var(--accent); }
+
+    /* Tables */
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+    td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    tr:hover td { background: var(--accent-dim); }
+    .mono { font-family: var(--mono); font-size: 12px; }
+
+    /* Buttons */
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+    .btn:hover { background: var(--border); }
+    .btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+    .btn.primary:hover { opacity: 0.9; }
+    .btn.danger { color: var(--red); }
+
+    /* Empty state */
+    .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
+    .empty .icon { font-size: 32px; margin-bottom: 8px; }
+
+    /* Code/pre */
+    pre { font-family: var(--mono); font-size: 12px; line-height: 1.6; overflow-x: auto; white-space: pre-wrap; }
+
+    /* Pages */
+    .page { display: none; }
+    .page.active { display: block; }
+
+    /* Capacity bar */
+    .capacity-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+    .capacity-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+    .capacity-fill.green { background: var(--green); }
+    .capacity-fill.yellow { background: var(--yellow); }
+    .capacity-fill.red { background: var(--red); }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h1>Mercure Gateway</h1>
+      <div class="version" id="version">v0.1.0</div>
+    </div>
+    <nav>
+      <a href="#" data-page="dashboard" class="active"><span class="icon">◉</span> Dashboard</a>
+      <a href="#" data-page="queue"><span class="icon">↻</span> Queue</a>
+      <a href="#" data-page="reports"><span class="icon">📄</span> Reports</a>
+      <a href="#" data-page="audit"><span class="icon">☰</span> Audit</a>
+      <a href="#" data-page="config"><span class="icon">⚙</span> Config</a>
+    </nav>
+    <div class="sidebar-footer">
+      <span id="uptime">—</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- ═══ Dashboard ═══ -->
+    <div id="page-dashboard" class="page active">
+      <h2>Dashboard</h2>
+      <div class="card">
+        <div class="card-header">System Status</div>
+        <div class="stats">
+          <div class="stat">
+            <div class="label">Receiver</div>
+            <div class="value" id="s-receiver"><span class="status-dot gray"></span>—</div>
+          </div>
+          <div class="stat">
+            <div class="label">Forwarder</div>
+            <div class="value" id="s-forwarder"><span class="status-dot gray"></span>—</div>
+          </div>
+          <div class="stat">
+            <div class="label">Report Retriever</div>
+            <div class="value" id="s-reports"><span class="status-dot gray"></span>—</div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">Queue Overview</div>
+        <div class="stats">
+          <div class="stat"><div class="label">Queued</div><div class="value accent" id="q-queued">0</div></div>
+          <div class="stat"><div class="label">Sending</div><div class="value yellow" id="q-sending">0</div></div>
+          <div class="stat"><div class="label">Sent</div><div class="value green" id="q-sent">0</div></div>
+          <div class="stat"><div class="label">Error</div><div class="value yellow" id="q-error">0</div></div>
+          <div class="stat"><div class="label">Failed</div><div class="value red" id="q-failed">0</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">Recent Activity</div>
+        <div id="recent-activity"><div class="empty"><div class="icon">—</div>No recent activity</div></div>
+      </div>
+    </div>
+
+    <!-- ═══ Queue ═══ -->
+    <div id="page-queue" class="page">
+      <h2>Study Queue</h2>
+      <div class="card" style="padding:0; overflow:hidden;">
+        <table>
+          <thead><tr>
+            <th>ID</th><th>Study UID</th><th>Accession</th><th>Modality</th><th>State</th><th>Dest.</th><th>Created</th><th></th>
+          </tr></thead>
+          <tbody id="queue-body"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ═══ Reports ═══ -->
+    <div id="page-reports" class="page">
+      <h2>Reports</h2>
+      <div class="card" style="padding:0; overflow:hidden;">
+        <table>
+          <thead><tr><th>ID</th><th>Study UID</th><th>Type</th><th>Status</th><th>File</th><th>Retrieved</th></tr></thead>
+          <tbody id="reports-body"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ═══ Audit ═══ -->
+    <div id="page-audit" class="page">
+      <h2>Audit Log</h2>
+      <div style="margin-bottom:12px;">
+        <button class="btn primary" onclick="verifyAudit()">Verify Chain Integrity</button>
+        <span id="audit-verify-result" style="margin-left:12px;font-size:13px;"></span>
+      </div>
+      <div class="card" style="padding:0; overflow:hidden;">
+        <table>
+          <thead><tr><th>ID</th><th>Timestamp</th><th>Event</th><th>Detail</th><th>User</th><th class="mono">Hash (8)</th></tr></thead>
+          <tbody id="audit-body"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ═══ Config ═══ -->
+    <div id="page-config" class="page">
+      <h2>Configuration</h2>
+      <div class="card">
+        <div class="card-header">Current Configuration</div>
+        <pre id="config-view" style="max-height:600px;overflow-y:auto;">Loading...</pre>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const API = '';
+
+// ── Navigation ──────────────────────────────────────────────────────
+document.querySelectorAll('.sidebar nav a').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    document.querySelectorAll('.sidebar nav a').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    a.classList.add('active');
+    document.getElementById('page-' + a.dataset.page).classList.add('active');
+    loadPage(a.dataset.page);
+  });
+});
+
+// ── API helpers ─────────────────────────────────────────────────────
+async function api(url) {
+  try { const r = await fetch(API + url); return r.ok ? await r.json() : null; }
+  catch { return null; }
+}
+async function apiPost(url) {
+  try { const r = await fetch(API + url, {method:'POST'}); return r.ok ? await r.json() : null; }
+  catch { return null; }
+}
+
+function stateBadge(state) {
+  const m = {SENT:'green',RECEIVED:'blue',QUEUED:'yellow',SENDING:'yellow',ERROR:'red',FAILED:'red',RECEIVING:'blue'};
+  return `<span class="badge ${m[state]||'gray'}">${state}</span>`;
+}
+function statusBadge(s) {
+  const m = {complete:'green',waiting:'yellow',sending:'yellow',error:'red',pending:'yellow',retrieving:'yellow',retrieved:'green',failed:'red'};
+  return `<span class="badge ${m[s]||'gray'}">${s}</span>`;
+}
+
+// ── Dashboard ───────────────────────────────────────────────────────
+async function refreshDashboard() {
+  const st = await api('/api/system/status');
+  if (st) {
+    document.getElementById('version').textContent = 'v' + st.version;
+    document.getElementById('s-receiver').innerHTML = `<span class="status-dot ${st.receiver==='running'?'green':'gray'}"></span>${st.receiver}`;
+    document.getElementById('s-forwarder').innerHTML = `<span class="status-dot ${st.forwarder==='running'?'green':'gray'}"></span>${st.forwarder}`;
+    document.getElementById('s-reports').innerHTML = `<span class="status-dot ${st.report_retriever==='running'?'green':'gray'}"></span>${st.report_retriever}`;
+    document.getElementById('uptime').textContent = 'Uptime: ' + st.uptime_sec.toFixed(0) + 's';
+  }
+  const qs = await api('/api/queue/stats');
+  if (qs) {
+    document.getElementById('q-queued').textContent = qs.queued;
+    document.getElementById('q-sending').textContent = qs.sending;
+    document.getElementById('q-sent').textContent = qs.sent;
+    document.getElementById('q-error').textContent = qs.error;
+    document.getElementById('q-failed').textContent = qs.failed;
+  }
+  const audit = await api('/api/audit?limit=5');
+  const el = document.getElementById('recent-activity');
+  if (audit && audit.length) {
+    el.innerHTML = '<table><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody>' +
+      audit.map(e => `<tr><td class="mono">${e.ts}</td><td>${e.event}</td><td class="mono" style="font-size:11px">${e.detail}</td></tr>`).join('') +
+      '</tbody></table>';
+  } else {
+    el.innerHTML = '<div class="empty"><div class="icon">—</div>No recent activity</div>';
+  }
+}
+
+// ── Queue ───────────────────────────────────────────────────────────
+async function refreshQueue() {
+  const studies = await api('/api/studies?page_size=200');
+  const tbody = document.getElementById('queue-body');
+  if (!studies || !studies.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty"><div class="icon">📁</div>No studies in queue</td></tr>'; return; }
+  tbody.innerHTML = studies.map(s => `<tr>
+    <td>${s.id}</td>
+    <td class="mono" title="${s.study_uid}">${s.study_uid.length > 20 ? s.study_uid.slice(0,20)+'…' : s.study_uid}</td>
+    <td>${s.accession || '—'}</td>
+    <td>${s.modality || '—'}</td>
+    <td>${stateBadge(s.state)}</td>
+    <td>${s.num_destinations}</td>
+    <td class="mono" style="font-size:11px">${s.created_at}</td>
+    <td>${s.state === 'FAILED' ? `<button class="btn" onclick="retryStudy(${s.id})">Retry</button>` : ''}</td>
+  </tr>`).join('');
+}
+
+async function retryStudy(id) {
+  await apiPost(`/api/studies/${id}/retry`);
+  refreshQueue();
+}
+
+// ── Reports ─────────────────────────────────────────────────────────
+async function refreshReports() {
+  const reports = await api('/api/reports?limit=100');
+  const tbody = document.getElementById('reports-body');
+  if (!reports || !reports.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty"><div class="icon">📄</div>No reports retrieved yet</td></tr>'; return; }
+  tbody.innerHTML = reports.map(r => `<tr>
+    <td>${r.id}</td>
+    <td class="mono" title="${r.study_uid}">${r.study_uid.length > 20 ? r.study_uid.slice(0,20)+'…' : r.study_uid}</td>
+    <td><span class="badge blue">${r.report_type}</span></td>
+    <td>${statusBadge(r.status)}</td>
+    <td class="mono" style="font-size:11px">${r.file_path || '—'}</td>
+    <td class="mono" style="font-size:11px">${r.retrieved_at || '—'}</td>
+  </tr>`).join('');
+}
+
+// ── Audit ───────────────────────────────────────────────────────────
+async function refreshAudit() {
+  const events = await api('/api/audit?limit=100');
+  const tbody = document.getElementById('audit-body');
+  if (!events || !events.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty"><div class="icon">☰</div>No audit events</td></tr>'; return; }
+  tbody.innerHTML = events.map(e => `<tr>
+    <td>${e.id}</td>
+    <td class="mono" style="font-size:11px">${e.ts}</td>
+    <td><span class="badge ${e.event.includes('ERROR')||e.event.includes('FAIL')?'red':e.event.includes('COMPLETE')||e.event.includes('SENT')?'green':'blue'}">${e.event}</span></td>
+    <td class="mono" style="font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis">${e.detail}</td>
+    <td>${e.user || '—'}</td>
+    <td class="mono" style="font-size:10px">${e.hash ? e.hash.slice(0,8)+'…' : '—'}</td>
+  </tr>`).join('');
+}
+
+async function verifyAudit() {
+  const result = await api('/api/audit/verify');
+  const el = document.getElementById('audit-verify-result');
+  if (result) {
+    el.innerHTML = result.valid
+      ? '<span class="badge green">✓ Chain intact</span>'
+      : `<span class="badge red">✗ ${result.errors.length} broken link(s)</span>`;
+  }
+}
+
+// ── Config ──────────────────────────────────────────────────────────
+async function refreshConfig() {
+  const cfg = await api('/api/config');
+  if (cfg) document.getElementById('config-view').textContent = JSON.stringify(cfg, null, 2);
+}
+
+// ── Page loader ─────────────────────────────────────────────────────
+function loadPage(page) {
+  if (page === 'dashboard') refreshDashboard();
+  else if (page === 'queue') refreshQueue();
+  else if (page === 'reports') refreshReports();
+  else if (page === 'audit') refreshAudit();
+  else if (page === 'config') refreshConfig();
+}
+
+// ── Init ────────────────────────────────────────────────────────────
+refreshDashboard();
+setInterval(refreshDashboard, 5000);
+</script>
+</body>
+</html>

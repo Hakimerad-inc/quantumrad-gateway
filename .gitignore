@@ -40,3 +40,7 @@ spool/
 *.db-wal
 *.db-shm
 mercure-gateway.json
+
+# Prototypes (spike artifacts, not production code)
+prototypes/
+benchmark-results.md

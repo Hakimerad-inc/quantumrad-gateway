@@ -81,6 +81,20 @@ jobs:
       - name: Run perf gates
         run: uv run python scripts/check_perf_gates.py
 
+  coverage:
+    name: coverage gate (≥80%)
+    runs-on: ubuntu-latest
+    needs: [quality, test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - name: Run tests with coverage
+        run: uv run pytest --cov=mercure_gateway --cov-fail-under=80
+
   package-windows:
     name: Windows packaging (S06-T9)
     runs-on: windows-latest

@@ -25,6 +25,7 @@ mercure-gateway = "mercure_gateway.main:main"
 dev = [
     "mypy>=1.10",
     "pytest>=8.0",
+    "pytest-cov>=6.0",
     "pytest-timeout>=2.3",
     "ruff>=0.5",
     # starlette's testclient (Kludex fork 1.6.x) imports httpx2 with a fallback
@@ -67,3 +68,17 @@ markers = [
     "slow: duration > 5s (e.g. retry backoff, wire tests)",
     "integration: requires external infrastructure (DICOM, live server)",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["mercure_gateway"]
+
+[tool.coverage.report]
+# Windows-only (pywin32) and thin launcher modules can't be exercised on
+# Linux; omitting them keeps the gate to meaningful cross-platform code.
+omit = [
+    "*/service_backend.py",
+    "*/ui/__init__.py",
+]
+fail_under = 80
+show_missing = true

@@ -35,6 +35,8 @@ export interface SystemStatus {
   report_retriever: string;
   uptime_sec: number;
   version: string;
+  hub_registered: boolean | null;
+  hub_streaming: boolean | null;
 }
 
 async function getJson<T>(url: string): Promise<T> {

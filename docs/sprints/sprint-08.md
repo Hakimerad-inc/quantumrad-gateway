@@ -11,14 +11,14 @@ forwarding (US-10 AC); Linux AppImage/deb built; cross-platform CI green (US-11 
 
 | ID | Task | PRD ref | RED → GREEN | DoD | Status |
 |----|------|---------|-------------|-----|--------|
-| S08-T1 | **Hub registration client:** `POST /register-gateway` with name/version/contact on first run when configured | §8.2, US-10 | `tests/test_hub_client.py` — registration payload, retry on 5xx, disabled = no-op | Registration AC green | ☐ |
-| S08-T2 | **Event streaming to bookkeeper:** lifecycle events → bookkeeper REST; **isolation invariant: any reporting failure must never block receive/forward** | §8.2, US-10, K2 | `tests/test_hub_events.py` — bookkeeper down/timeout/slow → forwarding unaffected (asserted explicitly); batching + backoff | US-10 non-blocking AC green | ☐ |
-| S08-T3 | **Report transport plugin surface:** formalize `ReportTransport` protocol alongside the S05 DICOM implementation; retrieval selection by `query_source.type` | §2.3, Q2 | `tests/test_report_transports.py` — registry dispatch by type, unknown type error, SR/PDF transport unaffected | Pluggability contract green | ☐ |
-| S08-T4 | **DICOMweb QIDO/WADO transport:** QIDO-RS query + WADO-RS SR/PDF fetch over HTTPS | §2.3, Q2 | `tests/test_report_dicomweb.py` — against fake DICOMweb server; pagination; TLS; error mapping; SR + PDF both supported | DICOMweb reports green | ☐ |
-| S08-T5 | **HL7/FHIR transport (experimental, no TDD gate):** ORU^R01-to-folder email-to-folder style drop; feature-flagged, marked experimental in docs | §2.3 | smoke test + flag-off default | Experimental transport available, off by default | ☐ |
-| S08-T6 | **Auto-update decision (no TDD):** update channel + signing approach; ADR-0005 (feeds S09-T4 impl) | §13 Q5 | — | Decision + signing vendor recorded | ☐ |
-| S08-T7 | **Linux packaging + CI matrix (no TDD):** AppImage/deb build; CI test+quality jobs × ubuntu/windows; artifact gates | §2.3, US-11 | CI matrix green on both OSes; Linux artifact builds | US-11 AC green | ☐ |
-| S08-T8 | **Web admin hub integration:** display hub registration status, event streaming health, and connected gateways in the web admin panel | refinement §7 | UI shows hub status; events visible in audit tab | Hub monitoring visible in web UI | ☐ |
+| S08-T1 | **Hub registration client:** `POST /register-gateway` with name/version/contact on first run when configured | §8.2, US-10 | `tests/test_hub_client.py` — registration payload, retry on 5xx, disabled = no-op | Registration AC green | ✅ |
+| S08-T2 | **Event streaming to bookkeeper:** lifecycle events → bookkeeper REST; **isolation invariant: any reporting failure must never block receive/forward** | §8.2, US-10, K2 | `tests/test_hub_events.py` — bookkeeper down/timeout/slow → forwarding unaffected (asserted explicitly); batching + backoff | US-10 non-blocking AC green | ✅ |
+| S08-T3 | **Report transport plugin surface:** formalize `ReportTransport` protocol alongside the S05 DICOM implementation; retrieval selection by `query_source.type` | §2.3, Q2 | `tests/test_report_transports.py` — registry dispatch by type, unknown type error, SR/PDF transport unaffected | Pluggability contract green | ✅ |
+| S08-T4 | **DICOMweb QIDO/WADO transport:** QIDO-RS query + WADO-RS SR/PDF fetch over HTTPS | §2.3, Q2 | `tests/test_report_dicomweb.py` — against fake DICOMweb server; pagination; TLS; error mapping; SR + PDF both supported | DICOMweb reports green | ✅ |
+| S08-T5 | **HL7/FHIR transport (experimental, no TDD gate):** ORU^R01-to-folder email-to-folder style drop; feature-flagged, marked experimental in docs | §2.3 | smoke test + flag-off default | Experimental transport available, off by default | ✅ |
+| S08-T6 | **Auto-update decision (no TDD):** update channel + signing approach; ADR-0005 (feeds S09-T4 impl) | §13 Q5 | — | Decision + signing vendor recorded | ✅ |
+| S08-T7 | **Linux packaging + CI matrix (no TDD):** AppImage/deb build; CI test+quality jobs × ubuntu/windows; artifact gates | §2.3, US-11 | CI matrix green on both OSes; Linux artifact builds | US-11 AC green | ✅ |
+| S08-T8 | **Web admin hub integration:** display hub registration status, event streaming health, and connected gateways in the web admin panel | refinement §7 | UI shows hub status; events visible in audit tab | Hub monitoring visible in web UI | ✅ |
 
 **Evidence:** _(links to commits/PRs when done)_
 

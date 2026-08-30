@@ -219,7 +219,7 @@ class ForwardingRule(BaseModel):
 class ReportQuerySource(BaseModel):
     """PACS endpoint used for report retrieval (C-FIND/C-MOVE)."""
 
-    type: Literal["dicom"] = "dicom"
+    type: Literal["dicom", "dicomweb", "fhir", "hl7"] = "dicom"
     host: str = Field(min_length=1)
     port: int = Field(ge=1, le=65535)
     aet: str = Field(min_length=1, max_length=16)

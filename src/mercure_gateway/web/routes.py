@@ -123,6 +123,8 @@ class SystemStatus(BaseModel):
     report_retriever: str = "stopped"
     uptime_sec: float = 0.0
     version: str = __version__
+    hub_registered: bool | None = None
+    hub_streaming: bool | None = None
 
 
 def _get_state(request: Request, name: str) -> _Runnable | None:
@@ -136,16 +138,24 @@ def _get_state(request: Request, name: str) -> _Runnable | None:
 
 @router.get("/system/status", response_model=SystemStatus)
 def system_status(request: Request) -> SystemStatus:
-    """Gateway status — receiver, forwarder, report retriever."""
+    """Gateway status — receiver, forwarder, report retriever, hub."""
     receiver = _get_state(request, "receiver")
     forwarder = _get_state(request, "forwarder")
     report_retriever = _get_state(request, "report_retriever")
     report_retriever_running = report_retriever is not None and report_retriever.is_running
+    hub_status: object = getattr(request.app.state, "hub_status", None)
+    hub_registered: bool | None = None
+    hub_streaming: bool | None = None
+    if isinstance(hub_status, dict):
+        hub_registered = bool(hub_status.get("registered"))
+        hub_streaming = bool(hub_status.get("streaming"))
     return SystemStatus(
         receiver="running" if receiver and receiver.is_running else "stopped",
         forwarder="running" if forwarder and forwarder.is_running else "stopped",
         report_retriever="running" if report_retriever_running else "stopped",
         uptime_sec=round(time.time() - _start_time, 2),
+        hub_registered=hub_registered,
+        hub_streaming=hub_streaming,
     )
 
 

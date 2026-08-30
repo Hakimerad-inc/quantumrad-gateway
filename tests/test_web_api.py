@@ -76,6 +76,23 @@ def test_system_status(client: TestClient) -> None:
     assert data["version"]
     assert "uptime_sec" in data
     assert data["receiver"] in ("running", "stopped")
+    assert "hub_registered" in data
+    assert "hub_streaming" in data
+
+
+def test_system_status_hub_fields_populated(app, client: TestClient) -> None:
+    """Hub registration/streaming status is surfaced when wired (S08-T8)."""
+    app.state.hub_status = {"registered": True, "streaming": True}
+    r = client.get("/api/system/status")
+    data = r.json()
+    assert data["hub_registered"] is True
+    assert data["hub_streaming"] is True
+
+    app.state.hub_status = {"registered": False, "streaming": False}
+    r = client.get("/api/system/status")
+    data = r.json()
+    assert data["hub_registered"] is False
+    assert data["hub_streaming"] is False
 
 
 def test_system_health(client: TestClient) -> None:

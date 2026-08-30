@@ -102,6 +102,22 @@ def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) ->
     return forwarder
 
 
+def _build_hub_status(config: GatewayConfig) -> dict[str, Any] | None:
+    """Build a hub-status snapshot for the web admin panel (S08-T8).
+
+    Returns ``None`` when hub reporting is not enabled, so the UI renders
+    ``—`` instead of a misleading "inactive".
+    """
+    hub = config.audit.hub_reporting
+    if not hub.enabled or not hub.bookkeeper_url:
+        return None
+    return {
+        "registered": False,
+        "streaming": False,
+        "bookkeeper_url": hub.bookkeeper_url,
+    }
+
+
 def _run_web_admin(
     config: GatewayConfig,
     spool: Spool,
@@ -121,6 +137,7 @@ def _run_web_admin(
     app.state.receiver = receiver
     app.state.forwarder = forwarder
     app.state.report_retriever = report_retriever
+    app.state.hub_status = _build_hub_status(config)
     if text_log is not None:
         app.state.text_log_path = str(text_log._path)
     host = config.web_ui.host

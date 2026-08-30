@@ -54,3 +54,10 @@ operations.log
 # Prototypes (spike artifacts, not production code)
 prototypes/
 benchmark-results.md
+# Env & tooling artifacts
+.venv
+graphify-out/
+
+# Windows-path bug artifact (literal dir name created on Linux by the pre-fix
+# _default_spool_dir bug) — runtime junk, never commit
+C:\\mercure-gateway\\

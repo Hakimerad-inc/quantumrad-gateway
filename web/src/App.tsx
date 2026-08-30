@@ -10,7 +10,7 @@ import { fetchQueueStats, fetchSystemStatus } from "./api";
 type Page = "dashboard" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
 
 function Dashboard() {
-  const [status, setStatus] = useState<{ receiver: string; forwarder: string; report_retriever: string; uptime_sec: number; version: string } | null>(null);
+  const [status, setStatus] = useState<{ receiver: string; forwarder: string; report_retriever: string; uptime_sec: number; version: string; hub_registered: boolean | null; hub_streaming: boolean | null } | null>(null);
   const [stats, setStats] = useState<{ queued: number; sending: number; sent: number; error: number; failed: number } | null>(null);
 
   useEffect(() => {
@@ -20,6 +20,10 @@ function Dashboard() {
 
   const dot = (running: string) => (
     <span className={`status-dot ${running === "running" ? "green" : "gray"}`} />
+  );
+
+  const hubDot = (ok: boolean | null) => (
+    <span className={`status-dot ${ok === true ? "green" : ok === false ? "gray" : "gray"}`} />
   );
 
   return (
@@ -39,6 +43,27 @@ function Dashboard() {
           <div className="stat">
             <div className="label">Report Retriever</div>
             <div className="value">{status ? <>{dot(status.report_retriever)}{status.report_retriever}</> : "—"}</div>
+          </div>
+        </div>
+      </div>
+      <div className="card">
+        <div className="card-header">Hub Reporting</div>
+        <div className="stats">
+          <div className="stat">
+            <div className="label">Registration</div>
+            <div className="value">
+              {status && status.hub_registered !== null
+                ? <>{hubDot(status.hub_registered)}{status.hub_registered ? "registered" : "not registered"}</>
+                : "—"}
+            </div>
+          </div>
+          <div className="stat">
+            <div className="label">Event Streaming</div>
+            <div className="value">
+              {status && status.hub_streaming !== null
+                ? <>{hubDot(status.hub_streaming)}{status.hub_streaming ? "active" : "inactive"}</>
+                : "—"}
+            </div>
           </div>
         </div>
       </div>

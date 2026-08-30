@@ -27,7 +27,11 @@ dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
     "ruff>=0.5",
+    # starlette's testclient (Kludex fork 1.6.x) imports httpx2 with a fallback
+    # to httpx. Both are pinned so a mainline-starlette upgrade can never
+    # break TestClient by requiring `httpx` alone.
     "httpx2>=2.12,<3",
+    "httpx>=0.27,<0.29",
 ]
 
 [build-system]

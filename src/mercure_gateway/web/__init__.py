@@ -17,10 +17,11 @@ credentials are never combined with wildcard origins.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from mercure_gateway.web.auth import require_auth
@@ -32,6 +33,81 @@ if TYPE_CHECKING:
 __all__ = ["create_app"]
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# Loopback origins the Tauri webview / localhost SPA actually use — the same
+# set the CORS middleware allows.  A state-changing request whose Origin is
+# *not* in this set is CSRF (a cross-site form/post cannot spoof loopback).
+_ALLOWED_ORIGINS = (
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+    "tauri://localhost",
+    "https://tauri.localhost",
+)
+
+# Non-loopback binding is only allowed when auth is enabled (main.py enforces
+# this); loopback is single-user by definition, so the CSRF origin check is a
+# defense-in-depth layer, not the primary boundary.
+
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    # The SPA loads its JS/CSS from the same origin only.  React inline
+    # ``style`` attributes need 'unsafe-inline' for styles; scripts stay
+    # 'self' (no inline scripts, no eval — the Vite build emits external
+    # module files only).
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'"
+    ),
+}
+
+
+class _SecurityMiddleware:
+    """Security headers + origin-based CSRF check (ASGI middleware).
+
+    - Adds security headers (nosniff, frame deny, HSTS, CSP) to every response.
+    - Rejects state-changing requests (POST/PUT/DELETE) whose ``Origin`` header
+      is present but not in the loopback/tauri allow-list (CSRF).
+    """
+
+    _STATE_CHANGING = {"POST", "PUT", "DELETE", "PATCH"}
+
+    def __init__(self, app: Any, allowed_origins: tuple[str, ...]) -> None:
+        self.app = app
+        self._allowed_origins = set(allowed_origins)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # CSRF: only meaningful for browser-like requests that send an Origin.
+        if scope["method"] in self._STATE_CHANGING and scope["path"].startswith("/api/"):
+            headers = dict(scope.get("headers", []))
+            origin = headers.get(b"origin")
+            if origin is not None and origin.decode() not in self._allowed_origins:
+                response = JSONResponse(
+                    status_code=403, content={"detail": "origin not allowed"}
+                )
+                await response(scope, receive, send)
+                return
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                for name, value in _SECURITY_HEADERS.items():
+                    headers.append((name.lower().encode(), value.encode()))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 def create_app(
@@ -58,16 +134,15 @@ def create_app(
     app.state.spool = spool
     app.state.config_path = str(config_path) if config_path else None
 
+    # Security middleware FIRST (runs outermost): headers on every response,
+    # CSRF origin check before the CORS handling.
+    app.add_middleware(_SecurityMiddleware, allowed_origins=_ALLOWED_ORIGINS)
+
     # CORS: only the origins the Tauri webview / localhost SPA actually use.
     # Never combine allow_credentials=True with wildcard origins.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://127.0.0.1:8080",
-            "http://localhost:8080",
-            "tauri://localhost",
-            "https://tauri.localhost",
-        ],
+        allow_origins=list(_ALLOWED_ORIGINS),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT"],
         allow_headers=["*"],

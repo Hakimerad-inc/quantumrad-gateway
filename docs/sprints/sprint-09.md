@@ -19,7 +19,7 @@ checklists ticked.
 | S09-T5 | **Diagnostics bundle export:** one-click support bundle (redacted config + structured logs + spool summary) from web admin panel | §7, §2.3 | `tests/test_diagnostics.py` — bundle contents complete, secrets redacted (reuse S04-T2 redaction) | Support tooling AC green | ☐ |
 | S09-T6 | **Docs:** user guide (wizard, daily ops, reports) + admin guide (config, security, retention, troubleshooting) + **USB dongle quick-start guide** | §9 Phase 1/2, usb-dongle-spec | docs build/lint task in CI | §9 docs deliverable done; USB guide ready for Sprint 10 | ☐ |
 | S09-T7 | **Release candidate sweep (no TDD):** run both exit checklists in README; tag v1.1.0-rc1; QA matrix per Q8 (Win10/11 x64, Ubuntu) | §9, §13 Q8 | all checklist items ticked | RC tagged; §12 metrics baseline captured | ☐ |
-| S09-T8 | **Web admin panel hardening:** XSS prevention, CSRF tokens, input validation on all API endpoints; security headers (CSP, HSTS) | refinement §7 | `tests/test_web_security.py` — XSS payloads rejected; CSRF enforced; security headers present | Web UI security hardened | ☐ |
+| S09-T8 | **Web admin panel hardening:** XSS prevention, CSRF tokens, input validation on all API endpoints; security headers (CSP, HSTS) | refinement §7 | `tests/test_web_security.py` — XSS payloads rejected; CSRF enforced; security headers present | Web UI security hardened | ✅ |
 | S09-T9 | **USB-specific perf baseline (no TDD):** measure boot → gateway ready time on USB (Linux mode + Windows mode); hot-unplug flush time; recovery scan time; record against K9/K10 targets | usb-dongle-spec §10 | perf measurements recorded in `docs/qa/usb-perf-09.md` | K9/K10 baseline established for Sprint 10 | ☐ |
 
 **Evidence:** _(links to commits/PRs when done)_

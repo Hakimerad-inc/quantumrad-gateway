@@ -43,20 +43,6 @@ class FakeHandler:
 
 
 @pytest.fixture()
-def target_hub() -> DICOMDestination:
-    return DICOMDestination(
-        name="hub", type="dicom", host="hub.local", port=11112, aet_target="MERCURE"
-    )
-
-
-@pytest.fixture()
-def target_pacs() -> DICOMDestination:
-    return DICOMDestination(
-        name="pacs", type="dicom", host="pacs.local", port=104, aet_target="PACS"
-    )
-
-
-@pytest.fixture()
 def handler() -> FakeHandler:
     return FakeHandler(succeed=True)
 

@@ -14,20 +14,6 @@ def spool() -> Spool:
     return Spool(mem_database())
 
 
-@pytest.fixture()
-def target_hub() -> DICOMDestination:
-    return DICOMDestination(
-        name="hub", type="dicom", host="hub.local", port=11112, aet_target="MERCURE"
-    )
-
-
-@pytest.fixture()
-def target_pacs() -> DICOMDestination:
-    return DICOMDestination(
-        name="pacs", type="dicom", host="pacs.local", port=104, aet_target="PACS"
-    )
-
-
 def test_receive_transition(spool: Spool) -> None:
     study_id = spool.receive("1.2.3.4", accession="A1", modality="CT")
     assert spool.state(study_id) == StudyState.RECEIVED

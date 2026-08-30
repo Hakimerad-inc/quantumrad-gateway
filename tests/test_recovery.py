@@ -33,13 +33,6 @@ def spool(tmp_path: Path) -> Spool:
     return Spool(db, cfg)
 
 
-@pytest.fixture()
-def target_hub() -> DICOMDestination:
-    return DICOMDestination(
-        name="hub", type="dicom", host="hub.local", port=11112, aet_target="MERCURE"
-    )
-
-
 # ── Empty spool ─────────────────────────────────────────────────────
 
 def test_empty_spool_no_recovery(spool: Spool) -> None:

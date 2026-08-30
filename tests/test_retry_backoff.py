@@ -40,13 +40,6 @@ class SlowFailingHandler:
         return DeliveryResult(ok=False, error="destination down")
 
 
-@pytest.fixture()
-def target_hub() -> DICOMDestination:
-    return DICOMDestination(
-        name="hub", type="dicom", host="hub.local", port=11112, aet_target="MERCURE"
-    )
-
-
 def make_forwarder(
     spool: Spool, handler: object, *, base_delay: float, max_attempts: int = 5
 ) -> Forwarder:

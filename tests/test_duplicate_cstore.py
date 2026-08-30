@@ -53,13 +53,6 @@ def spool(tmp_path: Path) -> Spool:
     return Spool(mem_database(), cfg)
 
 
-@pytest.fixture()
-def target_hub() -> DICOMDestination:
-    return DICOMDestination(
-        name="hub", type="dicom", host="hub.local", port=11112, aet_target="MERCURE"
-    )
-
-
 STUDY = "1.2.9.1"
 SERIES = "1.2.9.1.1"
 INST1 = "1.2.9.1.1.1"

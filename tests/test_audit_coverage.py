@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from mercure_gateway.audit import AuditLog
 from mercure_gateway.audit.events import (
     ALL_EVENTS,
@@ -55,13 +53,6 @@ class FakeHandler:
     def deliver(self, task: ClaimedTask, spool_dir: Path) -> DeliveryResult:
         self.calls.append(task)
         return DeliveryResult(ok=self.succeed)
-
-
-@pytest.fixture()
-def target_hub() -> DICOMDestination:
-    return DICOMDestination(
-        name="hub", type="dicom", host="hub.local", port=11112, aet_target="MERCURE"
-    )
 
 
 def _events(db) -> list[str]:

@@ -33,3 +33,57 @@ jobs:
           python-version: "3.12"
       - run: uv sync --all-extras
       - run: uv run pytest
+
+  build-spa:
+    name: build web SPA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: Verify SPA output
+        run: test -f src/mercure_gateway/web/static/index.html
+
+  package-windows:
+    name: Windows packaging (S06-T9)
+    runs-on: windows-latest
+    needs: [quality, test, build-spa]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - name: Setup Rust (Tauri)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+      - name: Build Tauri app (Windows)
+        run: cargo tauri build --no-bundle
+        working-directory: src-tauri
+      - name: K6 installer size gate
+        shell: pwsh
+        run: |
+          $size = (Get-Item "target/release/mercure-gateway.exe").Length / 1MB
+          Write-Host "Binary size: $([math]::Round($size,1)) MB"
+          if ($size -gt 250) { Write-Host "::error::K6 size gate exceeded: $([math]::Round($size,1)) MB > 250 MB"; exit 1 }
+          Write-Host "K6 PASS"

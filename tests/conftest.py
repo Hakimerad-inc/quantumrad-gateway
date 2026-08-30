@@ -9,8 +9,6 @@ from __future__ import annotations
 import pytest
 
 from mercure_gateway.config import DICOMDestination, GatewayConfig, default_config
-from mercure_gateway.spool import Spool
-from mercure_gateway.spool.db import mem_database
 
 
 class FakeReceiver:

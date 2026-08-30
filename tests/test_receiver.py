@@ -104,8 +104,14 @@ def test_second_instance_same_study_upserts(
     study_uid = "1.2.3.4.5.6"
     series_uid = "1.2.3.4.5.6.1"
 
-    ok1 = send_ct("127.0.0.1", receiver.port, "GATEWAY", make_dataset(study_uid, series_uid, "1.2.3.4.5.6.1.1"))
-    ok2 = send_ct("127.0.0.1", receiver.port, "GATEWAY", make_dataset(study_uid, series_uid, "1.2.3.4.5.6.1.2"))
+    ok1 = send_ct(
+        "127.0.0.1", receiver.port, "GATEWAY",
+        make_dataset(study_uid, series_uid, "1.2.3.4.5.6.1.1"),
+    )
+    ok2 = send_ct(
+        "127.0.0.1", receiver.port, "GATEWAY",
+        make_dataset(study_uid, series_uid, "1.2.3.4.5.6.1.2"),
+    )
 
     assert ok1 is True and ok2 is True
     studies = receiver.spool._db.list_studies()

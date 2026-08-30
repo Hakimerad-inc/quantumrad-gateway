@@ -16,6 +16,7 @@ Deviation note (per quality bar):
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -61,16 +62,40 @@ class GeneralConfig(BaseModel):
 
 
 class ReceiverConfig(BaseModel):
-    """Local DICOM C-STORE SCP settings."""
+    """Local DICOM C-STORE SCP settings.
+
+    ``port=0`` is allowed in code/tests: it asks the OS for an ephemeral port
+    (resolved after the transport binds; see ``Receiver.port``). Config files
+    should always set a real port.
+    """
 
     ae_title: str = Field(default="GATEWAY", min_length=1, max_length=16)
-    port: int = Field(default=11112, ge=1, le=65535)
+    port: int = Field(default=11112, ge=0, le=65535)
+    max_associations: int = Field(
+        default=25,
+        ge=1,
+        le=256,
+        description=(
+            "Maximum concurrent DICOM associations (US-01 AC: ≥25 modalities "
+            "can push simultaneously)."
+        ),
+    )
     accept_compressed: bool = True
     decompress_common: bool = Field(
         default=True,
         description=(
             "Decompress common compressed syntaxes (JPEG 2000, JPEG-LS, RLE) on receive. "
             "Rare/proprietary syntaxes are passed through as-is."
+        ),
+    )
+    auto_enqueue_delay_sec: float = Field(
+        default=5.0,
+        ge=0.0,
+        description=(
+            "Idle window (seconds) after the last received instance before a study "
+            "is auto-enqueued to the enabled destinations (US-03). The delay "
+            "debounces multi-instance studies so the forwarder never delivers a "
+            "half-received study; modalities do not signal end-of-study."
         ),
     )
     allowed_ae_titles: list[str] = Field(
@@ -209,6 +234,11 @@ class ReportConfig(BaseModel):
     enabled: bool = False
     query_source: ReportQuerySource | None = None
     poll_interval_sec: int = Field(default=300, ge=10)
+    sla_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="SLA window (seconds) for report retrieval. Exceeded → SLA_EXPIRED event (K3).",
+    )
     on_retrieval: Literal["store", "store_and_forward"] = "store"
     report_types: list[Literal["sr", "pdf"]] = Field(
         default_factory=lambda: list(_DEFAULT_REPORT_TYPES),
@@ -233,13 +263,46 @@ class AuditConfig(BaseModel):
 
     local: bool = True
     encrypt: bool = True
+    phi_scope: Literal["minimal", "full"] = Field(
+        default="minimal",
+        description=(
+            "PHI scoping for audit events and exports (§6.4). 'minimal' omits "
+            "patient-identifying fields (patient_name, mrn) from audit detail "
+            "and exports; 'full' records them. Default = minimal."
+        ),
+    )
+    retention_days: int = Field(
+        default=365,
+        ge=1,
+        description=(
+            "Audit log retention window (days). Events older than this are "
+            "pruned (default 1 year per PRD §7). Applies to the audit chain "
+            "and the rotating text log."
+        ),
+    )
     hub_reporting: HubReporting = Field(default_factory=HubReporting)
+
+
+def _default_spool_dir() -> str:
+    """Platform-appropriate default spool directory.
+
+    Windows: ``C:\\mercure-gateway\\spool`` (PRD baseline).  Elsewhere the
+    user's data dir (``~/.local/share/mercure-gateway/spool``) — a hardcoded
+    ``C:\\...`` string would otherwise become a *literal relative directory
+    name* on POSIX systems.
+    """
+    if sys.platform == "win32":
+        return "C:\\mercure-gateway\\spool"
+    return str(Path.home() / ".local" / "share" / "mercure-gateway" / "spool")
 
 
 class StorageConfig(BaseModel):
     """Spool directory and retention settings."""
 
-    spool_dir: str = "C:\\mercure-gateway\\spool"
+    spool_dir: str = Field(
+        default_factory=_default_spool_dir,
+        description="Root directory for the DICOM spool and database.",
+    )
     max_spool_gb: int = Field(default=20, ge=1)
     retention_delivered_days: int = Field(default=3, ge=0)
     disk_full_warning_pct: int = Field(
@@ -323,6 +386,14 @@ class CredentialsConfig(BaseModel):
     encrypted: bool = Field(
         default=True,
         description="Encrypt credential values at rest.  Disable for dev/test only.",
+    )
+    salt: str | None = Field(
+        default=None,
+        description=(
+            "Base64-encoded PBKDF2 salt.  Set once when the configuration is "
+            "first locked with a master password.  Must be present when "
+            "``encrypted`` is true."
+        ),
     )
     entries: dict[str, CredentialEntry] = Field(
         default_factory=dict,

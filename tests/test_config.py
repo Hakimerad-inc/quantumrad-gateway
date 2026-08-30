@@ -36,8 +36,10 @@ def test_default_config_roundtrips_to_json(tmp_path) -> None:
 
 
 def test_invalid_receiver_port_rejected() -> None:
-    with pytest.raises(ValidationError):
-        GatewayConfig.model_validate({"receiver": {"port": 0}})
+    # Negative and >65535 are always invalid (0 = ephemeral, tests only).
+    for bad_port in (-1, 65536, 70000):
+        with pytest.raises(ValidationError):
+            GatewayConfig.model_validate({"receiver": {"port": bad_port}})
 
 
 def test_invalid_log_level_rejected() -> None:

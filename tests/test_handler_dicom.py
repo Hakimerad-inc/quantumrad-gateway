@@ -12,9 +12,18 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
+import pydicom
 import pytest
 from pydicom.dataset import FileDataset, FileMetaDataset
-from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
+from pydicom.uid import (
+    AllTransferSyntaxes,
+    CTImageStorage,
+    ExplicitVRLittleEndian,
+    JPEGBaseline8Bit,
+    JPEGLossless,
+    RLELossless,
+    generate_uid,
+)
 from pynetdicom import AE, evt
 from pynetdicom.sop_class import CTImageStorage as CTContext
 
@@ -44,7 +53,11 @@ def make_dicom_file(path: Path, study_uid: str, series_uid: str, instance_uid: s
 
 @pytest.fixture()
 def dicom_scp() -> Iterator[tuple[list[object], int]]:
-    """Run a real C-STORE SCP on an ephemeral port; yields (received, port)."""
+    """Run a real C-STORE SCP on an ephemeral port; yields (received, port).
+
+    Accepts CT with ALL transfer syntaxes (like modern PACS — and like the
+    gateway's own receiver), so compressed studies can be delivered in tests.
+    """
     received: list[object] = []
 
     def handle_store(event: object) -> int:
@@ -52,7 +65,12 @@ def dicom_scp() -> Iterator[tuple[list[object], int]]:
         return 0x0000
 
     scp = AE(ae_title="TESTSCP")
-    scp.add_supported_context(CTContext)
+    scp.add_supported_context(CTContext, AllTransferSyntaxes)
+    # pydicom's AllTransferSyntaxes omits RLE Lossless — accept it explicitly
+    # so compressed-as-stored studies can be delivered (review F7).
+    scp.add_supported_context(CTContext, RLELossless)
+    scp.add_supported_context(CTContext, JPEGBaseline8Bit)
+    scp.add_supported_context(CTContext, JPEGLossless)
     server = scp.start_server(
         ("127.0.0.1", 0),
         evt_handlers=[(evt.EVT_C_STORE, handle_store)],
@@ -159,6 +177,57 @@ def test_no_files_on_disk_fails(
 
     assert count == 1
     assert spool.state(study_id) == StudyState.FAILED
+
+
+# ── Slice 5 (review F7): compressed transfer syntax must forward ───────
+
+
+def test_compressed_study_forwards_to_live_scp(
+    tmp_path: Path, dicom_scp: tuple[list[object], int]
+) -> None:
+    """A study stored with JPEG 2000 (e.g. decompress_common=false or codec
+    unavailable) must still deliver — the SCU negotiates compressed
+    presentation contexts (review F7)."""
+    received, port = dicom_scp
+    spool = make_spool(tmp_path)
+    study_uid = "1.2.3.4.5.6"
+    series_uid = "1.2.3.4.5.6.1"
+
+    from pydicom.uid import RLELossless
+
+    path = tmp_path / "spool" / study_uid / series_uid / "1.dcm"
+    make_dicom_file(path, study_uid, series_uid, generate_uid())
+    # Re-write as RLE Lossless: add minimal 8-bit pixel data (1x1) so pydicom
+    # can encode it (RLE needs no external codec), then compress. This mirrors
+    # a study stored as-is because decompress_common is off or the codec for
+    # the received syntax was unavailable.
+    ds = pydicom.dcmread(str(path))
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.Rows = 1
+    ds.Columns = 1
+    ds.BitsAllocated = 8
+    ds.BitsStored = 8
+    ds.HighBit = 7
+    ds.PixelRepresentation = 0
+    ds.PixelData = b"\x80"
+    ds.compress(RLELossless)
+    ds.save_as(str(path), enforce_file_format=True)
+
+    study_id = spool.receive(study_uid)
+    target = DICOMDestination(
+        name="pacs", type="dicom", host="127.0.0.1", port=port, aet_target="TESTSCP"
+    )
+    spool.enqueue(study_id, [target])
+
+    fwd = make_forwarder(spool, target, max_attempts=1)
+    count = fwd.process_once()
+
+    assert count == 1
+    assert spool.state(study_id) == StudyState.SENT, (
+        "compressed study failed to forward — SCU offered no compressed context"
+    )
+    assert len(received) == 1
 
 
 # ── Slice 4: SCP rejects association ───────────────────────────────────

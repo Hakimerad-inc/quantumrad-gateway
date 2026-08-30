@@ -37,12 +37,12 @@ decision artifact, benchmark, or CI gate. Everything else is explicit RED→GREE
 
 | Sprint | Weeks | Theme | User stories | Status |
 |--------|-------|-------|--------------|--------|
-| [01](sprint-01.md) | 1–2 | Phase 0 — spikes, Orthanc rig, demo chain | (enablers, Q1/Q6/Q7) | ☐ |
-| [02](sprint-02.md) | 3–4 | Receiver SCP + spool file storage | US-01, US-02 | ☐ |
-| [03](sprint-03.md) | 5–6 | Forwarding engine completion + app wiring | US-03, US-04 | ☐ |
-| [04](sprint-04.md) | 7–8 | Audit hardening + encrypted config + operator console v0 | US-07, K5 | ☐ |
-| [05](sprint-05.md) | 9–10 | Reports MVP (DICOM SR + PDF via C-FIND/C-MOVE) | US-05, US-06 | ☐ |
-| [06](sprint-06.md) | 11–12 | Tauri shell + web admin panel + Windows packaging | US-08, K4, K6 | ☐ |
+| [01](sprint-01.md) | 1–2 | Phase 0 — spikes, Orthanc rig, demo chain | (enablers, Q1/Q6/Q7) | 🔄 (T5/T8 blocked: hub team, USB hardware) |
+| [02](sprint-02.md) | 3–4 | Receiver SCP + spool file storage | US-01, US-02 | ✅ (148 passed, mypy+ruff clean) |
+| [03](sprint-03.md) | 5–6 | Forwarding engine completion + app wiring | US-03, US-04 | ✅ (185 passed, mypy+ruff clean) |
+| [04](sprint-04.md) | 7–8 | Audit hardening + encrypted config + operator console v0 | US-07, K5 | ✅ (237 passed, mypy+ruff clean) |
+| [05](sprint-05.md) | 9–10 | Reports MVP (DICOM SR + PDF via C-FIND/C-MOVE) | US-05, US-06 | ✅ (266 passed, mypy+ruff clean) |
+| [06](sprint-06.md) | 11–12 | Tauri shell + web admin panel + Windows packaging | US-08, K4, K6 | 🔄 (T1–T6 ✅, T9/T10 artifact pending, T7/T8 → S09) |
 | [07](sprint-07.md) | 13–14 | v1.1 destinations + forwarding rules | US-09 | ☐ |
 | [08](sprint-08.md) | 15–16 | Hub reporting + pluggable report transports + Linux | US-10, US-11 | ☐ |
 | [09](sprint-09.md) | 17–18 | Hardening, perf/security gates, release candidate | all | ☐ |

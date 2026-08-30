@@ -12,6 +12,14 @@ build/
 .venv/
 uv.lock
 
+# Node / SPA build
+web/node_modules/
+web/*.tsbuildinfo
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+src-tauri/gen/schemas/
+
 # IDE
 .vscode/
 .idea/
@@ -36,10 +44,12 @@ dist/
 
 # Runtime
 spool/
+"C:\mercure-gateway\spool"/
 *.db
 *.db-wal
 *.db-shm
 mercure-gateway.json
+operations.log
 
 # Prototypes (spike artifacts, not production code)
 prototypes/

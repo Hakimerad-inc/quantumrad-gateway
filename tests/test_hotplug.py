@@ -13,15 +13,12 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from mercure_gateway.hotplug import (
     HotplugDetector,
     clear_shutdown_marker,
     has_shutdown_marker,
     write_shutdown_marker,
 )
-
 
 # ── Shutdown marker tests ───────────────────────────────────────────
 

@@ -1,0 +1,17 @@
+{
+  "Name": "mercure-gateway-test-pacs",
+  "DicomAet": "ORTHANC",
+  "DicomPort": 4242,
+  "AuthenticationEnabled": false,
+  "DicomModalities": {
+    "GATEWAY": ["GATEWAY", "127.0.0.1", 11112],
+    "GATEWAY-DEMO": ["GATEWAY-DEMO", "127.0.0.1", 11112]
+  },
+  "DicomCheckCalledAet": false,
+  "DicomAlwaysAllowEcho": true,
+  "DicomAlwaysAllowStore": true,
+  "DicomAlwaysAllowFind": true,
+  "DicomAlwaysAllowMove": true,
+  "DicomAlwaysAllowGet": true,
+  "StorageCompression": true
+}

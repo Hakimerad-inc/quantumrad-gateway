@@ -31,10 +31,15 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
-__all__ = ["HotplugDetector", "write_shutdown_marker", "has_shutdown_marker", "clear_shutdown_marker"]
+__all__ = [
+    "HotplugDetector",
+    "write_shutdown_marker",
+    "has_shutdown_marker",
+    "clear_shutdown_marker",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,10 @@ _SHUTDOWN_MARKER = ".shutdown"
 # Default poll interval and flush timeout per usb-dongle-gateway-spec §7.2
 _DEFAULT_POLL_INTERVAL_SEC = 2.0
 _FLUSH_TIMEOUT_SEC = 10.0
+
+# Consecutive failed probes required before declaring removal (debounces
+# transient stat errors such as AV scans).
+_REMOVAL_THRESHOLD = 2
 
 
 def write_shutdown_marker(spool_dir: Path) -> None:
@@ -110,6 +119,7 @@ class HotplugDetector:
         self._enabled = enabled
         self._running = False
         self._thread: threading.Thread | None = None
+        self._failures = 0
         self._device_path = self._resolve_device_path()
 
     # -- public API -------------------------------------------------------
@@ -146,8 +156,6 @@ class HotplugDetector:
         try:
             # Resolve the real path and find its mount point
             resolved = os.path.realpath(str(self._spool_dir))
-            # Walk up to find a /sys/block device
-            parts = Path(resolved).parts
             # On Linux, removable devices are typically /dev/sdX mounted somewhere
             stat = os.stat(resolved)
             dev_num = stat.st_dev
@@ -172,22 +180,31 @@ class HotplugDetector:
         return None
 
     def _is_device_removed(self) -> bool:
-        """Return ``True`` if the storage device has been removed."""
-        # Method 1: sysfs remove file (Linux)
-        if self._device_path is not None:
-            try:
-                # If the sysfs path no longer exists, device is gone
-                if not self._device_path.exists():
-                    return True
-                # Read the remove file — writing '1' means removal triggered
-                content = self._device_path.read_text().strip()
-                if content == "1":
-                    return True
-            except OSError:
-                return True
-            return False
+        """Return ``True`` if the storage device has been removed.
 
-        # Method 2: Cross-platform — try to stat the spool directory
+        Requires ``_REMOVAL_THRESHOLD`` consecutive failures so a transient
+        ``os.stat`` error (AV scan, permission hiccup) doesn't trigger a full
+        shutdown.
+        """
+        removed = self._probe_device_removed()
+        if removed:
+            self._failures += 1
+        else:
+            self._failures = 0
+        return self._failures >= _REMOVAL_THRESHOLD
+
+    def _probe_device_removed(self) -> bool:
+        """Single removal probe (no debouncing).
+
+        The spool FILESYSTEM is the source of truth: ``os.stat`` on the
+        directory fails only when the underlying device is gone.
+
+        The sysfs ``remove`` attribute is never read (review F9): it is
+        write-only (root reads ``''``, non-root gets PermissionError), so a
+        read can only ever false-positive. Its mere existence does not prove
+        the device is alive either — sysfs nodes can vanish during a re-scan
+        while the mount is fine — so only the stat probe decides.
+        """
         try:
             os.stat(str(self._spool_dir))
             return False

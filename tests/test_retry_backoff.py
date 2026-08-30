@@ -73,6 +73,7 @@ def test_zero_delay_retry_exhausts_to_failed(target_hub: DICOMDestination) -> No
     assert len(handler.attempts) == 3
 
 
+@pytest.mark.slow
 def test_backoff_holds_route_against_other_workers(
     target_hub: DICOMDestination,
 ) -> None:

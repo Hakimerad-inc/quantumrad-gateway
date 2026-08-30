@@ -25,6 +25,7 @@ mercure-gateway = "mercure_gateway.main:main"
 dev = [
     "mypy>=1.10",
     "pytest>=8.0",
+    "pytest-timeout>=2.3",
     "ruff>=0.5",
     "httpx2>=2.12,<3",
 ]
@@ -50,3 +51,15 @@ exclude = ["tests", "build", "dist", "\\.venv"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-ra --strict-markers"
+norecursedirs = [".*", "__pycache__", "*.egg"]
+timeout = 120
+filterwarnings = [
+    "ignore:'write_like_original' is deprecated:DeprecationWarning:pydicom.filewriter",
+    "ignore:Invalid value for VR UI:UserWarning:pydicom.valuerep",
+    "ignore:The decoded RLE segment:UserWarning:pydicom.pixels",
+]
+markers = [
+    "slow: duration > 5s (e.g. retry backoff, wire tests)",
+    "integration: requires external infrastructure (DICOM, live server)",
+]

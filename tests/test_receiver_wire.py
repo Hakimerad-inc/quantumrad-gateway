@@ -130,6 +130,7 @@ def test_wrong_aet_rejected_over_wire(tmp_path: Path) -> None:
 # ── Concurrency: ≥25 simultaneous associations (US-01 AC) ─────────────
 
 
+@pytest.mark.slow
 def test_25_concurrent_associations(tmp_path: Path) -> None:
     spool = make_spool(tmp_path)
     recv = Receiver(

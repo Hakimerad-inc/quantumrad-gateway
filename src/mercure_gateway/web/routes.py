@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,6 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from mercure_gateway import __version__
+from mercure_gateway.audit import AuditLog
 from mercure_gateway.config import GatewayConfig
 from mercure_gateway.redact import (
     CREDENTIAL_ENTRY_FIELDS,
@@ -573,7 +575,6 @@ def list_audit(
 @router.get("/audit/verify")
 def verify_audit(request: Request) -> dict[str, Any]:
     """Verify audit chain integrity."""
-    from mercure_gateway.audit import AuditLog
 
     sp = _spool(request)
     audit = AuditLog(sp._db)
@@ -682,6 +683,74 @@ def get_logs(
 
 
 # ---------------------------------------------------------------------------
+# Diagnostics bundle export  (§7, S09-T5)
+# ---------------------------------------------------------------------------
+
+@router.get("/diagnostics/export")
+def diagnostics_export(request: Request) -> JSONResponse:
+    """One-click support bundle: redacted config + audit + spool summary.
+
+    Serves a downloadable JSON bundle for support triage (S09-T5).  Secrets
+    are redacted via :func:`redact_config` (reuses the S04-T2 path); PHI
+    scoping follows the audit ``phi_scope`` the same way the audit export
+    does, so the bundle never leaks credentials or patient identifiers.
+    """
+
+    sp = _spool(request)
+    cfg = _config(request)
+
+    # Redacted configuration (never serializes real secrets).
+    config_data = json.loads(cfg.model_dump_json())
+    redacted = redact_config(config_data)
+
+    # Structured audit events (PHI-scoped like the audit export).
+    audit = AuditLog(sp._db)
+    phi_scope = getattr(cfg.audit, "phi_scope", "minimal")
+    phf_fields = ("patient_name", "mrn", "patient_id")
+    events: list[dict[str, Any]] = []
+    for row in sp._db.list_audit_events(limit=1000):
+        detail = json.loads(row["detail"])
+        if phi_scope == "minimal":
+            for field in phf_fields:
+                detail.pop(field, None)
+        events.append(
+            {
+                "id": row["id"],
+                "ts": row["ts"],
+                "event": row["event"],
+                "detail": detail,
+                "user": row["user"],
+                "hash": row["hash"],
+            }
+        )
+
+    # Spool summary by state.
+    counts = sp._db.count_states()
+    spool_summary = {
+        "total": sum(counts.values()),
+        "states": dict(counts),
+    }
+
+    bundle = {
+        "config": redacted,
+        "audit": {
+            "events": events,
+            "count": len(events),
+            "head_hash": audit.head_hash(),
+        },
+        "spool": spool_summary,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "version": __version__,
+    }
+    return JSONResponse(
+        content=bundle,
+        headers={
+            "Content-Disposition": 'attachment; filename="mercure-gateway-diagnostics.json"',
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Operator console v0  (§2.2 Flow B — read-only dashboard)
 # ---------------------------------------------------------------------------
 
@@ -693,7 +762,6 @@ def console_dashboard(request: Request) -> dict[str, Any]:
     chain head hash and the tail of the rotating text log (when configured on
     ``app.state.text_log_path``) into one response for the console SPA.
     """
-    from mercure_gateway.audit import AuditLog
     from mercure_gateway.web.console import ConsoleService
 
     sp = _spool(request)

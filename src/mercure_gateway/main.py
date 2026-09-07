@@ -138,11 +138,21 @@ def _run_web_admin(
     app.state.forwarder = forwarder
     app.state.report_retriever = report_retriever
     app.state.hub_status = _build_hub_status(config)
+    # Destination health monitor (pipeline view): daemon thread, stopped when
+    # uvicorn exits the blocking call below.
+    from mercure_gateway.web.pipeline import DestinationHealthMonitor
+
+    health_monitor = DestinationHealthMonitor(config)
+    health_monitor.start()
+    app.state.health_monitor = health_monitor
     if text_log is not None:
         app.state.text_log_path = str(text_log._path)
     host = config.web_ui.host
     print(f"  web admin : http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="info")
+    finally:
+        health_monitor.stop()
 
 
 def main(argv: list[str] | None = None) -> int:

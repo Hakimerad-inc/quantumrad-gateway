@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { StudySummary } from "../api";
 import { fetchStudies, retryStudy, requestReport } from "../api";
+import { IconInbox, IconChevronLeft, IconChevronRight } from "../ui/icons";
 
 const PAGE_SIZE = 50;
 
@@ -62,6 +63,7 @@ export default function QueueView() {
       <h2>Study Queue</h2>
       {error && <div className="error-banner">Error: {error}</div>}
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+        <div className="table-wrap">
         <table>
           <thead>
             <tr>
@@ -77,9 +79,9 @@ export default function QueueView() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={8} className="empty">Loading...</td></tr>
+              <tr><td colSpan={8} className="loading">Loading studies</td></tr>
             ) : !data || data.items.length === 0 ? (
-              <tr><td colSpan={8} className="empty"><div className="icon">📁</div>No studies in queue</td></tr>
+              <tr><td colSpan={8} className="empty"><span className="icon"><IconInbox size={28} /></span><br />No studies in queue</td></tr>
             ) : (
               data.items.map((s) => (
                 <tr key={s.id}>
@@ -105,17 +107,18 @@ export default function QueueView() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
       {data && data.total > PAGE_SIZE && (
         <div className="pagination">
           <button className="btn" disabled={page <= 1} onClick={() => setPage(page - 1)}>
-            ← Prev
+            <IconChevronLeft size={14} /> Prev
           </button>
           <span className="page-info">
             Page {page} of {totalPages} ({data.total} total)
           </span>
           <button className="btn" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
-            Next →
+            Next <IconChevronRight size={14} />
           </button>
         </div>
       )}

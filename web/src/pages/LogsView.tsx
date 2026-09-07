@@ -26,31 +26,28 @@ export default function LogsView() {
   return (
     <div>
       <h2>Operations Log</h2>
-      <div className="card" style={{ marginBottom: 12 }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          <label style={{ color: "var(--muted)", fontSize: 12 }}>
-            Lines
-            <select
-              value={limit}
-              onChange={(e) => setLimit(Number(e.target.value))}
-              style={{ marginLeft: 6, background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 8px" }}
-            >
-              {[50, 100, 200, 500].map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
-          <label style={{ color: "var(--muted)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+      <div className="toolbar">
+        <label className="check">
+          Lines
+          <select
+            value={limit}
+            onChange={(e) => setLimit(Number(e.target.value))}
+          >
+            {[50, 100, 200, 500].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+          <label className="check">
             <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
             Auto-refresh (5s)
           </label>
           <button className="btn" onClick={load}>Refresh</button>
-          <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: "auto" }}>
+          <span className="hint" style={{ marginLeft: "auto" }}>
             showing last {lines.length} of {total} lines
           </span>
-        </div>
       </div>
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         {lines.length === 0 ? (
-          <div className="empty"><div className="icon">📜</div>No log lines</div>
+          <div className="empty">No log lines</div>
         ) : (
           <pre style={{ maxHeight: 600, overflowY: "auto", padding: 12 }}>{lines.join("\n")}</pre>
         )}

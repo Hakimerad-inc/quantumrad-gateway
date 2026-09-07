@@ -41,6 +41,10 @@ def echo_destination(
         return probe
 
     ae = AE(ae_title=destination.aet_source)
+    # Verification (C-ECHO) first; some SCPs (e.g. QuantumPACS) only
+    # advertise Storage contexts and reject the Verification SOP class, so
+    # fall back to negotiating a Storage context to at least prove the
+    # association layer works end to end.
     ae.add_requested_context(Verification)
     try:
         assoc = ae.associate(
@@ -51,7 +55,24 @@ def echo_destination(
     except Exception:  # noqa: BLE001 — boundary: any association failure
         return "refused"
     if not assoc.is_established:
-        return "refused"
+        from pynetdicom.presentation import build_context
+        from pynetdicom.sop_class import CTImageStorage  # noqa: F401 — any storage UID works
+
+        ae.requested_contexts = [build_context(CTImageStorage)]
+        try:
+            assoc = ae.associate(
+                destination.host,
+                destination.port,
+                ae_title=destination.aet_target,
+            )
+        except Exception:  # noqa: BLE001
+            return "refused"
+        if not assoc.is_established:
+            return "refused"
+        # Association accepted on a Storage context — reachable, though we
+        # cannot C-ECHO it. Treat TCP+association success as "ok".
+        assoc.release()
+        return "ok"
     try:
         status = assoc.send_c_echo()
         if status is None:

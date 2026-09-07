@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { ReportRow, ReportContent } from "../api";
 import { fetchReports, fetchReportContent, refreshReport } from "../api";
+import { IconFileStack, IconRefresh } from "../ui/icons";
 
 const STATUS_BADGE: Record<string, string> = {
   retrieved: "green",
@@ -33,10 +34,10 @@ export default function ReportsView() {
   return (
     <div>
       <h2>Reports</h2>
-      <div style={{ display: "flex", gap: 16 }}>
-        <div className="card" style={{ padding: 0, overflow: "hidden", flex: 1 }}>
+      <div className="split">
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
           {reports.length === 0 ? (
-            <div className="empty"><div className="icon">📄</div>No reports</div>
+            <div className="empty"><span className="icon"><IconFileStack size={28} /></span><br />No reports</div>
           ) : (
             <table>
               <thead>
@@ -48,14 +49,14 @@ export default function ReportsView() {
                     <td>{r.id}</td>
                     <td><span className={`badge ${r.report_type === "pdf" ? "blue" : "green"}`}>{r.report_type}</span></td>
                     <td><span className={`badge ${STATUS_BADGE[r.status] || "gray"}`}>{r.status}</span></td>
-                    <td className="mono" style={{ fontSize: 11 }} title={r.study_uid}>
+                    <td className="mono" title={r.study_uid}>
                       {r.study_uid.length > 20 ? `${r.study_uid.slice(0, 20)}…` : r.study_uid}
                     </td>
-                    <td className="mono" style={{ fontSize: 11 }}>{r.retrieved_at || "—"}</td>
+                    <td className="mono">{r.retrieved_at || "—"}</td>
                     <td>
                       {r.status !== "retrieved" && (
                         <button className="btn" onClick={(e) => { e.stopPropagation(); doRefresh(r.id); }}>
-                          Refresh
+                          <IconRefresh size={13} /> Refresh
                         </button>
                       )}
                     </td>
@@ -67,7 +68,7 @@ export default function ReportsView() {
         </div>
 
         {selected && (
-          <div className="card" style={{ flex: 1, minWidth: 300 }}>
+          <div className="card">
             <div className="card-header">
               Report #{selected.report_id} — {selected.report_type} ({selected.status})
             </div>

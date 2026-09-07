@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
-import type React from "react";
 import { fetchConfig, saveConfig } from "../api";
+import { IconCheck, IconX, IconChevronLeft, IconChevronRight } from "../ui/icons";
 
 const STEPS = ["receiver", "destinations", "reports", "summary"];
 
@@ -120,7 +120,10 @@ export default function SetupWizardPage() {
       <div>
         <h2>Setup Complete</h2>
         <div className="card">
-          <div className="card-header" style={{ fontSize: 16 }}>✓ Configuration saved</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600 }}>
+            <span style={{ color: "var(--green)", display: "inline-flex" }}><IconCheck size={18} /></span>
+            Configuration saved
+          </div>
           <p style={{ color: "var(--muted)", marginTop: 8 }}>
             The gateway is configured and running. You can now receive and forward DICOM studies.
           </p>
@@ -132,19 +135,14 @@ export default function SetupWizardPage() {
   return (
     <div>
       <h2>Setup Wizard</h2>
-      <div className="card" style={{ marginBottom: 12 }}>
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+      <div className="card">
+        <div className="steps">
           {STEPS.map((s, i) => (
             <span
               key={s}
-              style={{
-                flex: 1, padding: "8px 12px", borderRadius: 6, textAlign: "center",
-                background: i === step ? "var(--accent-dim)" : i < step ? "rgba(34,197,94,0.12)" : "var(--surface2)",
-                color: i === step ? "var(--accent)" : i < step ? "var(--green)" : "var(--muted)",
-                fontSize: 12, fontWeight: 600,
-              }}
+              className={`step ${i === step ? "current" : i < step ? "done" : ""}`}
             >
-              {i < step ? "✓ " : ""}{STEP_LABELS[s]}
+              {i < step ? <IconCheck size={13} /> : null}{STEP_LABELS[s]}
             </span>
           ))}
         </div>
@@ -159,20 +157,20 @@ export default function SetupWizardPage() {
           {currentStep === "receiver" && (
             <div>
               <div className="card-header">Receiver Settings</div>
-              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+              <div className="field-row">
                 <label>
-                  <div className="label">AE Title</div>
+                  <span className="label">AE Title</span>
                   <input
-                    style={inputStyle}
+                    className="input"
                     value={data.receiver.ae_title}
                     onChange={(e) => setData((d) => ({ ...d, receiver: { ...d.receiver, ae_title: e.target.value } }))}
                   />
                 </label>
                 <label>
-                  <div className="label">Port</div>
+                  <span className="label">Port</span>
                   <input
+                    className="input"
                     type="number"
-                    style={inputStyle}
                     value={data.receiver.port}
                     onChange={(e) => setData((d) => ({ ...d, receiver: { ...d.receiver, port: Number(e.target.value) } }))}
                   />
@@ -185,14 +183,14 @@ export default function SetupWizardPage() {
             <div>
               <div className="card-header">Destinations</div>
               {data.destinations.map((dest, i) => (
-                <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-                  <input placeholder="Name" style={inputStyle} value={dest.name}
+                <div key={i} className="dest-row">
+                  <input className="input" name="name" placeholder="Name" value={dest.name}
                     onChange={(e) => updateDest(i, "name", e.target.value)} />
-                  <input placeholder="Host" style={inputStyle} value={dest.host}
+                  <input className="input" name="host" placeholder="Host" value={dest.host}
                     onChange={(e) => updateDest(i, "host", e.target.value)} />
-                  <input type="number" placeholder="Port" style={{ ...inputStyle, width: 80 }} value={dest.port}
+                  <input className="input" name="port" type="number" placeholder="Port" value={dest.port}
                     onChange={(e) => updateDest(i, "port", Number(e.target.value))} />
-                  <input placeholder="AET" style={{ ...inputStyle, width: 80 }} value={dest.aet}
+                  <input className="input" name="aet" placeholder="AET" value={dest.aet}
                     onChange={(e) => updateDest(i, "aet", e.target.value)} />
                   <button className="btn" onClick={() => handleEcho(dest)}>Echo</button>
                   {echoStatus[dest.host + ":" + dest.port] && (
@@ -200,7 +198,9 @@ export default function SetupWizardPage() {
                       {echoStatus[dest.host + ":" + dest.port]}
                     </span>
                   )}
-                  <button className="btn danger" onClick={() => removeDest(i)}>✕</button>
+                  <button className="btn danger icon-only" aria-label={`Remove destination ${dest.name || i + 1}`} onClick={() => removeDest(i)}>
+                    <IconX size={14} />
+                  </button>
                 </div>
               ))}
               <button className="btn" onClick={addDestination}>+ Add Destination</button>
@@ -210,15 +210,15 @@ export default function SetupWizardPage() {
           {currentStep === "reports" && (
             <div>
               <div className="card-header">Reports (Optional)</div>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <label className="check" style={{ marginBottom: 12 }}>
                 <input type="checkbox" checked={data.reports.enabled}
                   onChange={(e) => setData((d) => ({ ...d, reports: { ...d.reports, enabled: e.target.checked } }))} />
                 Enable report retrieval
               </label>
               {data.reports.enabled && (
                 <label>
-                  <div className="label">Query Source (host:port)</div>
-                  <input style={inputStyle} value={data.reports.query_source || ""}
+                  <span className="label">Query Source (host:port)</span>
+                  <input className="input" value={data.reports.query_source || ""}
                     onChange={(e) => setData((d) => ({ ...d, reports: { ...d.reports, query_source: e.target.value } }))} />
                 </label>
               )}
@@ -236,13 +236,13 @@ export default function SetupWizardPage() {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8 }}>
+      <div className="toolbar">
         <button className="btn" onClick={handleBack} disabled={step === 0}>
-          ← Back
+          <IconChevronLeft size={14} /> Back
         </button>
         {step < STEPS.length - 1 ? (
           <button className="btn primary" onClick={handleNext}>
-            Next →
+            Next <IconChevronRight size={14} />
           </button>
         ) : (
           <button className="btn primary" onClick={handleSave} disabled={saving}>
@@ -253,8 +253,3 @@ export default function SetupWizardPage() {
     </div>
   );
 }
-
-const inputStyle: React.CSSProperties = {
-  background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)",
-  borderRadius: 6, padding: "8px 12px", fontSize: 13, fontFamily: "var(--mono)",
-};

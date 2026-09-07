@@ -63,3 +63,4 @@ htmlcov/
 # Windows-path bug artifact (literal dir name created on Linux by the pre-fix
 # _default_spool_dir bug) — runtime junk, never commit
 C:\\mercure-gateway\\
+.spool/

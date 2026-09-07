@@ -5,9 +5,21 @@ import LogsView from "./pages/LogsView";
 import ReportsView from "./pages/ReportsView";
 import AuditView from "./pages/AuditView";
 import SetupWizardPage from "./pages/SetupWizard";
+import PipelineView from "./pages/PipelineView";
 import { fetchQueueStats, fetchSystemStatus } from "./api";
+import {
+  IconBrand,
+  IconPulse,
+  IconQueue,
+  IconBolt,
+  IconFileText,
+  IconShield,
+  IconSettings,
+  IconTerminal,
+  IconWorkflow,
+} from "./ui/icons";
 
-type Page = "dashboard" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
+type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
 
 function Dashboard() {
   const [status, setStatus] = useState<{ receiver: string; forwarder: string; report_retriever: string; uptime_sec: number; version: string; hub_registered: boolean | null; hub_streaming: boolean | null } | null>(null);
@@ -20,10 +32,6 @@ function Dashboard() {
 
   const dot = (running: string) => (
     <span className={`status-dot ${running === "running" ? "green" : "gray"}`} />
-  );
-
-  const hubDot = (ok: boolean | null) => (
-    <span className={`status-dot ${ok === true ? "green" : ok === false ? "gray" : "gray"}`} />
   );
 
   return (
@@ -53,7 +61,7 @@ function Dashboard() {
             <div className="label">Registration</div>
             <div className="value">
               {status && status.hub_registered !== null
-                ? <>{hubDot(status.hub_registered)}{status.hub_registered ? "registered" : "not registered"}</>
+                ? <>{dot(status.hub_registered ? "running" : "stopped")}{status.hub_registered ? "registered" : "not registered"}</>
                 : "—"}
             </div>
           </div>
@@ -61,7 +69,7 @@ function Dashboard() {
             <div className="label">Event Streaming</div>
             <div className="value">
               {status && status.hub_streaming !== null
-                ? <>{hubDot(status.hub_streaming)}{status.hub_streaming ? "active" : "inactive"}</>
+                ? <>{dot(status.hub_streaming ? "running" : "stopped")}{status.hub_streaming ? "active" : "inactive"}</>
                 : "—"}
             </div>
           </div>
@@ -81,38 +89,58 @@ function Dashboard() {
   );
 }
 
-const NAV: Array<{ key: Page; icon: string; label: string }> = [
-  { key: "dashboard", icon: "◉", label: "Dashboard" },
-  { key: "queue", icon: "↻", label: "Queue" },
-  { key: "setup", icon: "⚡", label: "Setup" },
-  { key: "reports", icon: "📄", label: "Reports" },
-  { key: "audit", icon: "☰", label: "Audit" },
-  { key: "config", icon: "⚙", label: "Config" },
-  { key: "logs", icon: "📜", label: "Logs" },
+const NAV: Array<{ key: Page; icon: React.ReactNode; label: string }> = [
+  { key: "dashboard", icon: <IconPulse />, label: "Dashboard" },
+  { key: "pipeline", icon: <IconWorkflow />, label: "Pipeline" },
+  { key: "queue", icon: <IconQueue />, label: "Queue" },
+  { key: "setup", icon: <IconBolt />, label: "Setup" },
+  { key: "reports", icon: <IconFileText />, label: "Reports" },
+  { key: "audit", icon: <IconShield />, label: "Audit" },
+  { key: "config", icon: <IconSettings />, label: "Config" },
+  { key: "logs", icon: <IconTerminal />, label: "Logs" },
 ];
 
+const PAGES = new Set(NAV.map((n) => n.key));
+
+function pageFromHash(): Page {
+  const h = window.location.hash.replace(/^#\/?/, "");
+  return (PAGES.has(h as Page) ? h : "dashboard") as Page;
+}
+
 export default function App() {
-  const [page, setPage] = useState<Page>("dashboard");
+  const [page, setPage] = useState<Page>(pageFromHash);
   const [version, setVersion] = useState("");
 
   useEffect(() => {
     fetchSystemStatus().then((s) => setVersion(s.version)).catch(() => {});
+    const onHash = () => setPage(pageFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  const navigate = (key: Page) => {
+    window.location.hash = `/${key}`;
+    setPage(key);
+  };
 
   return (
     <div className="shell">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h1>Mercure Gateway</h1>
-          <div className="version">{version ? `v${version}` : ""}</div>
+          <span className="brand-mark"><IconBrand size={17} /></span>
+          <div>
+            <h1>Mercure Gateway</h1>
+            <div className="version">{version ? `v${version}` : ""}</div>
+          </div>
         </div>
         <nav>
           {NAV.map((item) => (
             <a
               key={item.key}
-              href="#"
+              href={`#/${item.key}`}
               className={page === item.key ? "active" : ""}
-              onClick={(e) => { e.preventDefault(); setPage(item.key); }}
+              aria-current={page === item.key ? "page" : undefined}
+              onClick={(e) => { e.preventDefault(); navigate(item.key); }}
             >
               <span className="icon">{item.icon}</span> {item.label}
             </a>
@@ -122,6 +150,7 @@ export default function App() {
       </aside>
       <main className="main">
         {page === "dashboard" && <Dashboard />}
+        {page === "pipeline" && <PipelineView />}
         {page === "queue" && <QueueView />}
         {page === "setup" && <SetupWizardPage />}
         {page === "reports" && <ReportsView />}

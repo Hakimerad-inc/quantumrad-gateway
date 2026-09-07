@@ -104,3 +104,62 @@ def test_unknown_target_complete_raises(spool: Spool) -> None:
     study_id = spool.receive("1.2.3.4")
     with pytest.raises(KeyError):
         spool.complete(study_id, "nope")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Pipeline read queries (count_routes_by_target / list_recent_routes /
+# list_audit_for_study)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_count_routes_by_target(spool: Spool, target_hub: DICOMDestination) -> None:
+    study_id = spool.receive("1.2.3.4")
+    spool.enqueue(study_id, [target_hub])
+    spool.claim_next(limit=1)
+    spool.complete(study_id, "hub")
+
+    study2 = spool.receive("1.2.3.5")
+    spool.enqueue(study2, [target_hub])
+    spool.claim_next(limit=1)
+    spool.fail(study2, "hub", error="boom")
+
+    rollup = {
+        (row["target_name"], row["status"]): row["n"]
+        for row in spool._db.count_routes_by_target()
+    }
+    assert rollup[("hub", "complete")] == 1
+    assert rollup[("hub", "error")] == 1
+
+
+def test_list_recent_routes_orders_and_joins(
+    spool: Spool, target_hub: DICOMDestination
+) -> None:
+    study_id = spool.receive("1.2.3.4", accession="A1", modality="CT")
+    spool.enqueue(study_id, [target_hub])
+    spool.claim_next(limit=1)
+
+    rows = spool._db.list_recent_routes("hub")
+    assert len(rows) == 1
+    assert rows[0]["accession"] == "A1"
+    assert rows[0]["modality"] == "CT"
+    assert rows[0]["status"] == "sending"
+    assert rows[0]["study_uid"] == "1.2.3.4"
+    assert spool._db.list_recent_routes("nope") == []
+
+
+def test_list_audit_for_study_matches_uid(
+    spool: Spool, target_hub: DICOMDestination
+) -> None:
+    from mercure_gateway.audit import AuditLog
+
+    audit = AuditLog(spool._db)
+    spool._audit = audit
+    study_id = spool.receive("1.2.840.10008.99.1", accession="A1")
+    spool.enqueue(study_id, [target_hub])
+
+    events = spool._db.list_audit_for_study("1.2.840.10008.99.1")
+    names = {row["event"] for row in events}
+    assert "STUDY_RECEIVED" in names
+    assert "STUDY_QUEUED" in names
+    # An unrelated study UID must match nothing.
+    assert spool._db.list_audit_for_study("9.9.9.9") == []

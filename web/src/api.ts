@@ -166,3 +166,90 @@ export async function saveConfig(payload: Record<string, unknown>): Promise<bool
   });
   return res.ok;
 }
+
+// ── Pipeline flow view ───────────────────────────────────────────────
+
+export interface DestinationHealth {
+  status: string;
+  checked_at: string;
+  latency_ms: number;
+}
+
+export interface DestinationNode {
+  name: string;
+  type: string;
+  routes: { complete: number; sending: number; waiting: number; error: number };
+  last_activity: string | null;
+  host?: string;
+  port?: number;
+  aet?: string;
+  health?: DestinationHealth | null;
+}
+
+export interface PipelineSnapshot {
+  components: { receiver: boolean; forwarder: boolean; reports: boolean };
+  queue: QueueStats;
+  receiver_counts: { received_last_hour: number };
+  destinations: DestinationNode[];
+  generated_at: string;
+}
+
+export function fetchPipeline(): Promise<PipelineSnapshot> {
+  return getJson<PipelineSnapshot>("/api/pipeline");
+}
+
+export interface DestinationRouteRow {
+  route_id: number;
+  study_id: number;
+  target_type: string;
+  status: string;
+  attempts: number;
+  last_error: string | null;
+  updated_at: string;
+  study_uid: string;
+  accession: string | null;
+  patient_name: string | null;
+  modality: string | null;
+}
+
+export function fetchDestinationStudies(name: string): Promise<DestinationRouteRow[]> {
+  return getJson<DestinationRouteRow[]>(`/api/destinations/${encodeURIComponent(name)}/studies`);
+}
+
+export interface StudyRouteDetail {
+  id: number;
+  target_name: string;
+  target_type: string;
+  status: string;
+  attempts: number;
+  last_error: string | null;
+  updated_at: string;
+  next_retry_sec: number | null;
+}
+
+export interface StudyDetail {
+  id: number;
+  study_uid: string;
+  accession: string | null;
+  modality: string | null;
+  patient_name: string | null;
+  state: string;
+  created_at: string;
+  routes: StudyRouteDetail[];
+}
+
+export function fetchStudyDetail(studyId: number): Promise<StudyDetail> {
+  return getJson<StudyDetail>(`/api/studies/${studyId}/detail`);
+}
+
+export interface TimelineEvent {
+  id: number;
+  ts: string;
+  event: string;
+  detail: Record<string, unknown>;
+  user: string | null;
+}
+
+export function fetchStudyTimeline(studyId: number): Promise<TimelineEvent[]> {
+  return getJson<TimelineEvent[]>(`/api/studies/${studyId}/timeline`);
+}

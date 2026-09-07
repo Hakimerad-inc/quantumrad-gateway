@@ -317,6 +317,102 @@ def retry_study(request: Request, study_id: int) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline visualization endpoints  (§7.2 — flow view)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/pipeline")
+def pipeline(request: Request) -> dict[str, Any]:
+    """One-shot payload for the Pipeline flow view (components + queue +
+    per-destination rollups with cached C-ECHO health)."""
+    from mercure_gateway.web.pipeline import pipeline_snapshot
+
+    sp = _spool(request)
+    receiver = getattr(request.app.state, "receiver", None)
+    forwarder = getattr(request.app.state, "forwarder", None)
+    retriever = getattr(request.app.state, "report_retriever", None)
+    monitor = getattr(request.app.state, "health_monitor", None)
+    return pipeline_snapshot(
+        request.app.state.config,
+        sp,
+        monitor.snapshot() if monitor is not None else None,
+        receiver_running=bool(receiver and receiver.is_running),
+        forwarder_running=bool(forwarder and forwarder.is_running),
+        reports_running=bool(retriever and getattr(retriever, "is_running", False)),
+    )
+
+
+@router.get("/destinations")
+def list_destinations(request: Request) -> list[dict[str, Any]]:
+    """Read-only summary of configured destinations (no credentials)."""
+    out: list[dict[str, Any]] = []
+    for dest in request.app.state.config.destinations:
+        entry: dict[str, Any] = {
+            "name": dest.name,
+            "type": dest.type,
+            "enabled": dest.enabled,
+        }
+        if dest.type == "dicom":
+            entry.update(host=dest.host, port=dest.port, aet=dest.aet_target)
+        out.append(entry)
+    return out
+
+
+@router.get("/destinations/{name}/studies")
+def destination_studies(request: Request, name: str) -> list[dict[str, Any]]:
+    """Latest studies routed to one destination (pipeline drill-down)."""
+    return [
+        _row_to_dict(r) for r in _spool(request)._db.list_recent_routes(name, limit=20)
+    ]
+
+
+@router.get("/studies/{study_id}/detail")
+def study_detail(request: Request, study_id: int) -> dict[str, Any]:
+    """Study detail with per-route forwarding state and computed next-retry.
+
+    ``next_retry_sec`` is derived from the forwarder's backoff schedule
+    (5 * 2**(attempt-1)) for routes in ``error`` — it is never persisted.
+    """
+    from mercure_gateway.forwarder import RetryPolicy
+
+    sp = _spool(request)
+    row = sp._db.get_study(study_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Study {study_id} not found")
+    policy = RetryPolicy()
+    routes = []
+    for r in sp._db.get_routes(study_id):
+        entry = _row_to_dict(r)
+        entry["next_retry_sec"] = (
+            policy.delay(entry["attempts"]) if entry["status"] == "error" else None
+        )
+        routes.append(entry)
+    result = _row_to_dict(row)
+    result["routes"] = routes
+    return result
+
+
+@router.get("/studies/{study_id}/timeline")
+def study_timeline(request: Request, study_id: int) -> list[dict[str, Any]]:
+    """Audit events touching a study, newest first (pipeline timeline)."""
+    import json as _json
+
+    sp = _spool(request)
+    row = sp._db.get_study(study_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Study {study_id} not found")
+    events = []
+    for e in sp._db.list_audit_for_study(row["study_uid"], limit=50):
+        entry = _row_to_dict(e)
+        try:
+            entry["detail"] = _json.loads(entry["detail"]) if entry["detail"] else {}
+        except (TypeError, ValueError):
+            pass
+        events.append(entry)
+    return events
+
+
+# ---------------------------------------------------------------------------
 # Config endpoints  (§7.1)
 # ---------------------------------------------------------------------------
 

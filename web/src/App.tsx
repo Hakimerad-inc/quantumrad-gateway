@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { AuthProvider, useAuth } from "./context/AuthContext";
 import QueueView from "./pages/QueueView";
 import ConfigView from "./pages/ConfigView";
 import LogsView from "./pages/LogsView";
@@ -6,7 +7,8 @@ import ReportsView from "./pages/ReportsView";
 import AuditView from "./pages/AuditView";
 import SetupWizardPage from "./pages/SetupWizard";
 import PipelineView from "./pages/PipelineView";
-import { fetchQueueStats, fetchSystemStatus } from "./api";
+import LoginView from "./pages/LoginView";
+import { fetchQueueStats, fetchSystemStatus, navigate } from "./api";
 import {
   IconBrand,
   IconPulse,
@@ -17,9 +19,10 @@ import {
   IconSettings,
   IconTerminal,
   IconWorkflow,
+  IconLogout,
 } from "./ui/icons";
 
-type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
+type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup" | "login";
 
 function Dashboard() {
   const [status, setStatus] = useState<{ receiver: string; forwarder: string; report_retriever: string; uptime_sec: number; version: string; hub_registered: boolean | null; hub_streaming: boolean | null } | null>(null);
@@ -89,6 +92,22 @@ function Dashboard() {
   );
 }
 
+// Protected route wrapper
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <div className="loading">Loading…</div>;
+  }
+
+  if (!isAuthenticated) {
+    navigate('login');
+    return null;
+  }
+
+  return <>{children}</>;
+}
+
 const NAV: Array<{ key: Page; icon: React.ReactNode; label: string }> = [
   { key: "dashboard", icon: <IconPulse />, label: "Dashboard" },
   { key: "pipeline", icon: <IconWorkflow />, label: "Pipeline" },
@@ -107,9 +126,10 @@ function pageFromHash(): Page {
   return (PAGES.has(h as Page) ? h : "dashboard") as Page;
 }
 
-export default function App() {
+function AppContent() {
   const [page, setPage] = useState<Page>(pageFromHash);
   const [version, setVersion] = useState("");
+  const { isAuthenticated, logout, isLoading: authLoading } = useAuth();
 
   useEffect(() => {
     fetchSystemStatus().then((s) => setVersion(s.version)).catch(() => {});
@@ -118,10 +138,25 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const navigate = (key: Page) => {
+  const handleNavigate = (key: Page) => {
     window.location.hash = `/${key}`;
     setPage(key);
   };
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('login');
+  };
+
+  // Show login page when not authenticated (and not loading)
+  if (!isAuthenticated && !authLoading) {
+    return <LoginView onLogin={() => setPage("dashboard")} />;
+  }
+
+  // Show loading state while checking auth
+  if (authLoading) {
+    return <div className="shell"><main className="main"><div className="loading">Loading…</div></main></div>;
+  }
 
   return (
     <div className="shell">
@@ -140,24 +175,39 @@ export default function App() {
               href={`#/${item.key}`}
               className={page === item.key ? "active" : ""}
               aria-current={page === item.key ? "page" : undefined}
-              onClick={(e) => { e.preventDefault(); navigate(item.key); }}
+              onClick={(e) => { e.preventDefault(); handleNavigate(item.key); }}
             >
               <span className="icon">{item.icon}</span> {item.label}
             </a>
           ))}
         </nav>
-        <div className="sidebar-footer">mercure-gateway</div>
+        <div className="sidebar-footer">
+          <button className="logout-btn" onClick={handleLogout} title="Sign out">
+            <IconLogout size={16} />
+            <span>Sign out</span>
+          </button>
+        </div>
       </aside>
       <main className="main">
-        {page === "dashboard" && <Dashboard />}
-        {page === "pipeline" && <PipelineView />}
-        {page === "queue" && <QueueView />}
-        {page === "setup" && <SetupWizardPage />}
-        {page === "reports" && <ReportsView />}
-        {page === "audit" && <AuditView />}
-        {page === "config" && <ConfigView />}
-        {page === "logs" && <LogsView />}
+        <ProtectedRoute>
+          {page === "dashboard" && <Dashboard />}
+          {page === "pipeline" && <PipelineView />}
+          {page === "queue" && <QueueView />}
+          {page === "setup" && <SetupWizardPage />}
+          {page === "reports" && <ReportsView />}
+          {page === "audit" && <AuditView />}
+          {page === "config" && <ConfigView />}
+          {page === "logs" && <LogsView />}
+        </ProtectedRoute>
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }

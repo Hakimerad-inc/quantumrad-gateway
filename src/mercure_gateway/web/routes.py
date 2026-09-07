@@ -507,9 +507,55 @@ def export_config(request: Request) -> JSONResponse:
 
 
 @router.post("/config/import")
-def import_config(request: Request) -> dict[str, str]:
-    """Import configuration from uploaded JSON (stub — full impl in S06)."""
-    return {"status": "ok", "message": "Config import accepted"}
+async def import_config(request: Request) -> dict[str, str]:
+    """Import configuration from uploaded JSON file.
+
+    Accepts multipart/form-data with a 'file' field containing the JSON config.
+    Validates config_version (must be '1.0'), restores redacted secrets from
+    current config, validates the full config, and persists to config_path.
+    """
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+
+    # Get the uploaded file
+    form = await request.form()
+    file: StarletteUploadFile | str | None = form.get("file")
+    if not file or isinstance(file, str) or not hasattr(file, "read"):
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    # Read and parse JSON
+    content = await file.read()
+    try:
+        payload: dict[str, Any] = json.loads(content.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+
+    # Validate config_version
+    config_version = payload.get("config_version", "1.0")
+    if config_version != "1.0":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported config_version: {config_version}. Expected '1.0'.",
+        )
+
+    # Restore redacted secrets from current config (same logic as PUT /config)
+    restored = _restore_redacted_secrets(payload, _config(request))
+
+    # Validate full config
+    try:
+        updated = GatewayConfig.model_validate(restored)
+    except Exception as exc:  # noqa: BLE001 — surface validation as 400
+        raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
+
+    # Persist to disk if config_path is configured
+    config_path: object = getattr(request.app.state, "config_path", None)
+    if config_path:
+        from mercure_gateway.config import save_config
+
+        save_config(updated, str(config_path))
+
+    # Update in-memory config
+    request.app.state.config = updated
+    return {"status": "ok", "message": "Config import saved"}
 
 
 # ---------------------------------------------------------------------------

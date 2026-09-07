@@ -253,3 +253,9 @@ export interface TimelineEvent {
 export function fetchStudyTimeline(studyId: number): Promise<TimelineEvent[]> {
   return getJson<TimelineEvent[]>(`/api/studies/${studyId}/timeline`);
 }
+
+// ── Navigation helper ────────────────────────────────────────────────
+
+export function navigate(page: string): void {
+  window.location.hash = `#/${page}`;
+}

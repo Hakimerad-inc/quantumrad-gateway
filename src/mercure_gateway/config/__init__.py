@@ -440,6 +440,10 @@ class USBModeConfig(BaseModel):
 class GatewayConfig(BaseModel):
     """Root model for ``mercure-gateway.json``."""
 
+    config_version: str = Field(
+        default="1.0",
+        description="Configuration schema version for migration compatibility.",
+    )
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     receiver: ReceiverConfig = Field(default_factory=ReceiverConfig)
     destinations: list[Destination] = Field(default_factory=list)

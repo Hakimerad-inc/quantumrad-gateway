@@ -21,6 +21,8 @@ checklists ticked.
 | S09-T7 | **Release candidate sweep (no TDD):** run both exit checklists in README; tag v1.1.0-rc1; QA matrix per Q8 (Win10/11 x64, Ubuntu) | §9, §13 Q8 | all checklist items ticked | RC tagged; §12 metrics baseline captured | ☐ |
 | S09-T8 | **Web admin panel hardening:** XSS prevention, CSRF tokens, input validation on all API endpoints; security headers (CSP, HSTS) | refinement §7 | `tests/test_web_security.py` — XSS payloads rejected; CSRF enforced; security headers present | Web UI security hardened | ✅ |
 | S09-T9 | **USB-specific perf baseline (no TDD):** measure boot → gateway ready time on USB (Linux mode + Windows mode); hot-unplug flush time; recovery scan time; record against K9/K10 targets | usb-dongle-spec §10 | perf measurements recorded in `docs/qa/usb-perf-09.md` | K9/K10 baseline established for Sprint 10 | ☐ |
+| S06-T7 | **Config import/export (moved from Sprint 06):** export `mercure-gateway.json` from web UI; import via file upload; config_version field for migration | refinement §2.4 | `tests/test_config_import_export.py` — 7 tests: file upload, validation, secret preservation, version check | Air-gapped config deployment works | ✅ |
+| S06-T8 | **Web UI auth (moved from Sprint 06):** `web_ui.auth_enabled` gate; bcrypt/sha256 password hash; session cookie; 401 enforcement; React SPA login page, auth context, protected routes, logout | refinement §7 | `tests/test_web_api.py` — 3 backend auth tests; `web/src/pages/LoginView.test.tsx` — 4 frontend tests; `web/src/context/AuthContext.tsx`; `web/src/pages/LoginView.tsx`; `web/src/App.tsx` updated | Shared-machine security ready | ✅ |
 
 **Evidence:** _(links to commits/PRs when done)_
 
@@ -33,3 +35,4 @@ checklists ticked.
 - S09-T8 is new — hardens the web admin panel built in Sprint 06 against common web vulnerabilities.
 - S09-T9 is new — establishes USB performance baselines before Sprint 10 builds the full USB variant.
 - S09-T6 expands the docs scope to include a USB dongle quick-start guide (feeds Sprint 10).
+- S06-T7/S06-T8 completed in this sprint — config import/export (7 new tests) and web UI auth backend (3 auth tests)

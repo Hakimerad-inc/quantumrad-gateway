@@ -332,8 +332,18 @@ def test_export_config(client: TestClient) -> None:
     assert "general" in data
 
 
-def test_import_config(client: TestClient) -> None:
-    r = client.post("/api/config/import")
+def test_import_config(client: TestClient, tmp_path) -> None:
+    """POST /config/import with valid file upload."""
+    config_path = tmp_path / "gw.json"
+    from mercure_gateway.config import save_config
+
+    save_config(default_config(), config_path)
+    client.app.state.config_path = str(config_path)
+
+    import_json = default_config().model_dump_json()
+    files = {"file": ("mercure-gateway.json", import_json, "application/json")}
+    r = client.post("/api/config/import", files=files)
+
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
 

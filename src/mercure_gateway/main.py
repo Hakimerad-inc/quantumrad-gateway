@@ -1,23 +1,56 @@
-"""Console entry point for mercure-gateway (scaffold).
+"""Console entry point for mercure-gateway.
 
-Loads configuration, opens the spool database, starts the receiver + spool and
-prints a status banner. The desktop shell (``ui.run_desktop``) is a placeholder
-per PRD §5.1 / §13 Q1.
+Loads configuration, opens the spool database, wires the store-and-forward
+pipeline (receiver → spool → forwarder with DICOM handler per destination)
+and optionally launches the web admin panel (FastAPI on localhost:8080).
+The desktop shell is the Tauri wrapper per ADR-0002.
+
+Composition root: this module owns construction and shutdown ordering of all
+components — hub reporting, receiver, forwarder, hotplug detector, disk
+monitor, web admin, database. Shutdown order is the reverse of construction:
+disk monitor → web → hotplug → forwarder → receiver → report retriever → hub
+streamer flush → database close.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import logging
+import signal
 import sys
+import threading
 from pathlib import Path
+from typing import Any
 
 from mercure_gateway import __version__
-from mercure_gateway.config import default_config, load_config, save_config
+from mercure_gateway.config import (
+    GatewayConfig,
+    apply_env_overrides,
+    apply_usb_defaults,
+    default_config,
+    detect_usb_mode,
+    load_config,
+    save_config,
+)
+from mercure_gateway.disk import DiskMonitor
+from mercure_gateway.forwarder import Forwarder
+from mercure_gateway.hotplug import (
+    HotplugDetector,
+    run_shutdown_sequence,
+    write_shutdown_marker,
+)
+from mercure_gateway.hub_client import HubClient
+from mercure_gateway.hub_events import HubEventStreamer
 from mercure_gateway.receiver import Receiver
+from mercure_gateway.recovery import recover
 from mercure_gateway.spool import Spool
-from mercure_gateway.spool.db import open_database
+from mercure_gateway.spool.db import Database, open_database
+from mercure_gateway.textlog import TextLog
 
 __all__ = ["main"]
+
+logger = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,12 +74,207 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write a default mercure-gateway.json and exit",
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Launch the web admin panel (FastAPI on localhost:8080)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Web admin port (default: from config or 8080)",
+    )
     return parser
+
+
+def _warn_insecure(config: GatewayConfig) -> None:
+    """Warn about insecure web-panel settings at startup."""
+    ui = config.web_ui
+    if not ui.auth_enabled and ui.host not in ("127.0.0.1", "localhost"):
+        logger.warning(
+            "web_ui.auth_enabled is false while binding to %s — the admin API "
+            "(PHI, credentials, start/stop) is unauthenticated on the network. "
+            "Enable auth or bind to 127.0.0.1.",
+            ui.host,
+        )
+
+
+def _install_shutdown_signal_handlers(shutdown_done: threading.Event) -> None:
+    """Force SIGINT/SIGTERM to trigger graceful headless shutdown.
+
+    Python only installs its default ``KeyboardInterrupt`` handler at startup
+    when SIGINT is not already ignored (POSIX background-job semantics). Under
+    test harnesses and some service managers SIGINT can be inherited as
+    ignored, which would silently defeat Ctrl+C shutdown. Explicitly
+    installing a non-raising handler makes shutdown deterministic regardless
+    of the inherited disposition.
+    """
+
+    def _request_shutdown(signum: int, _frame: Any) -> None:
+        shutdown_done.set()
+
+    signal.signal(signal.SIGINT, _request_shutdown)
+    signal.signal(signal.SIGTERM, _request_shutdown)
+
+
+def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) -> Forwarder:
+    """Register a handler for every enabled destination.
+
+    Every target type the config models (dicom, dicom_tls, dicomweb, sftp,
+    rsync, s3, folder, xnat) is wired here — previously only ``dicom`` was, so
+    a ``sftp``/``s3``/… destination could never be delivered (review C3).
+    Handlers are registered *per destination* (``target_name``): a type-only
+    registry would collapse two enabled destinations of the same type onto the
+    last handler and misdeliver every study.
+    """
+    from mercure_gateway.audit import AuditLog
+    from mercure_gateway.forwarder.handlers.dicom import DICOMHandler, DICOMTLSHandler
+    from mercure_gateway.forwarder.handlers.dicomweb import DICOMwebHandler
+    from mercure_gateway.forwarder.handlers.folder import FolderHandler
+    from mercure_gateway.forwarder.handlers.rsync import RsyncHandler
+    from mercure_gateway.forwarder.handlers.s3 import S3Handler
+    from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+    from mercure_gateway.forwarder.handlers.xnat import XNATHandler
+
+    forwarder = Forwarder(config, spool, audit=AuditLog(database))
+    for destination in config.destinations:
+        if not destination.enabled:
+            continue
+        if destination.type == "dicom":
+            forwarder.register_handler(
+                "dicom", DICOMHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "dicom_tls":
+            forwarder.register_handler(
+                "dicom_tls", DICOMTLSHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "dicomweb":
+            forwarder.register_handler(
+                "dicomweb", DICOMwebHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "sftp":
+            forwarder.register_handler(
+                "sftp", SFTPHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "rsync":
+            forwarder.register_handler(
+                "rsync", RsyncHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "s3":
+            forwarder.register_handler(
+                "s3", S3Handler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "folder":
+            forwarder.register_handler(
+                "folder", FolderHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "xnat":
+            forwarder.register_handler(
+                "xnat", XNATHandler(destination, spool), target_name=destination.name
+            )
+        else:
+            logger.warning(
+                "no forwarding handler for destination type %r (destination %r)",
+                destination.type,
+                destination.name,
+            )
+    return forwarder
+
+
+def _register_hub_in_background(hub_status: dict[str, Any], client: Any) -> None:
+    """Register with the hub bookkeeper on a daemon thread (never blocks boot)."""
+
+    def _run() -> None:
+        try:
+            result = client.register()
+            hub_status["registered"] = bool(getattr(result, "ok", False))
+        except Exception as exc:  # noqa: BLE001 — boundary: registration must not kill the gateway
+            hub_status["registered"] = False
+            hub_status["error"] = str(exc)
+        finally:
+            hub_status["registering"] = False
+
+    threading.Thread(target=_run, name="hub-registration", daemon=True).start()
+
+
+def _start_hub_reporting(
+    config: GatewayConfig, audit: Any
+) -> tuple[dict[str, Any] | None, HubEventStreamer | None]:
+    """Wire hub event streaming + registration when enabled; else ``(None, None)``.
+
+    Returns a live hub-status dict (mutated by the background registration
+    thread and read by the web admin panel) and the started streamer.  When hub
+    reporting is disabled or under-configured, returns ``(None, None)``.
+    """
+    hub = config.audit.hub_reporting
+    if not hub.enabled or not hub.bookkeeper_url:
+        return None, None
+    if not hub.api_key:
+        logger.warning("audit.hub_reporting enabled but api_key is empty — hub reporting stays off")
+        return None, None
+    streamer = HubEventStreamer(hub.bookkeeper_url, hub.api_key, config.general.appliance_name)
+    streamer.start()
+    audit.set_sink(lambda event, detail, _user: streamer.feed(event, detail))
+    hub_status: dict[str, Any] = {
+        "registered": False,
+        "registering": True,
+        "streaming": streamer.is_running,
+        "bookkeeper_url": hub.bookkeeper_url,
+    }
+    client = HubClient(
+        hub.bookkeeper_url,
+        hub.api_key,
+        config.general.appliance_name,
+        __version__,
+    )
+    _register_hub_in_background(hub_status, client)
+    logger.info("hub reporting enabled (bookkeeper %s)", hub.bookkeeper_url)
+    return hub_status, streamer
+
+
+def _run_web_admin(
+    config: GatewayConfig,
+    spool: Spool,
+    receiver: Receiver,
+    forwarder: Forwarder,
+    report_retriever: Any,
+    port: int,
+    text_log: TextLog | None = None,
+    config_path: Path | None = None,
+    hub_status: dict[str, Any] | None = None,
+) -> None:
+    """Start the FastAPI web admin panel (blocking)."""
+    import uvicorn
+
+    from mercure_gateway.web import create_app
+
+    app = create_app(config, spool, config_path=config_path)
+    app.state.receiver = receiver
+    app.state.forwarder = forwarder
+    app.state.report_retriever = report_retriever
+    app.state.hub_status = hub_status
+    # Destination health monitor (pipeline view): daemon thread, stopped when
+    # uvicorn exits the blocking call below.
+    from mercure_gateway.web.pipeline import DestinationHealthMonitor
+
+    health_monitor = DestinationHealthMonitor(config)
+    health_monitor.start()
+    app.state.health_monitor = health_monitor
+    if text_log is not None:
+        app.state.text_log_path = str(text_log._path)
+    host = config.web_ui.host
+    print(f"  web admin : http://{host}:{port}")
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="info")
+    finally:
+        health_monitor.stop()
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the gateway console entry point; returns a process exit code."""
     args = _build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     if args.write_default_config:
         save_config(default_config(), args.config)
@@ -60,22 +288,168 @@ def main(argv: list[str] | None = None) -> int:
         save_config(config, args.config)
         print(f"No configuration found; wrote default to {args.config}")
 
+    # 12-factor overrides: MERCURE_GATEWAY_* env vars win over the config file
+    # (secrets such as the hub api_key can be injected without touching disk).
+    config = apply_env_overrides(config)
+
+    # USB variant auto-detection (S10-T5): when the spool directory lives on
+    # removable media, adopt the USB profile — aggressive retention, disk-full
+    # purge at 90 % capacity, storage budgeted to the data partition — before
+    # any pipeline component is constructed from the config.
+    if not config.usb_mode.enabled and detect_usb_mode(config.storage.spool_dir):
+        config.usb_mode.enabled = True
+        apply_usb_defaults(config)
+        logger.info(
+            "USB variant detected: spool on removable media — usb_mode.enabled; "
+            "retention %dh, disk-full purge at 90%%",
+            config.usb_mode.retention_delivered_hours,
+        )
+
+    _warn_insecure(config)
+
     spool_dir = Path(config.storage.spool_dir)
     spool_dir.mkdir(parents=True, exist_ok=True)
-    database = open_database(spool_dir / "mercure-gateway.db")
-    spool = Spool(database, config)
+    # Activate the at-rest guard on the spool database (review H3): when a master
+    # password is configured, open_database derives an HMAC verifier from it so a
+    # database opened with a different/again key is refused (ADR-0004). True
+    # SQLite *encryption* still requires SQLCipher — documented as a follow-up.
+    from mercure_gateway.config.encryption import load_master_password
+
+    database = open_database(spool_dir / "mercure-gateway.db", encrypt_key=load_master_password())
+    from mercure_gateway.audit import AuditLog
+
+    audit = AuditLog(database)
+
+    # Hub reporting (S08): streams every audit event to the bookkeeper and
+    # registers the gateway in the background — boot never blocks on the hub.
+    hub_status, hub_streamer = _start_hub_reporting(config, audit)
+
+    # Operations text log alongside the SQLite audit chain (S04-T3).
+    text_log = TextLog(
+        spool_dir / "operations.log",
+        phi_scope=config.audit.phi_scope,
+    )
+    text_log.info("gateway starting")
+
+    spool = Spool(database, config, audit=audit)
+
+    # Retention: purge expired delivered studies on startup (US-04).
+    purged = spool.purge_delivered()
+    if purged:
+        print(f"  retention : {purged} expired delivered study(ies) purged")
+
+    # Recovery scan — reconcile spool files with DB only after an unclean
+    # shutdown (the scan is skipped after a clean one so the DICOM port
+    # binds immediately).
+    recovery_result = recover(spool)
+    if recovery_result.ran:
+        print(
+            f"  recovery  : {recovery_result.studies_recovered} recovered, "
+            f"{recovery_result.files_without_db} orphaned files registered"
+        )
+
+    # Audit retention: prune old events on startup (S04-T7).
+    pruned_audit = audit.prune(config.audit.retention_days)
+    if pruned_audit:
+        print(
+            f"  audit     : {pruned_audit} event(s) pruned "
+            f"(retention {config.audit.retention_days}d)"
+        )
 
     receiver = Receiver(config.receiver, spool)
     receiver.start()
 
+    forwarder = _build_forwarder(config, spool, database)
+    forwarder.start()
+
+    from mercure_gateway.reports import ReportRetriever
+
+    report_retriever = ReportRetriever(config.reports, database, spool, audit=audit)
+    report_retriever.start()
+
+    shutdown_done = threading.Event()
+
+    # Hot-unplug detection (USB mode only). The removal callback delegates to
+    # the §7.2 sequence (hotplug.run_shutdown_sequence): receiver.stop →
+    # bounded flush → fsynced shutdown marker, each step best-effort because
+    # the device may vanish at any instant (review F10).
+    def _on_usb_removal() -> None:
+        run_shutdown_sequence(
+            stop_receiver=receiver.stop,
+            flush=lambda: hub_streamer.flush(timeout=5.0) if hub_streamer else None,
+            spool_dir=spool.spool_dir,
+            flush_timeout_sec=config.usb_mode.flush_timeout_sec,
+        )
+        print("\nUSB device removed — gateway shut down safely")
+        shutdown_done.set()
+
+    hotplug = HotplugDetector(
+        spool.spool_dir,
+        _on_usb_removal,
+        enabled=config.usb_mode.enabled and config.usb_mode.hot_unplug_safe,
+    )
+    hotplug.start()
+
+    disk_monitor = DiskMonitor(
+        spool,
+        warning_pct=config.storage.disk_full_warning_pct,
+        purge_on_full=config.storage.purge_on_disk_full,
+    )
+    disk_monitor.start()
+
     print(f"mercure-gateway {__version__}")
     print(f"  receiver  : AET={config.receiver.ae_title} port={config.receiver.port}")
+    print(f"  forwarder : {forwarder.is_running and 'running' or 'stopped'}")
     print(f"  spool     : {spool.spool_dir}")
     print(f"  queued    : {spool.queued_count()} studies awaiting delivery")
+    if hub_status is not None:
+        print(f"  hub       : streaming to {config.audit.hub_reporting.bookkeeper_url}")
 
-    receiver.stop()
-    database.close()
-    return 0
+    exit_code = 0
+    try:
+        if args.web:
+            web_port = args.port or config.web_ui.port
+            try:
+                _run_web_admin(
+                    config,
+                    spool,
+                    receiver,
+                    forwarder,
+                    report_retriever,
+                    web_port,
+                    text_log,
+                    config_path=args.config,
+                    hub_status=hub_status,
+                )
+            except KeyboardInterrupt:
+                print("\nShutting down web admin...")
+        else:
+            # Headless mode: run until interrupt or USB removal.
+            _install_shutdown_signal_handlers(shutdown_done)
+            with contextlib.suppress(KeyboardInterrupt):
+                # Poll with a timeout so the handler (and any pending signal)
+                # is processed on the next wake-up and graceful shutdown is
+                # deterministic.
+                while not shutdown_done.wait(timeout=1.0):
+                    pass
+    finally:
+        disk_monitor.stop()
+        hotplug.stop()
+        forwarder.stop()
+        receiver.stop()
+        report_retriever.stop()
+        if hub_streamer is not None:
+            # Final flush so shutdown events reach the bookkeeper, then stop.
+            hub_streamer.flush(timeout=5.0)
+            hub_streamer.stop()
+        spool.stop()
+        # Graceful shutdown marker: its presence lets the next boot skip the
+        # recovery scan (a crash/power-loss leaves no marker → scan runs).
+        with contextlib.suppress(OSError):
+            write_shutdown_marker(spool.spool_dir)
+        database.close()
+
+    return exit_code
 
 
 if __name__ == "__main__":

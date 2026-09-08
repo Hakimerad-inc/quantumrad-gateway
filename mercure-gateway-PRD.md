@@ -106,17 +106,21 @@ A **lightweight desktop DICOM gateway** (`mercure-gateway`) built in **Python (c
 ### 2.3 Feature List (MVP → Later)
 
 **MVP (v1.0):**
-- DICOM C-STORE SCP receiver (pynetdicom), compressed syntax support
+- DICOM C-STORE SCP receiver (pynetdicom), **all** compressed syntaxes (JPEG 2000, JPEG-LS, RLE) with selective decompression
 - Local encrypted SQLite spool (persist before forward — "store-and-forward")
-- Forwarding to DICOM target(s) (dcmsend/pynetdicom C-STORE SCU) — mercure hub or PACS
-- Multiple destinations per study (configurable)
+- Forwarding to DICOM target(s) (pynetdicom C-STORE SCU) — mercure hub or PACS
+- Multiple destinations per study (configurable); **concurrent forwarding workers** (configurable limit)
+- **Basic modality include/exclude routing rules** (MVP); advanced rules in v1.1
 - Retry with exponential backoff + max attempts
-- Tray icon + simple main window (queue, status, logs, settings)
-- Local audit log (encrypted SQLite + rotating text log)
-- Guided first-run wizard
-- Report retrieval MVP: DICOM SR via C-FIND/C-MOVE (query by accession/study UID)
-- Report viewer (DICOM SR render + text/PDF)
+- **Tauri + FastAPI + React/Vue SPA** web admin panel (localhost:8080); replaces desktop shell
+- **Web-based guided first-run wizard** (in SPA browser)
+- Local audit log (chained SHA-256 hash + rotating text log)
+- Report retrieval MVP: **DICOM SR + Encapsulated PDF** via C-FIND/C-MOVE (query by accession/study UID)
+- Report viewer (SR render + embedded PDF viewer)
 - Manual re-forward and retry of failed tasks
+- **Encrypted config file** with master password (air-gapped credential storage)
+- **Config import/export** via USB (JSON file)
+- **Recovery scan** on startup (reconcile spool files with DB)
 
 **v1.1 (Windows polish + Linux):**
 - Linux builds (AppImage/deb)
@@ -126,6 +130,16 @@ A **lightweight desktop DICOM gateway** (`mercure-gateway`) built in **Python (c
 - Report retrieval pluggable transports: DICOMweb QIDO/WADO, HL7/FHIR endpoint (experimental), email-to-folder
 - Auto-update mechanism
 - Remote diagnostics bundle export (for support)
+- **Windows service mode** (headless always-on)
+- **OS keyring integration** (upgrade from encrypted config file)
+
+**USB Dongle Variant (Sprint 10):**
+- Dual-mode USB (bootable Linux + Windows auto-launch)
+- **Hot-unplug detection** with graceful shutdown sequence
+- Recovery scan on USB boot (reconcile interrupted studies)
+- LED status indicator (if hardware supports)
+- USB-specific storage budget and aggressive retention
+- USB flashing documentation + script
 
 **v2.0 (later, non-goals for MVP):**
 - Multi-gateway fleet management/central config push
@@ -238,13 +252,14 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 |-------|--------|-----------|
 | Language | **Python 3.11+** | Matches mercure core; ecosystem (pynetdicom, dcmtk bindings, pydantic) |
 | DICOM I/O | **pynetdicom** (SCP + SCU), DCMTK tools (`dcmsend`, `storescp`, `getdcmtags`) | Mercure uses DCMTK for the receiver; pynetdicom for flexible SCP/SCU |
-| Desktop shell | **Qt (PySide6)** or **Tauri** shell wrapping Python core | Native tray + window; Tauri gives a light web UI option |
-| Storage | **SQLite** (encrypted via SQLCipher) for spool + audit; filesystem for DICOM blobs | Zero-config, embedded, robust |
+| Desktop shell | **Tauri** shell wrapping **FastAPI** backend serving **React/Vue SPA** on localhost:8080 | Native tray + web admin panel; SPA works in any browser; ADR-0002 |
+| Web backend | **FastAPI** + **uvicorn** (Python) — REST API + SPA static server | Async, auto-generated OpenAPI docs, pydantic integration |
+| Storage | **SQLite** for spool + audit; filesystem for DICOM blobs | Zero-config, embedded, robust |
 | Config | **JSON + pydantic** (reuse mercure `Config`/`Target`/`Rule` models where sensible) | Consistency with mercure |
-| Packaging | **PyInstaller** (Windows .exe installer via Inno Setup); Linux AppImage/deb later | Self-contained desktop app |
+| Packaging | **Tauri bundler** + Inno Setup (Windows); AppImage/deb (Linux) | Self-contained desktop app |
 | Networking to hub | **REST/HTTPS** to mercure bookkeeper & (optional) DICOM to mercure receiver | Matches mercure architecture |
 
-> **Note:** Exact packaging/shell decision (PySide6 vs Tauri) is marked **TBD** pending prototype perf test (see §13).
+> **Decision (ADR-0002):** Tauri + FastAPI + React/Vue SPA chosen over PySide6. Communication via localhost HTTP (method 1 per ADR-0002); Tauri webview loads `http://127.0.0.1:8080`. Benchmark: ~22ms request latency, ~36MB FastAPI idle RSS, total ~70-90MB estimated (within K6 ≤150MB target).
 
 ### 5.2 Data Flow (end-to-end)
 
@@ -330,6 +345,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
     "ae_title": "GATEWAY",
     "port": 11112,
     "accept_compressed": true,
+    "decompress_common": true,          // NEW: decompress JPEG/J2K/J-LS on receive
     "allowed_ae_titles": []            // empty = accept any
   },
   "destinations": [
@@ -338,6 +354,10 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
       "aet_target": "MERCURE", "aet_source": "GATEWAY", "enabled": true },
     { "name": "pacs", "type": "dicom", "host": "pacs.local", "port": 104, "aet_target": "PACS", ... }
   ],
+  "forwarding": {                       // NEW: concurrent forwarding settings
+    "concurrency": 3,                   // max concurrent forwarding workers
+    "queue_poll_interval_ms": 500       // how often workers poll for new tasks
+  },
   "forwarding_rules": [                 // optional, v1.1 advanced
     { "rule": "tags.Modality == 'CT'", "targets": ["hub"], "priority": "normal" }
   ],
@@ -345,7 +365,8 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
     "enabled": false,
     "query_source": { "type": "dicom", "host": "pacs.local", "port": 104, "aet": "PACS" },
     "poll_interval_sec": 300,
-    "on_retrieval": "store"             // store | store_and_forward (to hub)
+    "on_retrieval": "store",            // store | store_and_forward (to hub)
+    "report_types": ["sr", "pdf"]      // NEW: which report SOP classes to retrieve
   },
   "audit": {
     "local": true,
@@ -355,7 +376,28 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
   "storage": {
     "spool_dir": "C:\\mercure-gateway\\spool",
     "max_spool_gb": 20,
-    "retention_delivered_days": 3
+    "retention_delivered_days": 3,
+    "disk_full_warning_pct": 90,        // NEW: capacity warning threshold
+    "purge_on_disk_full": false         // NEW: auto-purge oldest delivered on disk full
+  },
+  "web_ui": {                            // NEW: web admin panel settings
+    "host": "127.0.0.1",
+    "port": 8080,
+    "auth_enabled": false,               // enable for shared machines
+    "auth_password_hash": ""             // bcrypt hash; set via setup wizard
+  },
+  "credentials": {                       // NEW: encrypted credential storage
+    "encrypted": true,                   // AES-256-GCM encrypted blocks
+    "entries": {}                        // per-destination credential blocks
+  },
+  "usb_mode": {                          // NEW: USB dongle variant settings
+    "enabled": false,                    // auto-detected when spool is on removable media
+    "storage_budget_gb": 18,             // max data partition usage
+    "retention_delivered_hours": 24,     // aggressive cleanup for USB
+    "hot_unplug_safe": true,             // graceful shutdown on USB removal
+    "auto_start_on_boot": true,          // auto-start on USB boot/plug-in
+    "led_enabled": false,                // hardware LED support
+    "led_pin": "GPIO18"                  // GPIO pin for LED (Linux BCM numbering)
   }
 }
 ```
@@ -435,17 +477,21 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 ## 9. Implementation Plan (Phased Roadmap)
 
 ### Phase 0 — Discovery & Prototype (2–3 weeks)
-- Spike: PySide6 vs Tauri shell with Python core; measure startup/RAM.
+- Spike: **Tauri + FastAPI + React/Vue SPA** integration (ADR-0002); measure cold-start, RAM, communication methods.
 - Spike: pynetdicom SCP throughput + DCMTK storescp comparison.
-- Confirm report-retrieval transport priorities (DICOM SR first).
-- **Exit criteria:** working 15-min demo: modality → gateway → mercure hub; report pulled back from test PACS (Orthanc).
+- Spike: USB boot compatibility (Linux + Windows auto-launch).
+- Confirm report-retrieval transport priorities (DICOM SR + PDF).
+- **Exit criteria:** working 15-min demo: modality → gateway → mercure hub; report pulled back from test PACS (Orthanc); Tauri+FastAPI integration validated.
 
 ### Phase 1 — MVP (v1.0, ~8–10 weeks)
-- Core: receiver (SCP), spool (SQLite+files), forwarding to DICOM target(s), retry/backoff, fail-safe retention.
-- UI: tray + main window (queue/status/logs/settings), guided first-run wizard.
-- Audit: local encrypted log + chained hash.
-- Reports MVP: DICOM SR via C-FIND/C-MOVE, report viewer (text/SR render).
-- Windows packaging (Inno Setup), auto-start option.
+- Core: receiver (SCP), spool (SQLite+files), forwarding to DICOM target(s), **concurrent workers**, retry/backoff, fail-safe retention.
+- **Web admin panel**: FastAPI REST API + SPA (queue/status/logs/config/reports/audit).
+- **Web-based guided first-run wizard** (in SPA browser).
+- Audit: local encrypted log + chained SHA-256 hash.
+- Reports MVP: **DICOM SR + Encapsulated PDF** via C-FIND/C-MOVE, report viewer (SR render + embedded PDF).
+- **Encrypted config file** with master password; config import/export via USB.
+- **Recovery scan** on startup (reconcile spool files with DB).
+- Windows packaging (Tauri bundler + Inno Setup), auto-start option.
 - Docs: user guide section, admin guide.
 - **Exit criteria:** all MVP acceptance criteria (§14) green; installer tested on clean Windows VM.
 
@@ -456,7 +502,18 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 - Report retrieval pluggable transports: DICOMweb, HL7/FHIR (experimental).
 - mercure hub registration + event streaming.
 - Auto-update; diagnostics bundle export.
+- **Windows service mode** (headless always-on).
+- **OS keyring integration** (upgrade from encrypted config file).
 - **Exit criteria:** cross-platform CI green; rules feature acceptance tested.
+
+### USB Dongle Variant (~2 weeks)
+- Dual-mode USB (bootable Linux + Windows auto-launch).
+- **Hot-unplug detection** with graceful shutdown sequence.
+- Recovery scan on USB boot.
+- LED status indicator (if hardware supports).
+- USB-specific storage budget and aggressive retention.
+- USB flashing documentation + script.
+- **Exit criteria:** USB boots on 3+ PC models; hot-unplug safe; K9/K10 perf gates met.
 
 ### Phase 3 — Hardening & scale-out (v2.0+, later)
 - Fleet management / central config push (server component — new scope).
@@ -465,8 +522,8 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 - **Exit criteria:** pilot at 2–3 real sites for 1 month.
 
 ### Team & Skills Needed
-- Python backend (pynetdicom/DCMTK, async)
-- Desktop UI (Qt or Tauri)
+- Python backend (pynetdicom/DCMTK, FastAPI, async)
+- Desktop UI (Tauri + React/Vue SPA)
 - DICOM domain knowledge
 - Windows packaging + code signing
 - (Later) CI/CD, fleet server dev
@@ -517,16 +574,20 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 
 ## 13. Open Questions / TBD
 
-| # | Question | Impact | Default assumption |
-|---|----------|--------|--------------------|
-| 1 | **Shell choice**: PySide6 (Qt) vs Tauri web shell | UI dev speed, RAM | TBD by prototype; Qt baseline assumed |
-| 2 | Report retrieval transport priority after DICOM SR | Scope | DICOMweb next; HL7/FHIR experimental |
+| # | Question | Impact | Resolved |
+|---|----------|--------|----------|
+| 1 | **Shell choice**: PySide6 (Qt) vs Tauri web shell | UI dev speed, RAM | **Resolved:** Tauri + FastAPI + React/Vue SPA (ADR-0002). Benchmark: ~22ms latency, ~70-90MB total RSS. |
+| 2 | Report retrieval transport priority after DICOM SR | Scope | DICOM SR + PDF first (MVP); DICOMweb next (v1.1); HL7/FHIR experimental |
 | 3 | Should gateway run as Windows **service** (headless) or user-tray app? | Ops | Tray app (MVP); service mode v1.1 option |
 | 4 | Anonymization at the edge (v2)? | Scope | Defer to hub unless a site demands it |
 | 5 | Auto-update signing/code-signing vendor | Ops/Security | Decide before v1.1 release |
-| 6 | Licensing model for the app (MIT like mercure?) | Business | Likely MIT, consistent with mercure |
+| 6 | Licensing model for the app (MIT like mercure?) | Business | MIT, consistent with mercure |
 | 7 | Hub reporting API shape (new bookkeeper endpoints vs reuse) | Integration | Reuse/extend mercure bookkeeper; confirm in Phase 0 |
 | 8 | Minimum supported OS versions (Win10/11? Win Server?) | QA matrix | Win10/11 x64; Win Server documented-only |
+| 9 | **Tauri ↔ FastAPI communication method** | Performance | Localhost HTTP (method 1, ADR-0002); sidecar upgrade path for v1.1 |
+| 10 | **React vs Vue** for SPA | Dev velocity | React baseline; Vue alternative documented |
+| 11 | **USB device type** (flash drive vs custom embedded) | BOM cost | Standard USB 3.0 flash for MVP; custom board v1.1+ |
+| 12 | **Standalone hardware** (Raspberry Pi, external power) | Scope | Deferred to v1.1+ |
 
 ---
 
@@ -535,30 +596,37 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 ### P1 (MVP) — Receiver & Spool
 
 - **US-01** — As a clinic tech, I want the gateway to accept DICOM from any of our modalities so studies arrive automatically.
-  - AC: Receiver binds configured port/AET; accepts ≥ 25 concurrent associations; stores all instances before ack; handles compressed syntaxes; writes `.tags`.
+  - AC: Receiver binds configured port/AET; accepts ≥ 25 concurrent associations; stores all instances before ack; **handles ALL compressed syntaxes** (JPEG 2000, JPEG-LS, RLE) with selective decompression; writes `.tags`.
 - **US-02** — As an admin, I want studies persisted before forwarding so nothing is lost if a destination is down.
-  - AC: On receiver failure mid-transfer, partial study retained and marked incomplete; recovery scan on restart.
+  - AC: On receiver failure mid-transfer, partial study retained and marked incomplete; **recovery scan on startup** reconciles spool files with DB.
 
 ### P1 — Forwarding
 
 - **US-03** — As an admin, I want studies forwarded to the mercure hub (or PACS) automatically.
-  - AC: Configured destinations reachable → studies sent within 2 s of completion; per-destination status tracked.
+  - AC: Configured destinations reachable → studies sent within 2 s of completion; per-destination status tracked; **concurrent workers** (configurable `forwarding.concurrency`).
 - **US-04** — As an admin, I want automatic retries with backoff and manual re-forward of failures.
-  - AC: Retry schedule honored (`retry_delay` × attempts ≤ `retry_max`); FAILED tasks retryable from UI; local copy never auto-deleted.
+  - AC: Retry schedule honored (`retry_delay` × attempts ≤ `retry_max`); FAILED tasks retryable from UI/web admin; local copy never auto-deleted.
 
 ### P1 — Reports
 
 - **US-05** — As a radiologist, I want to retrieve reports from the PACS for a study.
-  - AC: Report lookup by Accession/Study UID; DICOM SR retrieved via C-FIND/C-MOVE; status transitions (pending→retrieved/failed) correct; retrieved report viewable.
+  - AC: Report lookup by Accession/Study UID; **DICOM SR + Encapsulated PDF** retrieved via C-FIND/C-MOVE; status transitions (pending→retrieved/failed) correct; retrieved report viewable (SR rendered + embedded PDF viewer).
 - **US-06** — As a radiologist, I want on-demand report refresh.
-  - AC: Manual "Request report" triggers immediate retrieval; result surfaced in UI.
+  - AC: Manual "Request report" triggers immediate retrieval; supports **type-specific request** (SR, PDF, or both); result surfaced in web admin.
 
 ### P1 — Audit & UI
 
 - **US-07** — As an admin, I want a complete, tamper-evident local audit log.
-  - AC: Every event recorded with chained hash; log exportable (redacted); encryption enabled by default.
+  - AC: Every event recorded with **chained SHA-256 hash**; log exportable (redacted) via web admin; encryption enabled by default.
 - **US-08** — As a clinic tech, I want a guided first-run wizard.
-  - AC: Non-technical user completes setup ≤ 10 min; connectivity validated at each step; status clearly shown.
+  - AC: Non-technical user completes **web-based setup** ≤ 10 min; connectivity validated at each step; status clearly shown in SPA.
+
+### P1 — Web Admin & Config
+
+- **US-08b** — As an admin, I want a web-based admin panel for managing the gateway.
+  - AC: FastAPI REST API with 17+ endpoints; SPA with dashboard, queue, reports, audit, config tabs; served on localhost:8080; accessible via browser or Tauri shell.
+- **US-08c** — As an admin, I want encrypted credential storage for air-gapped deployments.
+  - AC: Credentials stored as AES-256-GCM encrypted blocks in config; master password on startup; config import/export via USB.
 
 ### P2 (v1.1)
 
@@ -568,6 +636,13 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
   - AC: Registration succeeds; events appear in hub monitoring; failure of reporting does not block forwarding.
 - **US-11** — As a Linux user, I want the same gateway on Linux.
   - AC: AppImage/deb build; same feature set as Windows v1.1; CI cross-platform green.
+
+### USB Dongle Variant
+
+- **US-12** — As a clinic tech, I want to run the gateway from a USB device plugged into any workstation.
+  - AC: USB boots in **dual mode** (Linux boot + Windows auto-launch); gateway starts from USB; web admin accessible; config persisted on shared data partition.
+- **US-13** — As an admin, I want the USB gateway to handle safe removal and recovery.
+  - AC: **Hot-unplug detection** triggers graceful shutdown (stop receiver → flush → marker); recovery scan on next boot reconciles interrupted studies; LED status indicator (if hardware supports).
 
 ---
 

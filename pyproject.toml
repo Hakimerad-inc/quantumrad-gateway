@@ -6,6 +6,18 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",
+    "pynetdicom>=3.0.4",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "numpy>=1.26",
+    "cryptography>=50.0.1",
+    "pylibjpeg-rle>=2.2.0",
+    "paramiko>=5.0.0",
+    "boto3>=1.43.83",
+    "requests>=2.34.2",
+    "keyring>=25.7.0",
+    # Required by starlette for multipart form parsing (POST /api/config/import).
+    "python-multipart>=0.0.9",
 ]
 
 [project.scripts]
@@ -15,7 +27,14 @@ mercure-gateway = "mercure_gateway.main:main"
 dev = [
     "mypy>=1.10",
     "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "pytest-timeout>=2.3",
     "ruff>=0.5",
+    # starlette's testclient (Kludex fork 1.6.x) imports httpx2 with a fallback
+    # to httpx. Both are pinned so a mainline-starlette upgrade can never
+    # break TestClient by requiring `httpx` alone.
+    "httpx2>=2.12,<3",
+    "httpx>=0.27,<0.29",
 ]
 
 [build-system]
@@ -38,3 +57,30 @@ exclude = ["tests", "build", "dist", "\\.venv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+norecursedirs = [".*", "__pycache__", "*.egg"]
+timeout = 120
+filterwarnings = [
+    "ignore:'write_like_original' is deprecated:DeprecationWarning:pydicom.filewriter",
+    "ignore:Invalid value for VR UI:UserWarning:pydicom.valuerep",
+    "ignore:The decoded RLE segment:UserWarning:pydicom.pixels",
+]
+markers = [
+    "slow: duration > 5s (e.g. retry backoff, wire tests)",
+    "integration: requires external infrastructure (DICOM, live server)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["mercure_gateway"]
+
+[tool.coverage.report]
+# Windows-only (pywin32) and thin launcher modules can't be exercised on
+# Linux; omitting them keeps the gate to meaningful cross-platform code.
+omit = [
+    "*/service_backend.py",
+    "*/ui/__init__.py",
+]
+fail_under = 80
+show_missing = true

@@ -1,0 +1,30 @@
+[package]
+name = "mercure-gateway"
+version = "0.1.0"
+description = "Lightweight desktop DICOM gateway (store-and-forward) — Tauri shell"
+authors = ["mercure-gateway"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "mercure_gateway_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+png = "0.17"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

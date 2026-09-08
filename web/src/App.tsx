@@ -8,7 +8,7 @@ import AuditView from "./pages/AuditView";
 import SetupWizardPage from "./pages/SetupWizard";
 import PipelineView from "./pages/PipelineView";
 import LoginView from "./pages/LoginView";
-import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, type DiskStatus } from "./api";
+import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus } from "./api";
 import {
   IconBrand,
   IconPulse,
@@ -150,6 +150,9 @@ function pageFromHash(): Page {
 function AppContent() {
   const [page, setPage] = useState<Page>(pageFromHash);
   const [version, setVersion] = useState("");
+  // Persistent "restart required" banner: the gateway must be restarted for a
+  // saved config change to take effect (review H5).
+  const [restartNeeded, setRestartNeeded] = useState(isRestartRequired());
   const { isAuthenticated, logout, isLoading: authLoading } = useAuth();
 
   useEffect(() => {
@@ -158,6 +161,8 @@ function AppContent() {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  useEffect(() => onRestartRequired(setRestartNeeded), []);
 
   const handleNavigate = (key: Page) => {
     window.location.hash = `/${key}`;
@@ -211,6 +216,11 @@ function AppContent() {
         </div>
       </aside>
       <main className="main">
+        {restartNeeded && (
+          <div className="banner warn" role="alert">
+            Configuration changed — restart the gateway for the changes to take effect.
+          </div>
+        )}
         {page === "dashboard" && <Dashboard />}
         {page === "pipeline" && <PipelineView />}
         {page === "queue" && <QueueView />}

@@ -507,7 +507,7 @@ def _restore_redacted_secrets(payload: dict[str, Any], current: GatewayConfig) -
 
 
 @router.put("/config")
-def update_config(request: Request, payload: dict[str, Any]) -> dict[str, str]:
+def update_config(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
     """Update configuration and persist it to ``mercure-gateway.json``.
 
     The request body is the full config as returned by ``GET /config``; '***'
@@ -546,7 +546,7 @@ def export_config(request: Request) -> JSONResponse:
 
 
 @router.post("/config/import")
-async def import_config(request: Request) -> dict[str, str]:
+async def import_config(request: Request) -> dict[str, Any]:
     """Import configuration from uploaded JSON file.
 
     Accepts multipart/form-data with a 'file' field containing the JSON config.
@@ -594,7 +594,9 @@ async def import_config(request: Request) -> dict[str, str]:
 
     # Update in-memory config
     request.app.state.config = updated
-    return {"status": "ok", "message": "Config import saved"}
+    # See update_config: components hold their own config refs, so a restart is
+    # required for the new config to take effect (review H5).
+    return {"status": "ok", "message": "Config import saved", "restart_required": True}
 
 
 # ---------------------------------------------------------------------------

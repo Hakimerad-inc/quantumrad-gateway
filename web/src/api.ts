@@ -211,13 +211,46 @@ export function fetchConfig(): Promise<Record<string, unknown>> {
   return getJson<Record<string, unknown>>("/api/config");
 }
 
-export async function saveConfig(payload: Record<string, unknown>): Promise<boolean> {
+// Result of a config save. `restart_required` is always true on success today:
+// the running Receiver/Forwarder/Spool captured their own config references at
+// construction, so a saved change only takes effect after a restart (review H5).
+export interface SaveConfigResult {
+  status: string;
+  message: string;
+  restart_required: boolean;
+}
+
+// Global "restart required" signal so any component can render a persistent
+// banner once the operator saves config (review H5). Kept in module scope so
+// ConfigView (which performs the save) and App (which renders the banner) stay
+// decoupled — no React context plumbing required.
+let restartRequired = false;
+const restartListeners = new Set<(value: boolean) => void>();
+
+export function onRestartRequired(cb: (value: boolean) => void): () => void {
+  restartListeners.add(cb);
+  return () => {
+    restartListeners.delete(cb);
+  };
+}
+
+export function isRestartRequired(): boolean {
+  return restartRequired;
+}
+
+export async function saveConfig(payload: Record<string, unknown>): Promise<SaveConfigResult | null> {
   const res = await apiFetch("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return res.ok;
+  if (!res.ok) return null;
+  const data = (await res.json()) as SaveConfigResult;
+  if (data.restart_required) {
+    restartRequired = true;
+    restartListeners.forEach((cb) => cb(true));
+  }
+  return data;
 }
 
 // ── Pipeline flow view ───────────────────────────────────────────────

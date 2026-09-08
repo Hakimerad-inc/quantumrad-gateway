@@ -184,11 +184,19 @@ Unconditional trust-on-first-use: any MITM can impersonate the destination and r
 
 **Fix:** Added `known_hosts: str = ""` to `SFTPDestination` (required for secure operation; unset ⇒ fail-closed). The handler now loads the configured `known_hosts` file (creating the parent dir + touch if absent, returning a `DeliveryResult` on read error) and sets `RejectPolicy()` instead of `AutoAddPolicy()`. `tests/test_sftp_handler.py` adds 4 tests: no longer uses `AutoAddPolicy`, loads configured `known_hosts`, creates a missing `known_hosts` file, and rejects an unknown host key (9/9 pass).
 
-### H5. Configuration edits from the UI never reach running components
+### H5. Configuration edits from the UI never reach running components  ✅ **FIXED**
 
 `routes.py:530` (and `:596`) does `request.app.state.config = updated`. But `Receiver`, `Forwarder`, and `Spool` each captured their config reference at construction (`main.py:308-316`). Replacing the root object leaves them on the old one.
 
 Consequences: adding a destination, changing the AE title, port, retention window, or auto-enqueue delay in the web UI has **no effect until a manual process restart**. There is no restart endpoint wired to the SPA (`/system/start` and `/system/stop` exist at `routes.py:211`/`:226` but no UI calls them), and no "restart required" indicator. Silent no-op config changes in a clinical tool are an operational hazard.
+
+> **Status: FIXED (2026-09-08).** Chose the lower-risk "surface restart required" path over live component reload (hot-reloading `Receiver`/`Forwarder`/`Spool` mid-run is unsafe for an in-flight delivery pipeline).
+>
+> - Backend: `update_config` (`PUT /api/config`) and `import_config` (`POST /api/config/import`) now return `{"status":"ok","message":...,"restart_required": true}` (return annotation widened `dict[str, str]` → `dict[str, Any]` because the flag is a `bool`). The comment documents *why* restart is required.
+> - Frontend: `api.ts` `saveConfig()` now returns the parsed `SaveConfigResult` and, when `restart_required` is set, flips a module-level signal (`restartRequired`) and notifies subscribers via `onRestartRequired(cb)`. `App.tsx` subscribes and renders a persistent `banner warn` at the top of the main pane: *"Configuration changed — restart the gateway for the changes to take effect."* `ConfigView.tsx` shows *"Config saved — restart the gateway to apply changes."* on save. `SetupWizard.tsx` already routes through `saveConfig` and gets the same signal for free.
+> - Tests: `web/src/api.saveconfig.test.ts` (2 tests) asserts the success path returns `restart_required: true` and flips the global signal (and notifies a subscriber), while a failed save returns `null` and leaves the signal unset. Frontend suite: **12 → 14 passing**. Python suite unchanged: **592 passed / 4 skipped**, `ruff`/`mypy` clean.
+>
+> **Remaining design note:** the long-term fix is to make components observe config changes (or expose the `/system/stop` + `/system/start` pair to the UI so the operator can re-apply without a full process restart). That is left as a follow-up — this change makes the current limitation visible instead of silent.
 
 ### H6. `python-multipart` is an undeclared dependency — config import is broken
 
@@ -337,7 +345,7 @@ Worth stating plainly, because this is not a bad codebase:
 6. ~~H2 — real Ed25519 verification (or delete the claim and the `verify_signature` stub).~~ **DONE** — real verification using the existing `cryptography` dep, and `apply_update` now actually calls it; 17 tests. **Remaining: wire `Updater` into `main.py` and add the Tauri `plugins.updater` block.**
 7. H3 — wire SQLCipher (or filesystem-level encryption) and `CredentialVault` into `main.py`; delete `keyring_store.py` or wire it.
 8. ~~H4 — `RejectPolicy` + `known_hosts` config for SFTP.~~ **DONE** — `RejectPolicy` + `known_hosts` field; 4 tests in `tests/test_sftp_handler.py` (9/9).
-9. H5 — either reload components on config change or surface "restart required" in the UI.
+9. ~~H5 — either reload components on config change or surface "restart required" in the UI.~~ **DONE** — `restart_required` returned by both config endpoints; persistent banner in `App.tsx` + save note in `ConfigView.tsx`; 2 frontend tests.
 
 **Hygiene (parallel, low risk):**
 10. M1/M2 — CI on the dev branch; commit `uv.lock`.

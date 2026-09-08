@@ -20,9 +20,16 @@ export default function ConfigView() {
     setMsg("");
     try {
       const parsed = JSON.parse(text);
-      const ok = await saveConfig(parsed);
-      setMsg(ok ? "Config saved" : "Save failed");
-      if (ok) { setDirty(false); setConfig(parsed); }
+      const result = await saveConfig(parsed);
+      if (result) {
+        // The running components hold their own config refs, so a saved change
+        // only applies after a restart (review H5).
+        setMsg("Config saved — restart the gateway to apply changes.");
+        setDirty(false);
+        setConfig(parsed);
+      } else {
+        setMsg("Save failed");
+      }
     } catch (e) {
       setMsg(`Invalid JSON: ${e}`);
     } finally {

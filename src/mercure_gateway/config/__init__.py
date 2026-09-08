@@ -87,7 +87,6 @@ class ReceiverConfig(BaseModel):
             "can push simultaneously)."
         ),
     )
-    accept_compressed: bool = True
     decompress_common: bool = Field(
         default=True,
         description=(
@@ -315,7 +314,11 @@ class StorageConfig(BaseModel):
         default_factory=_default_spool_dir,
         description="Root directory for the DICOM spool and database.",
     )
-    max_spool_gb: int = Field(default=20, ge=1)
+    max_spool_gb: int = Field(
+        default=20,
+        ge=1,
+        description="Maximum spool size in GB (review M3: currently unenforced).",
+    )
     retention_delivered_days: int = Field(default=3, ge=0)
     disk_full_warning_pct: int = Field(
         default=90, ge=50, le=100,

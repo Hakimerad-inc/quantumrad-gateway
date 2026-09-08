@@ -125,6 +125,7 @@ jobs:
         working-directory: src-tauri
       - name: K6 installer size gate
         shell: pwsh
+        working-directory: src-tauri
         run: |
           $size = (Get-Item "target/release/mercure-gateway.exe").Length / 1MB
           Write-Host "Binary size: $([math]::Round($size,1)) MB"

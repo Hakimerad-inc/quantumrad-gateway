@@ -149,7 +149,15 @@ class Forwarder:
         )
 
     def stop(self, *, join_timeout: float = 5.0) -> None:
-        """Stop the worker pool; interrupts retry backoff waits."""
+        """Stop the worker pool; interrupts retry backoff waits.
+
+        ``join_timeout`` bounds the join per worker: a worker inside a
+        backoff wait wakes immediately (the stop event interrupts it), but a
+        worker mid-``deliver`` blocks until the transport finishes — the join
+        must not hang shutdown on a stuck socket. Workers are daemons, so a
+        timed-out join abandons the in-flight route in ``error`` state where
+        the operator can re-forward it from the console.
+        """
         self._running = False
         self._stop_event.set()
         for t in self._workers:

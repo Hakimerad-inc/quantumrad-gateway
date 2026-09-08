@@ -254,7 +254,7 @@ class QueueStats(BaseModel):
 @router.get("/queue/stats", response_model=QueueStats)
 def queue_stats(request: Request) -> QueueStats:
     """Queue statistics by state."""
-    counts = _spool(request)._db.count_states()
+    counts = _spool(request).count_states()
     return QueueStats(
         total=sum(counts.values()),
         queued=counts.get("QUEUED", 0),
@@ -296,10 +296,10 @@ def list_studies(
     """List studies with pagination, filtering and page metadata."""
     sp = _spool(request)
     offset = (page - 1) * page_size
-    rows = sp._db.list_studies_with_route_counts(
+    rows = sp.list_studies_with_route_counts(
         state=state, modality=modality, limit=page_size, offset=offset
     )
-    total = sp._db.count_studies(state=state, modality=modality)
+    total = sp.count_studies(state=state, modality=modality)
     return StudyPage(
         total=total,
         page=page,
@@ -324,10 +324,10 @@ def list_studies(
 def get_study(request: Request, study_id: int) -> dict[str, Any]:
     """Study detail with routes and timestamps."""
     sp = _spool(request)
-    row = sp._db.get_study(study_id)
+    row = sp.get_study(study_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Study {study_id} not found")
-    routes = sp._db.get_routes(study_id)
+    routes = sp.get_routes(study_id)
     result = _row_to_dict(row)
     result["routes"] = [_row_to_dict(r) for r in routes]
     return result
@@ -337,10 +337,10 @@ def get_study(request: Request, study_id: int) -> dict[str, Any]:
 def get_study_routes(request: Request, study_id: int) -> list[dict[str, Any]]:
     """Per-destination routing status for a study."""
     sp = _spool(request)
-    row = sp._db.get_study(study_id)
+    row = sp.get_study(study_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Study {study_id} not found")
-    routes = sp._db.get_routes(study_id)
+    routes = sp.get_routes(study_id)
     return [_row_to_dict(r) for r in routes]
 
 
@@ -348,7 +348,7 @@ def get_study_routes(request: Request, study_id: int) -> list[dict[str, Any]]:
 def retry_study(request: Request, study_id: int) -> dict[str, str]:
     """Re-forward a FAILED study (or any study with incomplete routes)."""
     sp = _spool(request)
-    row = sp._db.get_study(study_id)
+    row = sp.get_study(study_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Study {study_id} not found")
     requeued = sp.reforward_study(study_id)
@@ -403,7 +403,7 @@ def list_destinations(request: Request) -> list[dict[str, Any]]:
 def destination_studies(request: Request, name: str) -> list[dict[str, Any]]:
     """Latest studies routed to one destination (pipeline drill-down)."""
     return [
-        _row_to_dict(r) for r in _spool(request)._db.list_recent_routes(name, limit=20)
+        _row_to_dict(r) for r in _spool(request).list_recent_routes(name, limit=20)
     ]
 
 
@@ -417,12 +417,12 @@ def study_detail(request: Request, study_id: int) -> dict[str, Any]:
     from mercure_gateway.forwarder import RetryPolicy
 
     sp = _spool(request)
-    row = sp._db.get_study(study_id)
+    row = sp.get_study(study_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Study {study_id} not found")
     policy = RetryPolicy()
     routes = []
-    for r in sp._db.get_routes(study_id):
+    for r in sp.get_routes(study_id):
         entry = _row_to_dict(r)
         entry["next_retry_sec"] = (
             policy.delay(entry["attempts"]) if entry["status"] == "error" else None
@@ -439,11 +439,11 @@ def study_timeline(request: Request, study_id: int) -> list[dict[str, Any]]:
     import json as _json
 
     sp = _spool(request)
-    row = sp._db.get_study(study_id)
+    row = sp.get_study(study_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Study {study_id} not found")
     events = []
-    for e in sp._db.list_audit_for_study(row["study_uid"], limit=50):
+    for e in sp.list_audit_for_study(row["study_uid"], limit=50):
         entry = _row_to_dict(e)
         with contextlib.suppress(TypeError, ValueError):
             entry["detail"] = _json.loads(entry["detail"]) if entry["detail"] else {}
@@ -502,6 +502,11 @@ def _restore_redacted_secrets(payload: dict[str, Any], current: GatewayConfig) -
     prev_ui = current_data.get("web_ui", {})
     if web_ui.get("auth_password_hash") == _REDACTED_SENTINEL and prev_ui.get("auth_password_hash"):
         web_ui["auth_password_hash"] = prev_ui["auth_password_hash"]
+
+    update = data.get("update", {})
+    prev_update = current_data.get("update", {})
+    if update.get("public_key") == _REDACTED_SENTINEL and prev_update.get("public_key"):
+        update["public_key"] = prev_update["public_key"]
 
     return data
 
@@ -621,7 +626,7 @@ def request_report(
     its id.  ``report_type`` is ``"sr"``, ``"pdf"`` or ``"both"``.
     """
     sp = _spool(request)
-    row = sp._db.get_study(study_id)
+    row = sp.get_study(study_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Study {study_id} not found")
     retriever = _report_retriever(request)
@@ -644,7 +649,7 @@ def list_reports(
     report_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """List reports with optional filtering."""
-    rows = _spool(request)._db.list_reports(
+    rows = _spool(request).list_reports(
         status=status, report_type=report_type, limit=limit, offset=offset
     )
     return [_row_to_dict(r) for r in rows]
@@ -653,7 +658,7 @@ def list_reports(
 @router.get("/reports/{report_id}")
 def get_report(request: Request, report_id: int) -> dict[str, Any]:
     """Report detail."""
-    row = _spool(request)._db.get_report(report_id)
+    row = _spool(request).get_report(report_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
     return _row_to_dict(row)
@@ -667,7 +672,7 @@ def refresh_report(request: Request, report_id: int) -> dict[str, str]:
     actually walks PENDING → RETRIEVING → RETRIEVED/FAILED instead of just
     acknowledging the request.
     """
-    row = _spool(request)._db.get_report(report_id)
+    row = _spool(request).get_report(report_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
     retriever = _report_retriever(request)
@@ -687,7 +692,7 @@ def get_report_content(request: Request, report_id: int) -> dict[str, Any]:
     """
     from mercure_gateway.reports.render import RenderError, RenderService
 
-    row = _spool(request)._db.get_report(report_id)
+    row = _spool(request).get_report(report_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
     report_type = str(row["report_type"])
@@ -751,7 +756,7 @@ def list_audit(
     event: str | None = None,
 ) -> list[dict[str, Any]]:
     """List audit events with pagination and optional event filter."""
-    rows = _spool(request)._db.list_audit_events(event=event, limit=limit, offset=offset)
+    rows = _spool(request).list_audit_events(event=event, limit=limit, offset=offset)
     return [_row_to_dict(r) for r in rows]
 
 
@@ -760,7 +765,7 @@ def verify_audit(request: Request) -> dict[str, Any]:
     """Verify audit chain integrity."""
 
     sp = _spool(request)
-    audit = AuditLog(sp._db)
+    audit = AuditLog(sp.database)
     ok, errors = audit.verify()
     error_list = [{"event_id": e.event_id, "reason": e.reason} for e in errors]
     result: dict[str, Any] = {"valid": ok, "errors": error_list}
@@ -783,7 +788,7 @@ def export_audit(
     phi_scope = getattr(cfg.audit, "phi_scope", "minimal")
     from mercure_gateway.audit import redact_phi
 
-    rows = sp._db.list_audit_events(limit=limit)
+    rows = sp.list_audit_events(limit=limit)
     events = []
     for r in rows:
         ev = _row_to_dict(r)
@@ -902,12 +907,12 @@ def diagnostics_export(request: Request) -> JSONResponse:
     redacted = redact_config(config_data)
 
     # Structured audit events (PHI-scoped like the audit export).
-    audit = AuditLog(sp._db)
+    audit = AuditLog(sp.database)
     phi_scope = getattr(cfg.audit, "phi_scope", "minimal")
     from mercure_gateway.audit import redact_phi
 
     events: list[dict[str, Any]] = []
-    for row in sp._db.list_audit_events(limit=1000):
+    for row in sp.list_audit_events(limit=1000):
         detail = redact_phi(json.loads(row["detail"]), phi_scope)
         events.append(
             {
@@ -921,7 +926,7 @@ def diagnostics_export(request: Request) -> JSONResponse:
         )
 
     # Spool summary by state.
-    counts = sp._db.count_states()
+    counts = sp.count_states()
     spool_summary = {
         "total": sum(counts.values()),
         "states": dict(counts),
@@ -964,7 +969,7 @@ def console_dashboard(request: Request) -> dict[str, Any]:
     text_log_path: object = getattr(request.app.state, "text_log_path", None)
     service = ConsoleService(
         sp,
-        AuditLog(sp._db),
+        AuditLog(sp.database),
         text_log_path=text_log_path if isinstance(text_log_path, str) else None,
     )
     dash = service.dashboard()

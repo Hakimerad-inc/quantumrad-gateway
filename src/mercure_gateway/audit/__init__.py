@@ -74,6 +74,13 @@ def redact_phi(detail: dict[str, Any], phi_scope: str = "minimal") -> dict[str, 
 __all__ = ["AuditLog", "AuditEvent", "ChainError"]
 
 
+# Detail keys holding a Study Instance UID. When present, the UID is copied
+# into the ``audit_events.study_uid`` column so the per-study timeline can
+# query it *exactly* — the previous LIKE-on-JSON substring match attached
+# other studies' events because DICOM UIDs are prefix-nested (review M7).
+_STUDY_UID_KEYS = ("study_uid",)
+
+
 @dataclass(frozen=True)
 class AuditEvent:
     """A single deserialised audit event."""
@@ -147,6 +154,10 @@ class AuditLog:
         appends cannot fork the chain.
         """
         detail_json = json.dumps(detail or {}, separators=(",", ":"), sort_keys=True)
+        study_uid = next(
+            (str(detail[k]) for k in _STUDY_UID_KEYS if detail and detail.get(k)),
+            None,
+        )
 
         def _do(conn: sqlite3.Connection) -> int:
             prev = conn.execute(
@@ -158,11 +169,13 @@ class AuditLog:
             ).fetchone()["ts_str"]
             hash_ = _compute_hash(prev_hash, ts, event, detail_json, user)
             cur = conn.execute(
-                "INSERT INTO audit_events (ts, event, detail, user, hash) VALUES (?, ?, ?, ?, ?)",
-                (ts, event, detail_json, user, hash_),
+                "INSERT INTO audit_events (ts, event, detail, user, hash, study_uid) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (ts, event, detail_json, user, hash_, study_uid),
             )
             rowid = cur.lastrowid
-            assert rowid is not None
+            if rowid is None:  # pragma: no cover — sqlite always sets lastrowid
+                raise RuntimeError("audit insert returned no rowid")
             return int(rowid)
 
         if self._transaction is not None:
@@ -189,10 +202,24 @@ class AuditLog:
         Anchor this value outside the database (hub bookkeeper / offline
         export) for tamper evidence against a local DB-writing attacker.
         """
-        prev = self._conn.execute(
-            "SELECT hash FROM audit_events ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        with self._db_lock():
+            prev = self._conn.execute(
+                "SELECT hash FROM audit_events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
         return prev["hash"] if prev is not None else _GENESIS_HASH
+
+    def _db_lock(self) -> threading.Lock:
+        """The Database read/write lock, or a local lock for raw connections.
+
+        Read paths (``verify``/``head_hash``/``list_events``/``export_bundle``)
+        iterate the shared connection, so they must hold the same lock as the
+        writers — otherwise a concurrent append commits mid-iteration and a
+        ``verify()`` sees a chain state that never existed.
+        """
+        lock: threading.Lock = (
+            self._transaction.__self__._lock if self._transaction is not None else _LEGACY_LOCK
+        )
+        return lock
 
     def verify(self) -> tuple[bool, list[ChainError]]:
         """Replay the chain and compare stored hashes.
@@ -205,9 +232,11 @@ class AuditLog:
         """
         errors: list[ChainError] = []
         expected_hash = _GENESIS_HASH
-        for row in self._conn.execute(
-            "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
-        ):
+        with self._db_lock():
+            rows = self._conn.execute(
+                "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
+            ).fetchall()
+        for row in rows:
             computed = _compute_hash(
                 expected_hash, row["ts"], row["event"], row["detail"], row["user"]
             )
@@ -227,11 +256,12 @@ class AuditLog:
 
     def list_events(self, limit: int = 100, offset: int = 0) -> list[AuditEvent]:
         """Return the most recent audit events, newest first."""
-        rows = self._conn.execute(
-            "SELECT id, ts, event, detail, user, hash "
-            "FROM audit_events ORDER BY id DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
+        with self._db_lock():
+            rows = self._conn.execute(
+                "SELECT id, ts, event, detail, user, hash "
+                "FROM audit_events ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
         return [
             AuditEvent(
                 id=r["id"],
@@ -263,9 +293,11 @@ class AuditLog:
 
         phi_scope = getattr(config.audit, "phi_scope", "minimal")
         events: list[dict[str, Any]] = []
-        for row in self._conn.execute(
-            "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
-        ):
+        with self._db_lock():
+            rows = self._conn.execute(
+                "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
+            ).fetchall()
+        for row in rows:
             detail = redact_phi(json.loads(row["detail"]), phi_scope)
             events.append(
                 {

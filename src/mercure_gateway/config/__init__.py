@@ -47,6 +47,7 @@ __all__ = [
     "S3Destination",
     "SFTPDestination",
     "StorageConfig",
+    "UpdateConfig",
     "USBModeConfig",
     "WebUIConfig",
     "XNATDestination",
@@ -294,6 +295,31 @@ class AuditConfig(BaseModel):
     hub_reporting: HubReporting = Field(default_factory=HubReporting)
 
 
+class UpdateConfig(BaseModel):
+    """Auto-update settings (PRD §2.3 Q5, ADR-0006).
+
+    The updater is fail-closed: without ``public_key`` configured, every
+    signature check rejects the archive, so the default state is
+    "updates disabled" rather than "updates unverified".
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Check the update endpoint at startup (never auto-installs).",
+    )
+    update_url: str = Field(
+        default="",
+        description="URL of the signed update manifest (latest.json).",
+    )
+    public_key: str = Field(
+        default="",
+        description=(
+            "Ed25519 public key (PEM or raw base64) used to verify update "
+            "archives. Empty = updates cannot verify (fail-closed)."
+        ),
+    )
+
+
 def _default_spool_dir() -> str:
     """Platform-appropriate default spool directory.
 
@@ -317,7 +343,11 @@ class StorageConfig(BaseModel):
     max_spool_gb: int = Field(
         default=20,
         ge=1,
-        description="Maximum spool size in GB (review M3: currently unenforced).",
+        description=(
+            "Maximum spool size in GiB of persisted DICOM instances. Enforced "
+            "by the disk monitor: delivered studies are purged oldest-first "
+            "when exceeded (review M3); undelivered studies are never removed."
+        ),
     )
     retention_delivered_days: int = Field(default=3, ge=0)
     disk_full_warning_pct: int = Field(
@@ -473,6 +503,7 @@ class GatewayConfig(BaseModel):
     forwarding_rules: list[ForwardingRule] = Field(default_factory=list)
     reports: ReportConfig = Field(default_factory=ReportConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    update: UpdateConfig = Field(default_factory=UpdateConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     web_ui: WebUIConfig = Field(default_factory=WebUIConfig)
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)

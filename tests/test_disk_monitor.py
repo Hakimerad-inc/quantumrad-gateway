@@ -158,6 +158,73 @@ def test_monitor_below_threshold_does_not_purge(
     assert spool._db.get_study(study_id) is not None
 
 
+# ── Spool-size cap (storage.max_spool_gb — review M3) ────────────────────
+
+
+def store_instance_bytes(spool: Spool, study_uid: str, num_bytes: int) -> None:
+    """Record a delivered study carrying *num_bytes* of instance data."""
+    study_id = deliver(spool, study_uid)
+    spool._db.insert_instance_meta(
+        study_uid=study_uid,
+        series_uid=f"{study_uid}.2",
+        instance_uid=f"{study_uid}.3",
+        file_path=str(spool.spool_dir / study_uid / "series" / "inst.dcm"),
+        received_syntax="1.2.840.10008.1.2.1",
+        stored_syntax="1.2.840.10008.1.2.1",
+        num_bytes=num_bytes,
+    )
+    _ = study_id
+
+
+def test_spool_cap_enforced_purges_oldest_delivered(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    store_instance_bytes(spool, UID_1, num_bytes=2 * 1024**3)  # 2 GiB, older
+    store_instance_bytes(spool, UID_2, num_bytes=1 * 1024**3)  # 1 GiB, newer
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=False, max_spool_gb=1)
+
+    pct = monitor.check_once()
+
+    assert spool._db.spool_num_bytes() <= 1 * 1024**3
+    assert spool._db.get_study(spool._db.get_study_by_uid(UID_2)["id"]) is not None
+    assert not (spool.spool_dir / UID_1).exists()
+    _ = pct
+
+
+def test_spool_cap_not_triggered_under_limit(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    store_instance_bytes(spool, UID_1, num_bytes=512 * 1024**2)
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=False, max_spool_gb=1)
+
+    monitor.check_once()
+
+    assert spool._db.get_study(spool._db.get_study_by_uid(UID_1)["id"]) is not None
+
+
+def test_spool_cap_never_purges_undelivered(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    # A *delivered* study pushing over the cap, and an undelivered one.
+    # Neither study has instance_meta rows — the cap loop must run, find no
+    # eligible (delivered) study via spool_num_bytes accounting, and stop.
+    delivered_id = deliver(spool, UID_1)
+    undelivered_id = spool.receive(UID_3)
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=False, max_spool_gb=1)
+
+    monitor.check_once()
+
+    assert spool._db.get_study(undelivered_id) is not None  # US-04: never removed
+    assert spool._db.get_study(delivered_id) is not None  # still counted toward cap
+
+
+def test_spool_cap_disabled_when_unset(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    store_instance_bytes(spool, UID_1, num_bytes=10 * 1024**3)
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=False, max_spool_gb=None)
+
+    monitor.check_once()
+
+    assert spool._db.get_study(spool._db.get_study_by_uid(UID_1)["id"]) is not None
+
+
 def test_monitor_loop_runs_until_stopped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     spool = make_spool(tmp_path)
     monkeypatch.setattr("mercure_gateway.disk.shutil.disk_usage", lambda _p: usage(50.0))

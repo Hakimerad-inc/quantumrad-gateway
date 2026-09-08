@@ -137,6 +137,103 @@ class Spool:
         """Root directory where received DICOM studies are stored."""
         return self._spool_dir
 
+    # --- read façade (web layer, review M6) --------------------------------
+    #
+    # Thin pass-throughs over the Database so callers (web/routes.py,
+    # web/pipeline.py, web/console.py, recovery.py) never need to reach into
+    # the private ``Spool._db``. The invariant stated in routes.py's
+    # docstring — "all data access goes through the Spool/Database public
+    # API" — is only real if Spool exposes these reads.
+
+    def count_states(self) -> dict[str, int]:
+        """Count studies grouped by lifecycle state."""
+        return self._db.count_states()
+
+    def count_studies(self, state: str | None = None, modality: str | None = None) -> int:
+        """Count studies matching the given state/modality filters."""
+        return self._db.count_studies(state=state, modality=modality)
+
+    def list_studies_with_route_counts(
+        self,
+        state: str | None = None,
+        modality: str | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List studies with per-study route counts, newest first."""
+        return [
+            dict(r)
+            for r in self._db.list_studies_with_route_counts(
+                state, modality, limit=limit, offset=offset
+            )
+        ]
+
+    def get_study(self, study_id: int) -> dict[str, Any] | None:
+        """Return one study row by id, or ``None``."""
+        row = self._db.get_study(study_id)
+        return dict(row) if row is not None else None
+
+    def get_routes(self, study_id: int) -> list[dict[str, Any]]:
+        """Return all routing tasks for a study."""
+        return [dict(r) for r in self._db.get_routes(study_id)]
+
+    def list_recent_routes(self, target_name: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Latest studies routed to one destination (pipeline drill-down)."""
+        return [dict(r) for r in self._db.list_recent_routes(target_name, limit=limit)]
+
+    def count_routes_by_target(self) -> list[dict[str, Any]]:
+        """Per-destination rollup across all studies (pipeline view)."""
+        return [dict(r) for r in self._db.count_routes_by_target()]
+
+    def list_audit_for_study(self, study_uid: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Audit events touching *study_uid*, newest first."""
+        return [dict(r) for r in self._db.list_audit_for_study(study_uid, limit=limit)]
+
+    def list_audit_events(
+        self,
+        event: str | None = None,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List audit events, newest first, optionally filtered by event name."""
+        return [
+            dict(r) for r in self._db.list_audit_events(event, limit=limit, offset=offset)
+        ]
+
+    def get_report(self, report_id: int) -> dict[str, Any] | None:
+        """Return one report row by id, or ``None``."""
+        row = self._db.get_report(report_id)
+        return dict(row) if row is not None else None
+
+    def list_reports(
+        self,
+        status: str | None = None,
+        report_type: str | None = None,
+        study_uid: str | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List reports with optional filters, newest first."""
+        return [
+            dict(r)
+            for r in self._db.list_reports(
+                status, report_type, study_uid, limit=limit, offset=offset
+            )
+        ]
+
+    @property
+    def database(self) -> Database:
+        """The backing :class:`Database` (explicit, for AuditLog construction).
+
+        Callers that genuinely need the Database object itself — currently only
+        AuditLog wiring, which shares its transaction scope — go through this
+        named accessor instead of the private ``_db`` attribute.
+        """
+        return self._db
+
     def stop(self) -> None:
         """Cancel any pending auto-enqueue timer (composition-root shutdown)."""
         with self._timer_lock:
@@ -718,11 +815,30 @@ class Spool:
         logger.info("disk-full: purged delivered study %s", row["study_uid"])
         return True
 
+    def spool_num_bytes(self) -> int:
+        """Total bytes of persisted DICOM instances (storage-cap checks, M3)."""
+        return self._db.spool_num_bytes()
+
     def _purge_study_dir(self, raw_uid: str, study_id: int) -> None:
-        """Delete a study's spool files and database row (idempotent)."""
+        """Delete a study's spool files and database row (idempotent).
+
+        The row is deleted *after* the files: a failed delete (locked file,
+        read-only media) leaves the DB row in place, so the study stays
+        visible in the queue and a later purge pass can retry — the previous
+        ``ignore_errors=True``-then-delete-row order silently removed queued
+        studies whose files never left the disk.
+        """
         study_dir = self._spool_dir / raw_uid
         if study_dir.exists():
-            shutil.rmtree(study_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(study_dir)
+            except OSError as exc:
+                logger.error(
+                    "could not delete spool files for study %s — DB row kept: %s",
+                    raw_uid,
+                    exc,
+                )
+                return
         self._db.delete_study(study_id)
 
     def queued_count(self) -> int:

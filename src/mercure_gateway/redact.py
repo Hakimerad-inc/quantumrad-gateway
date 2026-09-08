@@ -48,4 +48,7 @@ def redact_config(data: dict[str, Any]) -> dict[str, Any]:
     web_ui = redacted.get("web_ui", {})
     if web_ui.get("auth_password_hash"):
         web_ui["auth_password_hash"] = "***"
+    update = redacted.get("update", {})
+    if update.get("public_key"):
+        update["public_key"] = "***"
     return redacted

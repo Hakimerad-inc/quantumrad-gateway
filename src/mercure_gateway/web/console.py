@@ -35,7 +35,7 @@ class ConsoleService:
 
     Typical usage::
 
-        service = ConsoleService(spool, AuditLog(spool._db),
+        service = ConsoleService(spool, AuditLog(spool.database),
                                  text_log_path=Path("/var/log/operations.log"))
         dash = service.dashboard()
     """
@@ -57,7 +57,7 @@ class ConsoleService:
 
     def dashboard(self) -> ConsoleDashboard:
         """Return a snapshot of the current gateway state."""
-        counts = self._spool._db.count_states()
+        counts = self._spool.count_states()
         queue = {
             "total": sum(counts.values()),
             "queued": counts.get("QUEUED", 0),

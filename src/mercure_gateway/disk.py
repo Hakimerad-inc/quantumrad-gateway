@@ -27,7 +27,16 @@ _DEFAULT_POLL_SEC = 30.0
 
 
 class DiskMonitor:
-    """Daemon polling the spool filesystem capacity and auto-purging delivery."""
+    """Daemon polling the spool filesystem capacity and auto-purging delivery.
+
+    Also enforces the configured spool-size cap (``storage.max_spool_gb``,
+    review M3: previously defined but never enforced). The cap counts only
+    persisted DICOM instance bytes (the same data the retention purger
+    manages); when exceeded, delivered studies are purged oldest-first until
+    usage drops back under the cap. Undelivered studies are never removed.
+    """
+
+    _GB = 1024**3
 
     def __init__(
         self,
@@ -35,11 +44,13 @@ class DiskMonitor:
         *,
         warning_pct: int,
         purge_on_full: bool,
+        max_spool_gb: int | None = None,
         poll_sec: float = _DEFAULT_POLL_SEC,
     ) -> None:
         self._spool = spool
         self._warning_pct = warning_pct
         self._purge_on_full = purge_on_full
+        self._max_spool_bytes = None if max_spool_gb is None else max_spool_gb * self._GB
         self._poll_sec = max(1.0, poll_sec)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -103,4 +114,33 @@ class DiskMonitor:
                         break
                     disk = shutil.disk_usage(self._spool.spool_dir)
                     pct = disk.used * 100.0 / max(1, disk.total)
+        self._enforce_spool_cap()
         return pct
+
+    def _enforce_spool_cap(self) -> None:
+        """Purge delivered studies when the spool byte total exceeds the cap.
+
+        The cap (``storage.max_spool_gb``, review M3) is enforced against the
+        DB-tracked instance bytes, not the whole filesystem: on a shared disk
+        the filesystem percentage says nothing about how much spool is being
+        used. Purge order is oldest-delivered-first, exactly like the
+        disk-full path, and undelivered studies are never touched (US-04).
+        """
+        if self._max_spool_bytes is None:
+            return
+        total = self._spool.spool_num_bytes()
+        if total <= self._max_spool_bytes:
+            return
+        over_gb = (total - self._max_spool_bytes) / self._GB
+        logger.warning(
+            "spool at %.2f GiB exceeds max_spool_gb cap — purging delivered studies",
+            total / self._GB,
+        )
+        while self._spool.spool_num_bytes() > self._max_spool_bytes:
+            if not self._spool.purge_oldest_delivered():
+                logger.warning(
+                    "spool over cap by %.2f GiB but no delivered studies to purge",
+                    (self._spool.spool_num_bytes() - self._max_spool_bytes) / self._GB,
+                )
+                break
+        logger.info("spool cap enforcement done (was %.2f GiB over)", over_gb)

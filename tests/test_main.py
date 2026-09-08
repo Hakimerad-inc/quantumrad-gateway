@@ -289,3 +289,95 @@ def test_build_forwarder_registers_two_destinations_of_same_type() -> None:
     assert "dicom:b" in forwarder._handlers
     assert forwarder._handlers["dicom:a"].destination.port == 11112
     assert forwarder._handlers["dicom:b"].destination.port == 11113
+
+# ── Update check wiring (ADR-0006 / review H2 followup) ──────────────────
+
+
+def test_main_update_check_disabled_by_default(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """No update config ⇒ the updater is never constructed (default off)."""
+    import mercure_gateway.main as main_mod
+    from mercure_gateway.config import UpdateConfig
+
+    called = []
+    monkeypatch.setattr(
+        "mercure_gateway.update.Updater",
+        lambda **kw: called.append(kw) or (_ for _ in ()).throw(AssertionError("constructed")),
+    )
+    cfg = default_config()
+    assert cfg.update == UpdateConfig(), "default must be updates-disabled"
+    main_mod._check_for_updates(cfg)
+    assert called == []
+
+
+def test_main_update_check_log_only_no_key(tmp_path, monkeypatch, caplog):  # type: ignore[no-untyped-def]
+    """enabled but no public_key ⇒ fail-closed: updater never runs."""
+    import logging
+
+    import mercure_gateway.main as main_mod
+
+    cfg = default_config()
+    cfg.update.enabled = True
+    cfg.update.update_url = "https://updates.example.com/latest.json"
+    cfg.update.public_key = ""  # no trust anchor
+
+    constructed = []
+    monkeypatch.setattr(
+        "mercure_gateway.update.Updater",
+        lambda **kw: constructed.append(kw),
+    )
+    with caplog.at_level(logging.INFO):
+        main_mod._check_for_updates(cfg)
+    assert constructed == [], "must not construct an Updater without a trust anchor"
+
+
+def test_main_update_check_runs_when_configured(tmp_path, monkeypatch, caplog):  # type: ignore[no-untyped-def]
+    """enabled + url + key ⇒ check runs and logs (log-only, no auto-apply)."""
+    import base64 as _b64
+    import logging
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    import mercure_gateway.main as main_mod
+    from mercure_gateway.update import UpdateResult
+
+    key = Ed25519PrivateKey.generate()
+    public_b64 = _b64.b64encode(
+        key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ).decode("ascii")
+
+    cfg = default_config()
+    cfg.update.enabled = True
+    cfg.update.update_url = "https://updates.example.com/latest.json"
+    cfg.update.public_key = public_b64
+
+    class FakeUpdater:
+        def __init__(self, **kw):  # type: ignore[no-untyped-def]
+            assert kw["public_key"] == public_b64
+            assert kw["current_version"] == __import__(
+                "mercure_gateway", fromlist=["__version__"]
+            ).__version__
+
+        def check_update(self):  # type: ignore[no-untyped-def]
+            return UpdateResult(available=False)
+
+    monkeypatch.setattr("mercure_gateway.update.Updater", lambda **kw: FakeUpdater(**kw))
+    with caplog.at_level(logging.INFO):
+        main_mod._check_for_updates(cfg)
+    assert any("no update available" in r.message for r in caplog.records)
+
+
+def test_main_update_check_never_raises(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """A crashing updater must not break boot (boundary isolation)."""
+    import mercure_gateway.main as main_mod
+
+    cfg = default_config()
+    cfg.update.enabled = True
+    cfg.update.update_url = "https://updates.example.com/latest.json"
+    cfg.update.public_key = "MCowBQYDK2VwAyEA"
+
+    def boom(**kw):  # type: ignore[no-untyped-def]
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("mercure_gateway.update.Updater", lambda **kw: boom(**kw))
+    assert main_mod._check_for_updates(cfg) is None  # no exception escaped

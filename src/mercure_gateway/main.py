@@ -182,6 +182,42 @@ def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) ->
     return forwarder
 
 
+def _check_for_updates(config: GatewayConfig) -> None:
+    """Run the signed-update check at startup (ADR-0006, review H2 followup).
+
+    Wires the previously-uninstantiated ``Updater`` into the composition root.
+    Fail-closed: the check runs only when ``update.enabled`` is set AND both
+    ``update_url`` and ``public_key`` are configured — without a trust anchor
+    the updater rejects every archive, so the default is "updates off" rather
+    than "updates unverified". The result is logged only: nothing is applied
+    or downloaded without the operator explicitly triggering it.
+    """
+    upd = config.update
+    if not upd.enabled or not upd.update_url or not upd.public_key:
+        return
+    try:
+        from mercure_gateway.update import Updater
+
+        updater = Updater(
+            update_url=upd.update_url,
+            current_version=__version__,
+            public_key=upd.public_key,
+        )
+        result = updater.check_update()
+    except Exception as exc:  # noqa: BLE001 — boundary: update check must not kill boot
+        logger.warning("update check failed: %s", exc)
+        return
+    if result.error:
+        logger.warning("update check error: %s", result.error)
+    elif result.available and result.manifest is not None:
+        logger.info(
+            "update %s available (staging requires operator action via the admin API)",
+            result.manifest.version,
+        )
+    else:
+        logger.info("no update available (current %s)", __version__)
+
+
 def _register_hub_in_background(hub_status: dict[str, Any], client: Any) -> None:
     """Register with the hub bookkeeper on a daemon thread (never blocks boot)."""
 
@@ -306,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     _warn_insecure(config)
+    # Signed-update check (ADR-0006): fail-closed, log-only, never blocks boot.
+    _check_for_updates(config)
 
     spool_dir = Path(config.storage.spool_dir)
     spool_dir.mkdir(parents=True, exist_ok=True)
@@ -394,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         spool,
         warning_pct=config.storage.disk_full_warning_pct,
         purge_on_full=config.storage.purge_on_disk_full,
+        max_spool_gb=config.storage.max_spool_gb,
     )
     disk_monitor.start()
 

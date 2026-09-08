@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class DatabaseEncryptionError(Exception):
@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
     event   TEXT NOT NULL,
     detail  TEXT NOT NULL DEFAULT '{}',
     user    TEXT,
-    hash    TEXT NOT NULL
+    hash    TEXT NOT NULL,
+    study_uid TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_studies_accession   ON studies(accession);
@@ -119,6 +120,7 @@ CREATE INDEX IF NOT EXISTS idx_task_routing_study  ON task_routing(study_id);
 CREATE INDEX IF NOT EXISTS idx_reports_study       ON reports(study_id);
 CREATE INDEX IF NOT EXISTS idx_reports_status      ON reports(status);
 CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_events(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_study_uid     ON audit_events(study_uid);
 
 -- Key-verifier meta table (at-rest encryption guard, ADR-0004).
 CREATE TABLE IF NOT EXISTS db_meta (
@@ -211,6 +213,12 @@ class Database:
     def initialize(self) -> None:
         """Create the schema if it does not exist and record the schema version."""
         with self.transaction():
+            # The v5 migration must run BEFORE the schema script: on a v4
+            # database the ``CREATE TABLE IF NOT EXISTS`` for audit_events is
+            # a no-op (the table already exists without ``study_uid``), and
+            # the new ``idx_audit_study_uid`` index would then reference a
+            # column that does not exist yet.
+            self._migrate_audit_study_uid()
             self._conn.executescript(SCHEMA_SQL)
             self._migrate_reports_sop_class_uid()
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -229,6 +237,40 @@ class Database:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(reports)").fetchall()}
         if "sop_class_uid" not in columns:
             self._conn.execute("ALTER TABLE reports ADD COLUMN sop_class_uid TEXT")
+
+    def _migrate_audit_study_uid(self) -> None:
+        """Add the ``study_uid`` column to an existing ``audit_events`` table.
+
+        v4 → v5 migration (review M7): the per-study audit timeline previously
+        matched ``LIKE '%<study_uid>%'`` against the detail JSON, but DICOM
+        UIDs are prefix-nested (``1.2.840.1.100`` is a substring of
+        ``1.2.840.1.100.5``), so one study's timeline could attach another
+        study's events. Events now carry an exact ``study_uid`` column,
+        backfilled here from the detail JSON of existing rows. Idempotent.
+        """
+        tables = {
+            row[0] for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "audit_events" not in tables:
+            return  # fresh database — SCHEMA_SQL creates the v5 shape directly
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        if "study_uid" not in columns:
+            self._conn.execute("ALTER TABLE audit_events ADD COLUMN study_uid TEXT")
+        # Backfill: extract the study_uid recorded in the event detail (both
+        # "study_uid" and the legacy "uid" keys appear in historic payloads).
+        self._conn.execute(
+            """
+            UPDATE audit_events
+            SET study_uid = json_extract(detail, '$.study_uid')
+            WHERE study_uid IS NULL
+              AND json_valid(detail)
+              AND json_extract(detail, '$.study_uid') IS NOT NULL
+            """
+        )
 
     def _verify_or_create_key(self) -> None:
         """Enforce the at-rest encryption guard (ADR-0004).
@@ -446,8 +488,16 @@ class Database:
             ).fetchall()
 
     def delete_study(self, study_id: int) -> None:
-        """Delete a study row (cascades to task_routing/reports)."""
+        """Delete a study row (cascades to task_routing/reports/instance_meta)."""
         with self.transaction() as conn:
+            # instance_meta is keyed by study_uid (no study_id FK), so its rows
+            # do not cascade — delete them explicitly so purged studies stop
+            # counting toward the spool-size cap (review M3).
+            conn.execute(
+                "DELETE FROM instance_meta WHERE study_uid = "
+                "(SELECT study_uid FROM studies WHERE id = ?)",
+                (study_id,),
+            )
             conn.execute("DELETE FROM studies WHERE id = ?", (study_id,))
 
     def list_oldest_delivered(self) -> sqlite3.Row | None:
@@ -631,22 +681,23 @@ class Database:
             ).fetchall()
 
     def list_audit_for_study(self, study_uid: str, *, limit: int = 50) -> list[sqlite3.Row]:
-        """Audit events whose detail JSON references *study_uid*.
+        """Audit events touching *study_uid*, newest first.
 
-        ``detail`` is a JSON string; study UIDs contain no characters that
-        JSON escapes, so a substring match on the quoted value is exact. The
-        LIKE pattern is escaped for ``%``/``_`` wildcards.
+        Matches the dedicated ``study_uid`` column exactly (review M7). The
+        previous ``LIKE '%<uid>%'`` substring match on the detail JSON could
+        attach another study's events — DICOM UIDs are prefix-nested, so
+        ``1.2.840.1.100`` is a substring of ``1.2.840.1.100.5``. Events written
+        before the column existed (v4 databases) are backfilled by
+        :meth:`_migrate_audit_study_uid` at open time.
         """
-        escaped = study_uid.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped}%"
         with self._lock:
             return self._conn.execute(
                 """
-                SELECT id, ts, event, detail, user, hash FROM audit_events
-                WHERE detail LIKE ? ESCAPE '\\'
+                SELECT id, ts, event, detail, user, hash, study_uid FROM audit_events
+                WHERE study_uid = ?
                 ORDER BY id DESC LIMIT ?
                 """,
-                (pattern, limit),
+                (study_uid, limit),
             ).fetchall()
 
     def _has_waiting_tasks(self) -> bool:
@@ -894,6 +945,25 @@ class Database:
         with self._lock:
             return self._conn.execute(sql, params).fetchall()
 
+    def spool_num_bytes(self) -> int:
+        """Total bytes of persisted DICOM instances (spool-size cap, review M3).
+
+        Aggregates the per-instance ``num_bytes`` recorded at receive time.
+        Counts only rows whose study still exists (purged studies must stop
+        counting), so it joins ``studies`` — a purged study's instance_meta
+        rows are removed together with it, keeping the total in sync with the
+        DB-tracked spool contents.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(SUM(m.num_bytes), 0) AS total
+                FROM instance_meta AS m
+                JOIN studies AS s ON s.study_uid = m.study_uid
+                """
+            ).fetchone()
+        return int(row["total"]) if row is not None else 0
+
     def list_instance_meta(self, study_uid: str) -> list[sqlite3.Row]:
         """Return per-instance storage rows for *study_uid* (oldest first)."""
         with self._lock:
@@ -954,12 +1024,26 @@ class Database:
 
     # --- audit_events ----------------------------------------------------
 
-    def append_audit_event(self, event: str, detail: str, user: str | None, hash_: str) -> int:
-        """Append an audit event with its chained hash and return its id."""
+    def append_audit_event(
+        self,
+        event: str,
+        detail: str,
+        user: str | None,
+        hash_: str,
+        *,
+        study_uid: str | None = None,
+    ) -> int:
+        """Append an audit event with its chained hash and return its id.
+
+        ``study_uid`` (review M7) enables the exact per-study timeline lookup
+        (:meth:`list_audit_for_study`) — DICOM UIDs are prefix-nested, so a
+        substring match on the detail JSON is not reliable.
+        """
         with self.transaction() as conn:
             cur = conn.execute(
-                "INSERT INTO audit_events (event, detail, user, hash) VALUES (?, ?, ?, ?)",
-                (event, detail, user, hash_),
+                "INSERT INTO audit_events (event, detail, user, hash, study_uid) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (event, detail, user, hash_, study_uid),
             )
         return _rowid(cur)
 

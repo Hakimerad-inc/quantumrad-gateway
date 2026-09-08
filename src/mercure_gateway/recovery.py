@@ -132,7 +132,7 @@ def recover(spool: Spool, *, force: bool = False) -> RecoveryResult:
     logger.info("Found %d study directories on disk", len(disk_studies))
 
     # Step 3: Get all studies from DB
-    db_studies = spool._db.list_studies()
+    db_studies = spool.list_studies_with_route_counts()
     db_uids = {row["study_uid"]: row for row in db_studies}
 
     # Step 4: Reconcile — files on disk not in DB
@@ -172,21 +172,21 @@ def recover(spool: Spool, *, force: bool = False) -> RecoveryResult:
             if has_files:
                 # Study was interrupted mid-transfer; mark as RECEIVED
                 # so the forwarder can re-queue it
-                spool._db.set_study_state(study_id, StudyState.RECEIVED.value)
+                spool.database.set_study_state(study_id, StudyState.RECEIVED.value)
                 result.studies_recovered += 1
                 logger.info(
                     "Recovered study %s (was %s → RECEIVED)", study_uid, state,
                 )
-                for route in spool._db.get_routes(study_id):
+                for route in spool.database.get_routes(study_id):
                     if route["status"] in ("sending", "error"):
-                        spool._db.reset_route_waiting(route["id"])
+                        spool.database.reset_route_waiting(route["id"])
                         logger.info(
                             "Reset route %d (target=%s) from %s to waiting",
                             route["id"], route["target_name"], route["status"],
                         )
             else:
                 # DB row exists but no files on disk — mark incomplete
-                spool._db.set_study_state(study_id, StudyState.ERROR.value)
+                spool.database.set_study_state(study_id, StudyState.ERROR.value)
                 result.studies_orphaned += 1
                 logger.warning(
                     "Study %s has DB row but no files on disk — marked ERROR", study_uid,

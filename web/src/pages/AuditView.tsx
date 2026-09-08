@@ -7,9 +7,16 @@ export default function AuditView() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [verify, setVerify] = useState<AuditVerifyResult | null>(null);
   const [checking, setChecking] = useState(false);
+  const [error, setError] = useState("");
 
   const load = useCallback(async () => {
-    setEvents(await fetchAudit(200));
+    try {
+      setEvents(await fetchAudit(200));
+      setError("");
+    } catch (e) {
+      // A failed fetch previously left a permanently blank panel (review M8).
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, []);
 
   useEffect(() => {
@@ -20,6 +27,9 @@ export default function AuditView() {
     setChecking(true);
     try {
       setVerify(await verifyAudit());
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setChecking(false);
     }
@@ -35,6 +45,7 @@ export default function AuditView() {
   return (
     <div>
       <h2>Audit Log</h2>
+      {error && <div className="error-banner" role="alert">Failed to load audit log: {error}</div>}
       <div className="toolbar">
         <button className="btn primary" onClick={doVerify} disabled={checking}>
           {checking ? "Verifying..." : "Verify Chain Integrity"}

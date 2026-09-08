@@ -124,8 +124,8 @@ def pipeline_snapshot(
     Component flags default to the running objects on *spool*'s owning app
     when not supplied explicitly (tests pass them directly).
     """
-    queue = spool._db.count_states()
-    routes = spool._db.count_routes_by_target()
+    queue = spool.count_states()
+    routes = spool.count_routes_by_target()
 
     rollup: dict[str, dict[str, Any]] = {}
     for row in routes:
@@ -140,7 +140,7 @@ def pipeline_snapshot(
         datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%d %H:%M:%S")
     received_hour = sum(
-        1 for row in spool._db.list_studies_with_route_counts()
+        1 for row in spool.list_studies_with_route_counts()
         if row["created_at"] >= one_hour_ago
     )
 

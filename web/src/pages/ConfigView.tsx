@@ -7,12 +7,17 @@ export default function ConfigView() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
-    fetchConfig().then((c) => {
-      setConfig(c);
-      setText(JSON.stringify(c, null, 2));
-    });
+    fetchConfig()
+      .then((c) => {
+        setConfig(c);
+        setText(JSON.stringify(c, null, 2));
+      })
+      .catch((e: unknown) => {
+        setLoadError(e instanceof Error ? e.message : String(e));
+      });
   }, []);
 
   const handleSave = async () => {
@@ -27,11 +32,16 @@ export default function ConfigView() {
         setMsg("Config saved — restart the gateway to apply changes.");
         setDirty(false);
         setConfig(parsed);
-      } else {
-        setMsg("Save failed");
       }
     } catch (e) {
-      setMsg(`Invalid JSON: ${e}`);
+      if (e instanceof SyntaxError) {
+        setMsg(`Invalid JSON: ${e.message}`);
+      } else if (e instanceof Error) {
+        // saveConfig throws with the server's 400 detail (review M8).
+        setMsg(e.message);
+      } else {
+        setMsg(String(e));
+      }
     } finally {
       setSaving(false);
     }
@@ -40,6 +50,9 @@ export default function ConfigView() {
   return (
     <div>
       <h2>Configuration</h2>
+      {loadError && (
+        <div className="error-banner" role="alert">Failed to load config: {loadError}</div>
+      )}
       <div className="toolbar">
         <button className="btn primary" onClick={handleSave} disabled={!dirty || saving}>
           {saving ? "Saving..." : "Save"}

@@ -42,13 +42,40 @@ describe("saveConfig surfaces restart-required (H5)", () => {
     unsub();
   });
 
-  it("returns null on a failed save and does not flip the signal", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 400 });
+  it("throws with the server 400 detail on a failed save", async () => {
+    // M8: the previous behaviour returned null and ConfigView rendered a bare
+    // "Save failed" — the operator could not see WHY the config was rejected.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      json: async () => ({
+        detail: "Invalid config: appliance_name: String should have at most 1 characters",
+      }),
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const api = await import("./api");
-    const res = await api.saveConfig({});
-    expect(res).toBeNull();
+    await expect(api.saveConfig({ general: { appliance_name: "" } })).rejects.toThrow(
+      "Invalid config: appliance_name",
+    );
+    // A failed save must not flip the restart signal.
+    expect(api.isRestartRequired()).toBe(false);
+  });
+
+  it("throws with the status line when the error body is not JSON", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: "Bad Gateway",
+      json: async () => {
+        throw new Error("not json");
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = await import("./api");
+    await expect(api.saveConfig({})).rejects.toThrow("502 Bad Gateway");
     expect(api.isRestartRequired()).toBe(false);
   });
 });

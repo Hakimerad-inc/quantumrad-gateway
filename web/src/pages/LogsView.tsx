@@ -6,11 +6,18 @@ export default function LogsView() {
   const [total, setTotal] = useState(0);
   const [limit, setLimit] = useState(200);
   const [auto, setAuto] = useState(true);
+  const [error, setError] = useState("");
 
   const load = useCallback(async () => {
-    const r = await fetchLogs(limit);
-    setLines(r.lines);
-    setTotal(r.total_available);
+    try {
+      const r = await fetchLogs(limit);
+      setLines(r.lines);
+      setTotal(r.total_available);
+      setError("");
+    } catch (e) {
+      // Keep the last good lines on screen; surface why refresh failed (M8).
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, [limit]);
 
   useEffect(() => {
@@ -26,6 +33,7 @@ export default function LogsView() {
   return (
     <div>
       <h2>Operations Log</h2>
+      {error && <div className="error-banner" role="alert">Log refresh failed: {error}</div>}
       <div className="toolbar">
         <label className="check">
           Lines

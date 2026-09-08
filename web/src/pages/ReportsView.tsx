@@ -13,9 +13,16 @@ const STATUS_BADGE: Record<string, string> = {
 export default function ReportsView() {
   const [reports, setReports] = useState<ReportRow[]>([]);
   const [selected, setSelected] = useState<ReportContent | null>(null);
+  const [error, setError] = useState("");
 
   const load = useCallback(async () => {
-    setReports(await fetchReports(200));
+    try {
+      setReports(await fetchReports(200));
+      setError("");
+    } catch (e) {
+      // A failed fetch previously left a permanently blank panel (review M8).
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, []);
 
   useEffect(() => {
@@ -23,17 +30,27 @@ export default function ReportsView() {
   }, [load]);
 
   const view = async (reportId: number) => {
-    setSelected(await fetchReportContent(reportId));
+    try {
+      setSelected(await fetchReportContent(reportId));
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const doRefresh = async (reportId: number) => {
-    await refreshReport(reportId);
-    await load();
+    try {
+      await refreshReport(reportId);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   return (
     <div>
       <h2>Reports</h2>
+      {error && <div className="error-banner" role="alert">Report action failed: {error}</div>}
       <div className="split">
         <div className="card" style={{ padding: 0, overflow: "hidden" }}>
           {reports.length === 0 ? (

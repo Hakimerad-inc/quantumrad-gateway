@@ -238,13 +238,26 @@ export function isRestartRequired(): boolean {
   return restartRequired;
 }
 
-export async function saveConfig(payload: Record<string, unknown>): Promise<SaveConfigResult | null> {
+export async function saveConfig(
+  payload: Record<string, unknown>,
+): Promise<SaveConfigResult | null> {
   const res = await apiFetch("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) return null;
+  if (!res.ok) {
+    // Surface the server's 400 detail ("Invalid config: …") instead of a bare
+    // "Save failed" — the operator cannot fix what they cannot see (review M8).
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body && typeof body.detail === "string" && body.detail) detail = body.detail;
+    } catch {
+      // non-JSON error body — keep the status-line detail
+    }
+    throw new Error(detail);
+  }
   const data = (await res.json()) as SaveConfigResult;
   if (data.restart_required) {
     restartRequired = true;

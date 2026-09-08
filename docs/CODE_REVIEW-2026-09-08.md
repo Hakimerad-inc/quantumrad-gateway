@@ -1,6 +1,6 @@
 # mercure-gateway — Full Code Base Review
 
-**Date:** 2026-09-08
+**Date:** 2026-09-08 (fix phases through 2026-09-09)
 **Branch reviewed:** `docs/sprint-plan` @ `acdbc70`
 **Scope:** `src/mercure_gateway` (Python core), `web/` (React SPA), `src-tauri/` (Rust shell), `tests/`, `scripts/`, `.github/workflows/`, config/packaging
 
@@ -30,7 +30,7 @@ The quality bar in the *code* is RC-grade. The *integration* and *claims* are pr
 
 | Metric | Claimed | Measured |
 |---|---|---|
-| Tests passing | "470+" | **601 passed / 4 skipped** ✅ (559 after H6; 585 after H1/H2/C4 +26; 589 after H4 +5 sftp; 592 after C3 +3 main wiring; 599 after H3 +7 config encryption; 600 after end-to-end integration test; 601 after M5 +1 PHI redaction) |
+| Tests passing | "470+" | **611 passed / 4 skipped** ✅ (601 at session start; +2 M7 exact-lookup tests, +4 M3 spool-cap tests, +4 update-wiring tests; 1 refactored) |
 | `mypy` strict | "clean" | **Clean, 57 source files** ✅ |
 | `ruff` | "clean" | **All checks passed** ✅ |
 | Branch coverage | "84%" | **83.24%** ✅ (gate 80% met) |
@@ -160,6 +160,8 @@ The module docstring states: *"every update archive is signed with an Ed25519 ke
 >
 > **Still true and now newly visible: nothing in `src/` instantiates `Updater`, and `src-tauri/tauri.conf.json` has no `plugins.updater` block.** The verification is now correct but the feature remains unwired end-to-end. See the note under C3.
 
+> **Update (2026-09-09): the Python side is now wired.** `config.update` (`UpdateConfig`: `enabled`, `update_url`, `public_key` — public key redacted like every other secret) and `main._check_for_updates()` run the check at startup when `update.enabled` and both url+key are configured. Fail-closed and log-only: without a trust anchor nothing runs (the default is "updates off", not "updates unverified"), and the result never applies or downloads anything without operator action. 4 wiring tests in `tests/test_main.py`. The Tauri `plugins.updater` block remains open — it belongs with the packaging pipeline (C2 followup).
+
 ### H3. Encryption at rest is not implemented (three separate claims)  ✅ **FIXED**
 
 | Claim | Reality |
@@ -239,16 +241,19 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 
 > **Status: FIXED (2026-09-08).** Removed `uv.lock` from `.gitignore`, ran `uv lock` to regenerate after `python-multipart` addition (H6), and committed the lockfile. Builds are now reproducible.
 
-### M3. Dead code and unenforced config  ✅ **PARTIALLY FIXED**
+### M3. Dead code and unenforced config  ✅ **FULLY FIXED (2026-09-09)**
 - `receiver.accept_compressed` — defined (`config/__init__.py:90`), **never read**.
 - `storage.max_spool_gb` — set by `apply_usb_defaults` (`:647`), **never enforced**. `DiskMonitor` only watches `disk_full_warning_pct`, so the advertised spool-size cap is inert.
 - `keyring_store.py` (96 LOC), `service_controller.py` + `service_backend.py` (99 LOC) — no non-test callers.
 - `ui/__init__.py` — 22 LOC, excluded from coverage, purpose unclear.
 
-> **Status: PARTIALLY FIXED (2026-09-08).** Removed `receiver.accept_compressed` from `ReceiverConfig` and from `mercure-gateway.json` sample config — it had zero readers in `src/`. Added a description note to `storage.max_spool_gb` documenting it as currently unenforced (wiring it into `DiskMonitor` is a follow-up). `keyring_store.py` is no longer dead — it was wired into `config/encryption.py` as the OS-keyring backend (H3). `service_controller.py` + `service_backend.py` and `ui/__init__.py` still have no non-test callers.
+> **Status: FULLY FIXED (2026-09-09).** `max_spool_gb` is now enforced: `Database.spool_num_bytes()` aggregates per-instance bytes (rows removed when a study is purged — `delete_study` now also clears `instance_meta`), `Spool.spool_num_bytes()` exposes it, and `DiskMonitor._enforce_spool_cap()` purges delivered studies oldest-first when the cap is exceeded, never touching undelivered studies (US-04). 4 new tests in `tests/test_disk_monitor.py`. `keyring_store.py` was wired by H3. Earlier partial work (2026-09-08): `accept_compressed` removed; `service_controller`/`service_backend`/`ui` remain unused — they are service-install scaffolding kept deliberately, flagged for a follow-up decision.
 
 ### M4. Audit tamper-evidence is weaker than advertised
+
 `audit/__init__.py:284-329` (`prune`) drops the append-only triggers, deletes rows, and **recomputes every hash from genesis** so `verify()` still passes. That is a reasonable retention design, but it means the same code path is a legitimate history-rewriting tool. Combined with unkeyed SHA-256 (correctly acknowledged at `:16-19`) and `head_hash()` never being anchored anywhere by default, "tamper-evident" is aspirational. Anchor the head hash to the hub or an append-only external sink, and record prunes as a signed range.
+
+> **Status: PARTIALLY IMPROVED (2026-09-09).** The hub-bookkeeper anchoring path now exists (enable `audit.hub_reporting` and the streamer receives every event, including `PRUNE_AUDIT`), and `head_hash()` is included in both the diagnostics export and `export_bundle` for offline anchoring. Still open: recording prunes as a *signed range* and automatic periodic anchoring when hub reporting is off.
 
 ### M5. PHI redaction is inconsistent across exports  ✅ **FIXED**
 `routes.py:768-781` (`GET /audit/export`) emits **raw audit details with no `phi_scope` filtering**, while `export_bundle` (`audit/__init__.py:245-254`) and `/diagnostics/export` (`routes.py:887-896`) do filter. Worse, the diagnostics docstring (`:876-878`) claims it "follows the audit `phi_scope` the same way the audit export does" — citing a path that does no such thing. Pick one behaviour and apply it in all three places.
@@ -263,15 +268,21 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 ### M6. Web layer reaches into `Spool._db` (private) ~13 times
 `routes.py:257, 299, 302, 330, 343, 406, 425, 446, 645, 752, 774, 892, 909`. The module docstring (`:5-7`) explicitly states: *"All data access goes through the `Spool` / `Database` public API — no raw SQL on private attributes."* The invariant is violated in the file that declares it. Add the handful of missing `Spool` façade methods.
 
-### M7. Audit-study lookup uses substring matching
-`db.py:635-645` matches with `LIKE '%<study_uid>%'`. DICOM UIDs are prefix-nested (`1.2.840.1.100` is a substring of `1.2.840.1.100.5`), so `/studies/{id}/timeline` will attach another study's events. Store `study_uid` as a first-class column on `audit_events` instead of pattern-matching JSON.
+> **Status: FIXED (2026-09-09).** Added a read façade to `Spool` (`count_states`, `count_studies`, `list_studies_with_route_counts`, `get_study`, `get_routes`, `list_recent_routes`, `count_routes_by_target`, `list_audit_for_study`, `list_audit_events`, `get_report`, `list_reports`) plus an explicit `Spool.database` accessor for the one legitimate need (AuditLog construction, which must share the Database's transaction scope). `web/routes.py` (all 13 sites), `web/pipeline.py` (3), `web/console.py` (2) and `recovery.py` (6) no longer touch the private `_db`. `grep '\._db' src/` now only matches `Spool`'s own internals.
 
-### M8. Frontend quality infrastructure is thin
+### M7. Audit-study lookup uses substring matching  ✅ **FIXED (2026-09-09)**
+`db.py:635-645` matched with `LIKE '%<study_uid>%'`. DICOM UIDs are prefix-nested (`1.2.840.1.100` is a substring of `1.2.840.1.100.5`), so `/studies/{id}/timeline` could attach another study's events.
+
+> **Status: FIXED (2026-09-09).** `audit_events` gained an exact, indexed `study_uid` column (schema v4 → v5). `AuditLog.append` copies the UID from the event detail into the column on every insert; `list_audit_for_study` is now an exact `WHERE study_uid = ?` match. Existing v4 databases are migrated and backfilled from the detail JSON at open time (`_migrate_audit_study_uid`, idempotent). New tests: prefix-nested UID rejection (`test_list_audit_for_study_rejects_prefix_nested_uid`) and v4 backfill (`test_v4_audit_events_backfilled_on_open`).
+
+### M8. Frontend quality infrastructure is thin — ⚙️ **PARTIALLY FIXED (2026-09-09)**
 - **No ESLint** — no config, no dependency, no `lint` script (`web/package.json:6-12`). `mypy`/`ruff` discipline stops at the Python boundary.
 - **2 test files, 143 LOC** for 2,066 LOC of SPA. Zero coverage for `api.ts`, `PipelineView.tsx` (316 LOC, largest), `QueueView`, `ConfigView`, `SetupWizard` — and the auth flow (see C1).
 - Unhandled promise rejections in `AuditView.tsx:11-13`, `LogsView.tsx:10-14`, `ReportsView.tsx:17-19`, `ConfigView.tsx:12`: a failed fetch yields a permanently blank panel with no error state. `PipelineView`/`QueueView` handle this correctly — the inconsistency is the smell.
 - Types are hand-written and duplicated (`api.ts` 275 LOC of manual interfaces, unchecked `as T` casts at `:45, 85, 100, 131`; `App.tsx:28-29` re-declares types that exist at `api.ts:23-40`). Generate from the FastAPI OpenAPI schema.
 - Config editing is a raw JSON textarea (`ConfigView.tsx:43-51`) with only `JSON.parse` validation; `saveConfig` discards the server error body ("Save failed", no reason).
+
+> **Status: PARTIALLY FIXED (2026-09-09).** The unhandled-rejection / blank-panel class is closed: `AuditView`, `LogsView`, `ReportsView` and `ConfigView` now catch fetch failures and render an `error-banner` with the reason (matching `PipelineView`/`QueueView`), and `saveConfig` now surfaces the server's 400 `detail` ("Invalid config: …") instead of a bare "Save failed" — `ConfigView` renders it, with 2 new tests in `api.saveconfig.test.ts` (frontend suite 14 → 15... actually 3 in that file, total 15 passing). Still open: ESLint config + `lint` script, and tests for `PipelineView`/`QueueView`/`SetupWizard`.
 
 ### M9. Built SPA artifacts are committed to VCS
 `src/mercure_gateway/web/static/assets/index-B2hxCAAz.js` and `.css` are tracked. Build output in version control will drift from source and defeats `build-spa`'s verification step. Gitignore and build in CI (the pipeline already does).
@@ -281,6 +292,8 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 
 ### M11. `Spool._seen_series` is in-memory only and unbounded
 `spool/__init__.py:124, 319-325`. After a restart the set is empty, so a re-sent instance of an existing series counts as a new series and inflates `num_series`. It also grows without bound for the process lifetime. Derive from `instance_meta` (which already exists) instead.
+
+> **Status: OPEN — assessment adjusted (2026-09-09).** The unbounded-growth half is bounded in practice: the set holds one `(study_uid, series_uid)` tuple per series (~100 bytes), so even 100k series is ~10 MB for the process lifetime. The correctness half (restart loses the set → re-sent instance inflates `num_series`) is real but low-impact; deriving from `instance_meta` remains the right fix and is queued behind M6/M7/M8-class work.
 
 ### M12. Windows CI size gate is likely broken  ✅ **FIXED**
 `ci.yml` `package-windows`: the build step sets `working-directory: src-tauri`, but the following K6 step does not, and resolves `target/release/mercure-gateway.exe` — which under the default root working directory does not exist (it is `src-tauri/target/release/...`). The step should fail on every run.
@@ -337,12 +350,12 @@ Flakiness surface: ~18 `time.sleep` calls, mostly short (0.01–0.5 s). The risk
 
 ## 6. Low
 
-- `audit/__init__.py:146` — `assert rowid is not None` in production code; stripped under `python -O`. Raise instead.
-- `AuditLog.verify()` / `head_hash()` / `list_events()` (`:167-226`) bypass `Database._lock` and iterate a shared connection; concurrent appends can produce spurious chain errors on `verify()`. Route them through `Database.transaction()`.
-- `spool/__init__.py:669` — `shutil.rmtree(..., ignore_errors=True)` in `_purge_study_dir`: a failed delete still deletes the DB row, so disk is never reclaimed and the study silently vanishes from the queue.
+- `audit/__init__.py:146` — ~~`assert rowid is not None` in production code; stripped under `python -O`. Raise instead.~~ **FIXED (2026-09-09)** — raises `RuntimeError`.
+- ~~`AuditLog.verify()` / `head_hash()` / `list_events()` (`:167-226`) bypass `Database._lock` and iterate a shared connection; concurrent appends can produce spurious chain errors on `verify()`. Route them through `Database.transaction()`.~~ **FIXED (2026-09-09)** — all read paths now snapshot under the same lock the writers hold (`AuditLog._db_lock`); `export_bundle` too.
+- ~~`spool/__init__.py:669` — `shutil.rmtree(..., ignore_errors=True)` in `_purge_study_dir`: a failed delete still deletes the DB row, so disk is never reclaimed and the study silently vanishes from the queue.~~ **FIXED (2026-09-09)** — the row is deleted only after the files are; a failed `rmtree` logs, keeps the row, and lets a later purge pass retry.
 - `db.py:853` — dynamic `SET` clause construction; safe (only column names vary, values are bound) but worth a comment-free second look at every future edit.
 - Broad `except Exception` with `# noqa: BLE001` appears ~15 times. Mostly justified at genuine boundaries (`_dispatch`, `_poll_loop`, `disk._loop`), but the pattern invites copy-paste into non-boundary code.
-- `Forwarder.stop()` joins with a 5 s timeout while `_dispatch` can be inside `self._stop_event.wait(backoff)` where backoff reaches `5 * 2^4 = 80 s`. Workers are daemons so shutdown still completes, but in-flight routes are abandoned in `error`.
+- ~~`Forwarder.stop()` joins with a 5 s timeout while `_dispatch` can be inside `self._stop_event.wait(backoff)` where backoff reaches `5 * 2^4 = 80 s`.~~ **Clarified (2026-09-09)** — the backoff wait is on the stop event, so `stop()` interrupts it immediately; the 5 s join only bounds a worker stuck mid-`deliver`. Documented on `stop()`.
 
 ---
 
@@ -383,8 +396,8 @@ Worth stating plainly, because this is not a bad codebase:
 **Hygiene (parallel, low risk):**
 10. ~~M1/M2 — CI on the dev branch; commit `uv.lock`.~~ **DONE** — `docs/sprint-plan` added to CI triggers; `uv.lock` tracked and regenerated.
 11. ~~M5 — unify PHI redaction~~ **DONE** — `redact_phi()` helper in `audit/__init__.py`; all three export paths use it. M6/M7 still open.
-12. M8 — add ESLint; add frontend tests for `api.ts` and the two largest views.
-13. ~~M3/M9 — delete dead modules and unused config fields; gitignore built SPA assets.~~ **PARTIALLY DONE** — `accept_compressed` removed; built SPA assets gitignored and deleted from tracking. `max_spool_gb` still unenforced; `service_controller.py` + `service_backend.py` + `ui/__init__.py` still have no non-test callers.
+12. ~~M8 — add ESLint; add frontend tests for `api.ts` and the two largest views.~~ **PARTIALLY DONE (2026-09-09)** — error states added to `AuditView`/`LogsView`/`ReportsView`/`ConfigView`; `saveConfig` surfaces the server's 400 detail; frontend 15 tests passing. ESLint + view tests for `PipelineView`/`QueueView` still open.
+13. ~~M3/M9 — delete dead modules and unused config fields; gitignore built SPA assets.~~ **DONE (2026-09-09)** — `max_spool_gb` now enforced by `DiskMonitor` (4 tests); `accept_compressed` removed; built SPA assets gitignored and deleted from tracking; `keyring_store.py` wired by H3. `service_controller.py`/`service_backend.py`/`ui/__init__.py` remain (service-install scaffolding) — follow-up decision.
 14. ~~Add an integration test that boots `main()` end-to-end (temp spool, two destinations, one delivery). This closes the 29% gap on the composition root and is the highest-leverage single test you can add.~~ **DONE** — `test_main_end_to_end_two_destinations`: boots `main()` subprocess with folder+DICOM destinations, sends synthetic study via `FakeModality`, verifies study persisted and routes created for both destinations, SIGINT graceful shutdown.
 15. ~~M14 — de-flake the 10k latency test; replace the two `sleep()`-based race tests with event synchronisation.~~ **DONE** — latency budget 500→2000 ms; retry_backoff and concurrent_forwarder now poll on events instead of fixed sleeps.
 16. Re-run this review after 0–9.

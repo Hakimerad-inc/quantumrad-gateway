@@ -163,3 +163,65 @@ def test_list_audit_for_study_matches_uid(
     assert "STUDY_QUEUED" in names
     # An unrelated study UID must match nothing.
     assert spool._db.list_audit_for_study("9.9.9.9") == []
+
+
+def test_list_audit_for_study_rejects_prefix_nested_uid(
+    spool: Spool, target_hub: DICOMDestination
+) -> None:
+    """A UID that *contains* another as a prefix must not leak its events.
+
+    DICOM UIDs are prefix-nested: ``1.2.3`` is a substring of ``1.2.3.4``.
+    The old ``LIKE '%<uid>%'`` match on the detail JSON attached the shorter
+    study's events to the longer one (review M7); the exact ``study_uid``
+    column lookup must not.
+    """
+    from mercure_gateway.audit import AuditLog
+
+    audit = AuditLog(spool._db)
+    spool._audit = audit
+    short_id = spool.receive("1.2.3", accession="SHORT")
+    long_id = spool.receive("1.2.3.4", accession="LONG")
+    assert short_id != long_id
+
+    long_events = spool._db.list_audit_for_study("1.2.3.4")
+    assert {row["event"] for row in long_events} == {"STUDY_RECEIVED"}
+    assert all(row["study_uid"] == "1.2.3.4" for row in long_events)
+
+    short_events = spool._db.list_audit_for_study("1.2.3")
+    assert {row["event"] for row in short_events} == {"STUDY_RECEIVED"}
+    assert all(row["study_uid"] == "1.2.3" for row in short_events)
+
+
+def test_v4_audit_events_backfilled_on_open(tmp_path):  # type: ignore[no-untyped-def]
+    """A pre-v5 database's audit rows get exact study_uid values on open."""
+    import sqlite3
+
+    from mercure_gateway.spool.db import open_database
+
+    db_path = tmp_path / "spool.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE audit_events (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            event   TEXT NOT NULL,
+            detail  TEXT NOT NULL DEFAULT '{}',
+            user    TEXT,
+            hash    TEXT NOT NULL
+        );
+        INSERT INTO audit_events (event, detail, hash) VALUES
+            ('STUDY_RECEIVED', '{"study_uid":"1.2.3.4"}', 'h1'),
+            ('STUDY_QUEUED', '{"study_uid":"1.2.3.4"}', 'h2'),
+            ('PRUNE_AUDIT', '{"pruned":0}', 'h3');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = open_database(db_path)
+    rows = db.list_audit_for_study("1.2.3.4")
+    assert {row["event"] for row in rows} == {"STUDY_RECEIVED", "STUDY_QUEUED"}
+    # Events without a study_uid in their detail stay NULL and match nothing.
+    assert db.list_audit_for_study("1.2.3") == []
+    db.close()

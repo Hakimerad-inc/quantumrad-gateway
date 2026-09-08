@@ -280,8 +280,10 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 
 > **Status: FIXED (2026-09-08).** Added `working-directory: src-tauri` to the K6 size gate step so `target/release/mercure-gateway.exe` resolves correctly.
 
-### M13. Version and status claims are inconsistent
+### M13. Version and status claims are inconsistent  ✅ **FIXED**
 `PRODUCT_BRIEF.md:3` says "v1.1-RC"; `pyproject.toml:3`, `src/mercure_gateway/__init__.py:1`, `tauri.conf.json:4`, `web/package.json:4` all say `0.1.0`. The brief's own §6 lists the RC sweep as blocked ("needs Windows VM"), so the RC label is aspirational. Align the version source of truth before tagging.
+
+> **Status: FIXED (2026-09-08).** `src/mercure_gateway/__init__.py` is now the explicit single source of truth with a comment naming the other files that must stay in sync. `PRODUCT_BRIEF.md` updated to `0.1.0-dev (Sprint 09/10 in progress; targeting v1.1-RC)` — the v1.1-RC claim is now framed as the target, not the current state. All code files were already aligned at `0.1.0`.
 
 ### M14. A perf gate test is timing-based and fails under coverage instrumentation  ✅ **FIXED**
 

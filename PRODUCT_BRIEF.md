@@ -1,6 +1,6 @@
 # mercure Gateway — Product Brief
 
-**Version:** v1.1-RC (Sprint 09 in progress)  
+**Version:** 0.1.0-dev (Sprint 09/10 in progress; targeting v1.1-RC)  
 **Branch:** `docs/sprint-plan`  
 **License:** MIT  
 **Last Updated:** 2026-09-07

@@ -91,7 +91,13 @@ def test_single_worker_sequential() -> None:
     ids = [study(spool, str(i), TARGET) for i in range(2)]
     start = time.monotonic()
     fwd.start()
-    time.sleep(1.0)  # enough for sequential (2*0.3 + overhead)
+    # Poll until both studies are sent (review M14: replace fixed sleep with
+    # event synchronisation; 200 * 10 ms = 2 s max, well above the ~0.6 s
+    # minimum for two sequential 0.3 s dispatches).
+    for _ in range(200):
+        if all(spool.state(sid) == StudyState.SENT for sid in ids):
+            break
+        time.sleep(0.01)
     fwd.stop()
     elapsed = time.monotonic() - start
 

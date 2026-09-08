@@ -83,7 +83,13 @@ def test_backoff_holds_route_against_other_workers(
     # thread because _dispatch blocks for the full backoff window).
     dispatch_thread = threading.Thread(target=fwd.process_once, daemon=True)
     dispatch_thread.start()
-    time.sleep(0.2)  # let worker A claim and fail the first attempt
+    # Poll until worker A has claimed and failed the first attempt (review M14:
+    # replace fixed sleep with event synchronisation to avoid flaking under CI).
+    for _ in range(60):
+        if len(handler.attempts) >= 1:
+            break
+        time.sleep(0.005)
+    assert len(handler.attempts) >= 1, "worker A never claimed the route"
 
     # Worker B polls while A is sleeping the backoff.
     other = fwd.process_once()
@@ -91,7 +97,7 @@ def test_backoff_holds_route_against_other_workers(
         "route was re-claimable during backoff — exponential backoff defeated"
     )
 
-    dispatch_thread.join(timeout=15)
+    dispatch_thread.join(timeout=20)
     # The same worker's retries continue on schedule: 5 attempts spaced ≥1 s.
     assert len(handler.attempts) == 5
     for first, second in zip(handler.attempts, handler.attempts[1:], strict=False):

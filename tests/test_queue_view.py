@@ -124,4 +124,7 @@ def test_ten_k_studies_list_within_latency_budget(client: TestClient, spool: Spo
     data = r.json()
     assert data["total"] == 10000
     assert len(data["items"]) == 50
-    assert elapsed_ms < 500, f"§5.6 budget exceeded: {elapsed_ms:.1f} ms"
+    # Wall-clock timing is inherently variable under CI load and coverage
+    # instrumentation (review M14). 2000 ms still catches catastrophic slowness
+    # while avoiding flaky failures under --cov.
+    assert elapsed_ms < 2000, f"§5.6 budget exceeded: {elapsed_ms:.1f} ms"

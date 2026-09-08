@@ -275,9 +275,15 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 ### M13. Version and status claims are inconsistent
 `PRODUCT_BRIEF.md:3` says "v1.1-RC"; `pyproject.toml:3`, `src/mercure_gateway/__init__.py:1`, `tauri.conf.json:4`, `web/package.json:4` all say `0.1.0`. The brief's own §6 lists the RC sweep as blocked ("needs Windows VM"), so the RC label is aspirational. Align the version source of truth before tagging.
 
-### M14. A perf gate test is timing-based and fails under coverage instrumentation
+### M14. A perf gate test is timing-based and fails under coverage instrumentation  ✅ **FIXED**
 
 `tests/test_queue_view.py::test_ten_k_studies_list_within_latency_budget` asserts a **500 ms wall-clock budget** on a 10k-row list (§5.6). It passes in isolation (5.4 s) but **fails in the full run under `--cov`** (282 s). The CI `coverage` job runs `pytest --cov=...`, so this test is a standing source of red builds unrelated to real regressions. Assert on query plan / row counts, or give the budget a large headroom and mark it `slow`.
+
+> **Status: FIXED (2026-09-08).**
+>
+> - `test_queue_view.py`: widened the wall-clock assertion from `< 500 ms` to `< 2000 ms`. This still catches catastrophic slowness (e.g., 10+ seconds for a simple indexed query) while avoiding flaky failures under coverage instrumentation.
+> - `test_retry_backoff.py:86`: replaced `time.sleep(0.2)` with an event-driven poll (60 × 5 ms) until worker A records its first attempt; increased `join(timeout=15)` → `20` to give headroom for 5 exponential-backoff attempts.
+> - `test_concurrent_forwarder.py:94`: replaced `time.sleep(1.0)` with an event-driven poll (200 × 10 ms) until both studies reach `SENT` state, eliminating the fixed sleep while preserving the "sequential dispatch" assertion (`elapsed >= 0.5 s`).
 
 ---
 
@@ -363,7 +369,7 @@ Worth stating plainly, because this is not a bad codebase:
 12. M8 — add ESLint; add frontend tests for `api.ts` and the two largest views.
 13. M3/M9 — delete dead modules and unused config fields; gitignore built SPA assets.
 14. Add an integration test that boots `main()` end-to-end (temp spool, two destinations, one delivery). This closes the 29% gap on the composition root and is the highest-leverage single test you can add.
-15. M14 — de-flake the 10k latency test; replace the two `sleep()`-based race tests with event synchronisation.
+15. ~~M14 — de-flake the 10k latency test; replace the two `sleep()`-based race tests with event synchronisation.~~ **DONE** — latency budget 500→2000 ms; retry_backoff and concurrent_forwarder now poll on events instead of fixed sleeps.
 16. Re-run this review after 0–9.
 
 ---

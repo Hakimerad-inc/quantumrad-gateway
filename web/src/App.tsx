@@ -8,7 +8,7 @@ import AuditView from "./pages/AuditView";
 import SetupWizardPage from "./pages/SetupWizard";
 import PipelineView from "./pages/PipelineView";
 import LoginView from "./pages/LoginView";
-import { fetchQueueStats, fetchSystemStatus, navigate } from "./api";
+import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, navigate, type DiskStatus } from "./api";
 import {
   IconBrand,
   IconPulse,
@@ -24,22 +24,33 @@ import {
 
 type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup" | "login";
 
-function Dashboard() {
+export function Dashboard() {
   const [status, setStatus] = useState<{ receiver: string; forwarder: string; report_retriever: string; uptime_sec: number; version: string; hub_registered: boolean | null; hub_streaming: boolean | null } | null>(null);
   const [stats, setStats] = useState<{ queued: number; sending: number; sent: number; error: number; failed: number } | null>(null);
+  const [disk, setDisk] = useState<DiskStatus | null>(null);
 
   useEffect(() => {
     fetchSystemStatus().then(setStatus).catch(() => setStatus(null));
     fetchQueueStats().then(setStats).catch(() => setStats(null));
+    fetchDiskStatus().then(setDisk).catch(() => setDisk(null));
   }, []);
 
   const dot = (running: string) => (
     <span className={`status-dot ${running === "running" ? "green" : "gray"}`} />
   );
 
+  const gaugeClass = disk ? (disk.usage_pct >= 98 ? "fill crit" : disk.over_threshold ? "fill warn" : "fill") : "fill";
+  const capacity = disk ? `${disk.usage_pct.toFixed(1)}%` : "—";
+
   return (
     <div>
       <h2>Dashboard</h2>
+      {disk?.over_threshold && (
+        <div className="banner warn" role="alert">
+          Spool disk usage at {disk.usage_pct.toFixed(1)}% — at or above the {disk.warning_pct}%
+          warning threshold{disk.purge_on_disk_full ? " (auto-purge of oldest delivered studies is armed)" : ". Enable purge_on_disk_full or free space."}
+        </div>
+      )}
       <div className="card">
         <div className="card-header">System Status</div>
         <div className="stats">
@@ -87,6 +98,32 @@ function Dashboard() {
           <div className="stat"><div className="label">Error</div><div className="value yellow">{stats?.error ?? "—"}</div></div>
           <div className="stat"><div className="label">Failed</div><div className="value red">{stats?.failed ?? "—"}</div></div>
         </div>
+      </div>
+      <div className="card">
+        <div className="card-header">Storage</div>
+        {disk ? (
+          <>
+            <div className="gauge" aria-hidden="true"><div className={gaugeClass} style={{ width: `${Math.min(100, disk.usage_pct)}%` }} /></div>
+            <div className="gauge-row">
+              <span className={`gauge-value ${disk.over_threshold ? "warn" : ""}`}>{capacity}</span>
+              <span className="gauge-meta">warning at {disk.warning_pct}%</span>
+            </div>
+            <div className="stats">
+              <div className="stat"><div className="label">Available</div><div className="value mono">{(disk.free_bytes / 1e9).toFixed(1)} GB</div></div>
+              <div className="stat"><div className="label">Used</div><div className="value mono">{(disk.used_bytes / 1e9).toFixed(1)} GB</div></div>
+              <div className="stat">
+                <div className="label">Auto-purge delivered</div>
+                <div className="value">
+                  {disk.purge_on_disk_full
+                    ? <span className="badge green">armed</span>
+                    : <span className="badge gray">disabled</span>}
+                </div>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="stat"><div className="label">Capacity</div><div className="value">—</div></div>
+        )}
       </div>
     </div>
   );

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -166,6 +167,45 @@ def system_status(request: Request) -> SystemStatus:
 def health() -> dict[str, str]:
     """Health check endpoint."""
     return {"status": "ok", "version": __version__}
+
+
+class DiskStatus(BaseModel):
+    """Live spool filesystem capacity + disk-full management state (S10-T7)."""
+
+    usage_pct: float = 0.0
+    total_bytes: int = 0
+    used_bytes: int = 0
+    free_bytes: int = 0
+    warning_pct: int = 90
+    over_threshold: bool = False
+    purge_on_disk_full: bool = False
+
+
+@router.get("/system/disk", response_model=DiskStatus)
+def system_disk(request: Request) -> DiskStatus:
+    """Spool capacity for the disk-full banner / dashboard gauge (§5.3).
+
+    ``over_threshold`` is True once ``usage_pct >= warning_pct`` (90 % by
+    default, aggressive for the USB profile).  ``purge_on_disk_full`` mirrors
+    the config flag so the SPA can tell operators whether oldest-delivered
+    auto-purge is armed.  A measurement failure is a 503 — a "Disk OK" UI
+    state must never be shown from an unmeasurable filesystem.
+    """
+    storage = _config(request).storage
+    try:
+        disk = shutil.disk_usage(_spool(request).spool_dir)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="spool filesystem not available") from exc
+    usage_pct = disk.used * 100.0 / max(1, disk.total)
+    return DiskStatus(
+        usage_pct=usage_pct,
+        total_bytes=disk.total,
+        used_bytes=disk.used,
+        free_bytes=disk.free,
+        warning_pct=storage.disk_full_warning_pct,
+        over_threshold=usage_pct >= storage.disk_full_warning_pct,
+        purge_on_disk_full=storage.purge_on_disk_full,
+    )
 
 
 @router.post("/system/start")

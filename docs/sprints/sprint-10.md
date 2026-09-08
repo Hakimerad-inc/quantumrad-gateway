@@ -22,7 +22,7 @@ S06-T7 provides config import/export for USB deployment.
 | S10-T4 | **Hot-unplug detection:** udev rule (Linux) monitoring `/sys/block/sdX/device/remove`; `WM_DEVICECHANGE` (Windows) monitoring `DBT_DEVICEREMOVECOMPLETE`; triggers graceful shutdown sequence | usb-dongle-spec §7 | `tests/test_hot_unplug.py` — removal triggers shutdown sequence (receiver.stop → flush → fsync → shutdown marker); timeout after 10s allows forced removal | Graceful shutdown works in both modes; flush ≤10 s (K10) | ☐ |
 | S10-T5 | **USB-specific config defaults:** `usb_mode` section in `GatewayConfig` model; `usb_mode.enabled` auto-detected; `retention_delivered_hours: 24` (aggressive); `storage_budget_gb: 18`; `hot_unplug_safe: true`; `led_enabled: false` | usb-dongle-spec §6 | Config model tests pass; USB defaults applied when `usb_mode.enabled=true`; auto-detection works | Config auto-detects USB mode | ✅ |
 | S10-T6 | **LED status indicator:** GPIO control for Linux mode (BCM pin from config); USB HID control if device supports; state machine: 🔵 idle, 🟢 receiving/forwarding, 🟡 error/retry, 🔴 critical, ⚪ safe to remove, ⚫ off | usb-dongle-spec §3.3 | `tests/test_led.py` — LED state changes per gateway status; GPIO pin configurable; graceful fallback when no LED hardware | LED reflects receiver/forwarder status (or no-op if no hardware) | ☐ |
-| S10-T7 | **Disk full management:** 90% capacity warning (web UI banner + LED 🟡); auto-purge oldest DELIVERED studies when capacity exceeded; undelivered/FAILED studies never purged; capacity dashboard in web admin | usb-dongle-spec §5.3 | `tests/test_disk_full.py` — purge triggered at 90%; delivered studies removed oldest-first; undelivered retained; web UI shows capacity | USB doesn't run out of space; PRD §3.4 retention preserved | ☐ |
+| S10-T7 | **Disk full management:** 90% capacity warning (web UI banner + LED 🟡); auto-purge oldest DELIVERED studies when capacity exceeded; undelivered/FAILED studies never purged; capacity dashboard in web admin | usb-dongle-spec §5.3 | `tests/test_disk_full.py` — purge triggered at 90%; delivered studies removed oldest-first; undelivered retained; web UI shows capacity | USB doesn't run out of space; PRD §3.4 retention preserved | ✅ |
 | S10-T8 | **Recovery scan on USB boot:** detect previous shutdown marker; scan spool dir vs DB; mark incomplete studies as RECEIVED (eligible for re-forward); clear shutdown marker; log recovery actions | usb-dongle-spec §7.3 | `tests/test_usb_recovery.py` — interrupted study recovered; partial study marked incomplete; marker cleared; recovery logged | USB survives unclean removal; studies recoverable | ☐ |
 | S10-T9 | **USB flashing documentation + script (no TDD):** step-by-step guide for creating USB dongles; includes Linux boot, Windows auto-launch, and shared data setup; template config for common modality/hub combos | usb-dongle-spec §8.2 | Docs complete; script tested on Windows 10/11; template configs validated | Admin can create USB dongle in <15 min; guide reviewed by non-technical user | ☐ |
 | S10-T10 | **USB-specific perf tests (no TDD):** benchmark boot → gateway ready (Linux + Windows); hot-unplug flush time; recovery scan time; DICOM write throughput to USB; record against K9/K10 | usb-dongle-spec §10 | perf report in `docs/qa/usb-perf-10.md`; K9/K10 gates pass or decision filed | Performance targets met or documented | ☐ |
@@ -36,6 +36,13 @@ S06-T7 provides config import/export for USB deployment.
   hour-granular retention (`usb_mode.retention_delivered_hours` wins in `Spool.purge_delivered`),
   main.py auto-detect on startup before the pipeline is built. 10 new config tests + 2 new
   retention tests — suite 530 passed / 4 skipped; `ruff check .` and `mypy .` (56 files) clean.
+- S10-T7 ✅ — `feat:` commit (disk full UI): new `GET /api/system/disk` (usage %, bytes, warning
+  threshold, `over_threshold`, `purge_on_disk_full`; 503 on unmeasurable fs); SPA Dashboard Storage
+  gauge card + yellow warning banner (role=alert) wired to the endpoint; SPA rebuilt into
+  `src/mercure_gateway/web/static`. 4 new API tests + 2 vitest Dashboard tests — suite 534 passed /
+  4 skipped; vitest 6 passed; `ruff check .` and `mypy .` (56 files) clean. Auto-purge of
+  delivered oldest-first at 90 % and undelivered retention were already covered by
+  `tests/test_disk_monitor.py` and `tests/chaos/test_disk_full.py` (S09-T1).
 
 **Notes:**
 - S10-T1/T2/T3 are packaging/environment tasks — they don't change the gateway Python code, only
@@ -52,6 +59,11 @@ S06-T7 provides config import/export for USB deployment.
   support.
 - S10-T7 (disk full management) is critical for the 32-64GB USB constraint. The 90% threshold
   triggers proactive purging. The web admin panel shows a capacity gauge.
+  *Deviation:* the DoD test file is named `tests/test_disk_full.py`; that basename collides with
+  `tests/chaos/test_disk_full.py` (S09-T1, no `tests/__init__.py`), so the web-side tests live in
+  `tests/test_disk_full_ui.py`. The DoD intent (90% purge trigger, oldest-first, undelivered
+  retained, UI shows capacity) is covered across `test_disk_full_ui.py` + `test_disk_monitor.py` +
+  `tests/chaos/test_disk_full.py`.
 - S10-T8 (recovery) reuses the existing recovery scan from Sprint 02 (S02-T6) with USB-specific
   shutdown marker detection.
 - Standalone hardware mode (Raspberry Pi, external power) is **not** in this sprint — deferred to

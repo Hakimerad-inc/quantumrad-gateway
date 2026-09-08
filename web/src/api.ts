@@ -65,6 +65,20 @@ export function fetchSystemStatus(): Promise<SystemStatus> {
   return getJson<SystemStatus>("/api/system/status");
 }
 
+export interface DiskStatus {
+  usage_pct: number;
+  total_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  warning_pct: number;
+  over_threshold: boolean;
+  purge_on_disk_full: boolean;
+}
+
+export function fetchDiskStatus(): Promise<DiskStatus> {
+  return getJson<DiskStatus>("/api/system/disk");
+}
+
 export async function postJson(url: string): Promise<{ status: string } | null> {
   const res = await fetch(url, { method: "POST" });
   if (!res.ok) return null;

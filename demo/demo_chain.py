@@ -248,7 +248,11 @@ def main(argv: list[str] | None = None) -> int:
             # Failure phase: no handler registered → first dispatch fails.
             result = chain.retry()
             print(f"sent: {result['sent']} instance(s), {result['failure']} failed")
-            print(f"first attempt: {result['state']}")
+            state = result.get("state")
+            if state is None:
+                print("first attempt: not attempted (send failed)")
+            else:
+                print(f"first attempt: {state}")
 
             # Register the handler and re-forward manually (RETRY_MANUAL audit).
             forwarder.register_handler("dicom", DICOMHandler(hub_dest, spool))

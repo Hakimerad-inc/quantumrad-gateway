@@ -101,6 +101,12 @@ class Receiver:
     def stop(self) -> None:
         """Stop accepting associations and release the listening socket."""
         if self._server is not None:
+            # pynetdicom leaks an association reactor thread stuck in
+            # ``receive_pdu`` after every handled association. With
+            # ``block_on_close=True`` (socketserver default) ``server_close``
+            # joins it and hangs shutdown forever; the threads are daemonized
+            # (they die at process exit), so skip the join.
+            self._server.block_on_close = False
             self._server.shutdown()
             self._server = None
         self._running = False

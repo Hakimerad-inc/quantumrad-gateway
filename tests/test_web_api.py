@@ -554,6 +554,26 @@ def test_export_audit_includes_hash(client: TestClient, spool: Spool) -> None:
         assert event.get("hash"), "audit export missing chain hash"
 
 
+def test_export_audit_redacts_phi_under_minimal_scope(
+    client: TestClient, spool: Spool
+) -> None:
+    """PHI fields are stripped from audit export when phi_scope=minimal (M5)."""
+    from mercure_gateway.audit import AuditLog
+
+    audit = AuditLog(spool._db)
+    audit.append(
+        "STUDY_RECEIVED",
+        {"study_uid": "1.2.3", "patient_name": "John Doe", "mrn": "12345"},
+    )
+    r = client.get("/api/audit/export")
+    data = r.json()
+    event = data["events"][0]
+    detail = event["detail"]
+    assert "patient_name" not in detail
+    assert "mrn" not in detail
+    assert detail.get("study_uid") == "1.2.3"
+
+
 def test_console_dashboard(client: TestClient, spool: Spool) -> None:
     """Operator console v0 aggregates queue + audit into one dashboard response."""
     from mercure_gateway.audit import AuditLog

@@ -772,9 +772,24 @@ def export_audit(
     request: Request,
     limit: int = Query(10000, ge=1, le=100000),
 ) -> JSONResponse:
-    """Export audit log as downloadable JSON (includes chain hashes)."""
-    rows = _spool(request)._db.list_audit_events(limit=limit)
-    events = [_row_to_dict(r) for r in rows]
+    """Export audit log as downloadable JSON (includes chain hashes).
+
+    PHI scoping (§6.4): when ``config.audit.phi_scope`` is ``"minimal"``
+    (the default), patient-identifying detail keys are stripped from the
+    exported events (review M5).
+    """
+    sp = _spool(request)
+    cfg = _config(request)
+    phi_scope = getattr(cfg.audit, "phi_scope", "minimal")
+    from mercure_gateway.audit import redact_phi
+
+    rows = sp._db.list_audit_events(limit=limit)
+    events = []
+    for r in rows:
+        ev = _row_to_dict(r)
+        detail = json.loads(ev.get("detail") or "{}")
+        ev["detail"] = redact_phi(detail, phi_scope)
+        events.append(ev)
     return JSONResponse(
         content={"events": events, "count": len(events)},
         headers={
@@ -889,13 +904,11 @@ def diagnostics_export(request: Request) -> JSONResponse:
     # Structured audit events (PHI-scoped like the audit export).
     audit = AuditLog(sp._db)
     phi_scope = getattr(cfg.audit, "phi_scope", "minimal")
-    phf_fields = ("patient_name", "mrn", "patient_id")
+    from mercure_gateway.audit import redact_phi
+
     events: list[dict[str, Any]] = []
     for row in sp._db.list_audit_events(limit=1000):
-        detail = json.loads(row["detail"])
-        if phi_scope == "minimal":
-            for field in phf_fields:
-                detail.pop(field, None)
+        detail = redact_phi(json.loads(row["detail"]), phi_scope)
         events.append(
             {
                 "id": row["id"],

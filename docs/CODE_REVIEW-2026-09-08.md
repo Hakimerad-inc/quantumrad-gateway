@@ -30,7 +30,7 @@ The quality bar in the *code* is RC-grade. The *integration* and *claims* are pr
 
 | Metric | Claimed | Measured |
 |---|---|---|
-| Tests passing | "470+" | **600 passed / 4 skipped** ✅ (559 after H6; 585 after H1/H2/C4 +26; 589 after H4 +5 sftp; 592 after C3 +3 main wiring; 599 after H3 +7 config encryption; 600 after end-to-end integration test) |
+| Tests passing | "470+" | **601 passed / 4 skipped** ✅ (559 after H6; 585 after H1/H2/C4 +26; 589 after H4 +5 sftp; 592 after C3 +3 main wiring; 599 after H3 +7 config encryption; 600 after end-to-end integration test; 601 after M5 +1 PHI redaction) |
 | `mypy` strict | "clean" | **Clean, 57 source files** ✅ |
 | `ruff` | "clean" | **All checks passed** ✅ |
 | Branch coverage | "84%" | **83.24%** ✅ (gate 80% met) |
@@ -250,8 +250,15 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 ### M4. Audit tamper-evidence is weaker than advertised
 `audit/__init__.py:284-329` (`prune`) drops the append-only triggers, deletes rows, and **recomputes every hash from genesis** so `verify()` still passes. That is a reasonable retention design, but it means the same code path is a legitimate history-rewriting tool. Combined with unkeyed SHA-256 (correctly acknowledged at `:16-19`) and `head_hash()` never being anchored anywhere by default, "tamper-evident" is aspirational. Anchor the head hash to the hub or an append-only external sink, and record prunes as a signed range.
 
-### M5. PHI redaction is inconsistent across exports
+### M5. PHI redaction is inconsistent across exports  ✅ **FIXED**
 `routes.py:768-781` (`GET /audit/export`) emits **raw audit details with no `phi_scope` filtering**, while `export_bundle` (`audit/__init__.py:245-254`) and `/diagnostics/export` (`routes.py:887-896`) do filter. Worse, the diagnostics docstring (`:876-878`) claims it "follows the audit `phi_scope` the same way the audit export does" — citing a path that does no such thing. Pick one behaviour and apply it in all three places.
+
+> **Status: FIXED (2026-09-08).** Added `redact_phi(detail, phi_scope)` helper in `audit/__init__.py` as the single implementation of PHI redaction for audit exports. All three paths now use it:
+> - `/audit/export` (routes.py): now parses JSON detail and applies `redact_phi` before serialising.
+> - `/diagnostics/export` (routes.py): now imports and calls `redact_phi` instead of inlining the logic.
+> - `export_bundle` (audit/__init__.py): now calls `redact_phi` instead of inlining.
+>
+> New `tests/test_web_api.py::test_export_audit_redacts_phi_under_minimal_scope`: asserts `patient_name` and `mrn` are stripped while non-PHI fields (`study_uid`) survive. Full suite: **601 passed / 4 skipped** (+1 new).
 
 ### M6. Web layer reaches into `Spool._db` (private) ~13 times
 `routes.py:257, 299, 302, 330, 343, 406, 425, 446, 645, 752, 774, 892, 909`. The module docstring (`:5-7`) explicitly states: *"All data access goes through the `Spool` / `Database` public API — no raw SQL on private attributes."* The invariant is violated in the file that declares it. Add the handful of missing `Spool` façade methods.
@@ -375,7 +382,7 @@ Worth stating plainly, because this is not a bad codebase:
 
 **Hygiene (parallel, low risk):**
 10. ~~M1/M2 — CI on the dev branch; commit `uv.lock`.~~ **DONE** — `docs/sprint-plan` added to CI triggers; `uv.lock` tracked and regenerated.
-11. M5/M6/M7 — unify PHI redaction; add `Spool` façade methods; add `study_uid` column to `audit_events`.
+11. ~~M5 — unify PHI redaction~~ **DONE** — `redact_phi()` helper in `audit/__init__.py`; all three export paths use it. M6/M7 still open.
 12. M8 — add ESLint; add frontend tests for `api.ts` and the two largest views.
 13. ~~M3/M9 — delete dead modules and unused config fields; gitignore built SPA assets.~~ **PARTIALLY DONE** — `accept_compressed` removed; built SPA assets gitignored and deleted from tracking. `max_spool_gb` still unenforced; `service_controller.py` + `service_backend.py` + `ui/__init__.py` still have no non-test callers.
 14. ~~Add an integration test that boots `main()` end-to-end (temp spool, two destinations, one delivery). This closes the 29% gap on the composition root and is the highest-leverage single test you can add.~~ **DONE** — `test_main_end_to_end_two_destinations`: boots `main()` subprocess with folder+DICOM destinations, sends synthetic study via `FakeModality`, verifies study persisted and routes created for both destinations, SIGINT graceful shutdown.

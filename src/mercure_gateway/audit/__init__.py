@@ -52,6 +52,25 @@ logger = logging.getLogger(__name__)
 
 _GENESIS_HASH = hashlib.sha256(b"mercure-gateway-genesis").hexdigest()
 
+# Patient-identifying fields that are stripped from audit exports when
+# ``phi_scope`` is ``"minimal"`` (the default; review M5).
+_PHI_FIELDS = ("patient_name", "mrn", "patient_id")
+
+
+def redact_phi(detail: dict[str, Any], phi_scope: str = "minimal") -> dict[str, Any]:
+    """Return a copy of *detail* with PHI fields removed when scope is minimal.
+
+    This is the single implementation of PHI redaction for audit exports so
+    that ``/audit/export``, ``/diagnostics/export``, and ``export_bundle``
+    behave identically (review M5).
+    """
+    if phi_scope != "minimal":
+        return detail
+    copy = dict(detail)
+    for field in _PHI_FIELDS:
+        copy.pop(field, None)
+    return copy
+
 __all__ = ["AuditLog", "AuditEvent", "ChainError"]
 
 
@@ -243,15 +262,11 @@ class AuditLog:
         redacted = redact_config(config_data)
 
         phi_scope = getattr(config.audit, "phi_scope", "minimal")
-        phf_fields = ("patient_name", "mrn", "patient_id")
         events: list[dict[str, Any]] = []
         for row in self._conn.execute(
             "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
         ):
-            detail = json.loads(row["detail"])
-            if phi_scope == "minimal":
-                for field in phf_fields:
-                    detail.pop(field, None)
+            detail = redact_phi(json.loads(row["detail"]), phi_scope)
             events.append(
                 {
                     "id": row["id"],

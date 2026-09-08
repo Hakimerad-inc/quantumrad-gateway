@@ -178,7 +178,12 @@ class Database:
         conn = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
+        # FULL, not NORMAL: under WAL, NORMAL skips the fsync at COMMIT, so a
+        # transaction that has already been acknowledged can still be lost on
+        # power loss or device yank. Study state is the source of truth for
+        # "we have this data" (PRD §3.4), so it must be durable at commit
+        # (review H1). The instance files are fsynced by Spool.store_instance.
+        conn.execute("PRAGMA synchronous = FULL")
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA foreign_keys = ON")
         return conn

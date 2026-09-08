@@ -3,15 +3,35 @@
 Tauri Updater flow: fetch update manifest, verify Ed25519 signature,
 download update, apply, and rollback on failure.  The Python side
 handles signature verification and update lifecycle state.
+
+Signature verification is real cryptography (review H2). These tests build an
+actual Ed25519 keypair rather than asserting the old placeholder, which
+compared the signature against the literal string ``"valid-signature"``.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from mercure_gateway.update import UpdateManifest, Updater
+
+# A per-session test keypair (Ed25519 keygen is cheap). The private key exists
+# only so these tests can produce signatures the Updater should accept.
+_PRIVATE_KEY = Ed25519PrivateKey.generate()
+_PUBLIC_B64 = base64.b64encode(
+    _PRIVATE_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+).decode("ascii")
+
+
+def sign(payload: bytes) -> str:
+    """Return a base64 Ed25519 signature over *payload* (the manifest format)."""
+    return base64.b64encode(_PRIVATE_KEY.sign(payload)).decode("ascii")
 
 
 @pytest.fixture()
@@ -19,16 +39,22 @@ def updater() -> Updater:
     return Updater(
         update_url="https://updates.example.com/latest.json",
         current_version="1.0.0",
+        public_key=_PUBLIC_B64,
     )
 
 
 @pytest.fixture()
-def valid_manifest() -> UpdateManifest:
+def archive() -> bytes:
+    return b"mock-update-archive"
+
+
+@pytest.fixture()
+def valid_manifest(archive: bytes) -> UpdateManifest:
     return UpdateManifest(
         version="1.1.0",
         url="https://updates.example.com/releases/v1.1.0.tar.gz",
-        signature="dGVzdC1zaWduYXR1cmU=",  # base64 = "test-signature"
-        checksum_sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        signature=sign(archive),
+        checksum_sha256=hashlib.sha256(archive).hexdigest(),
     )
 
 
@@ -92,22 +118,81 @@ def test_check_update_http_failure_handled(mock_get: MagicMock, updater: Updater
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Signature verification
+# Signature verification — real Ed25519 (review H2)
 # ══════════════════════════════════════════════════════════════════════
 
-def test_verify_signature_valid(updater: Updater) -> None:
-    """A valid signature passes verification."""
-    assert updater.verify_signature("data", "valid-signature") is True
+def test_verify_signature_accepts_a_real_signature(updater: Updater) -> None:
+    """A genuine Ed25519 signature over the payload passes."""
+    assert updater.verify_signature(b"payload", sign(b"payload")) is True
 
 
-def test_verify_signature_invalid(updater: Updater) -> None:
-    """An invalid signature is rejected."""
-    assert updater.verify_signature("data", "invalid-signature") is False
+def test_verify_signature_rejects_tampered_payload(
+    updater: Updater, archive: bytes
+) -> None:
+    """A valid signature over *other* bytes does not validate this payload."""
+    assert updater.verify_signature(archive, sign(b"a-different-archive")) is False
+
+
+def test_verify_signature_rejects_a_forged_key(archive: bytes) -> None:
+    """A signature from an untrusted key is rejected (the whole point)."""
+    impostor = Ed25519PrivateKey.generate()
+    forged = impostor.sign(archive)
+    import base64
+
+    updater = Updater(
+        update_url="https://updates.example.com/latest.json",
+        current_version="1.0.0",
+        public_key=_PUBLIC_B64,
+    )
+
+    assert updater.verify_signature(archive, base64.b64encode(forged).decode()) is False
 
 
 def test_verify_signature_empty_rejected(updater: Updater) -> None:
     """An empty signature is always rejected."""
     assert updater.verify_signature("data", "") is False
+
+
+def test_verify_signature_rejects_the_old_placeholder(updater: Updater) -> None:
+    """Guard against regressing to the string-compare stub (review H2)."""
+    assert updater.verify_signature("data", "valid-signature") is False
+
+
+def test_verify_signature_rejects_garbage(updater: Updater) -> None:
+    """Undecodable or wrong-length signatures are rejected, not crashed on."""
+    assert updater.verify_signature("data", "not-base64!!") is False
+    assert updater.verify_signature("data", "c2hvcnQ=") is False  # 5 bytes, not 64
+
+
+def test_verify_signature_fails_closed_without_a_key() -> None:
+    """No trust anchor configured ⇒ nothing can be verified ⇒ reject all."""
+    updater = Updater(
+        update_url="https://updates.example.com/latest.json",
+        current_version="1.0.0",
+    )
+    assert updater.verify_signature("data", sign(b"data")) is False
+
+
+def test_public_key_accepts_pem_and_raw_bytes() -> None:
+    """Both PEM and raw 32-byte keys configure the same trust anchor."""
+    pem = _PRIVATE_KEY.public_key().public_bytes(
+        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+    )
+    payload = b"data"
+    signature = sign(payload)
+
+    assert Updater(
+        update_url="u", current_version="1", public_key=pem.decode()
+    ).verify_signature(payload, signature) is True
+    assert Updater(
+        update_url="u", current_version="1", public_key=_PUBLIC_B64
+    ).verify_signature(payload, signature) is True
+
+
+def test_malformed_public_key_is_loud() -> None:
+    """A key of the wrong length is a deployment error, not a silent no-op."""
+    with pytest.raises(ValueError):
+        Updater(update_url="u", current_version="1", public_key="c2hvcnQ=")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -116,28 +201,42 @@ def test_verify_signature_empty_rejected(updater: Updater) -> None:
 
 @patch("requests.get")
 def test_apply_update_downloads_and_verifies(
-    mock_get: MagicMock, updater: Updater, valid_manifest: UpdateManifest
+    mock_get: MagicMock, updater: Updater, valid_manifest: UpdateManifest, archive: bytes
 ) -> None:
     """apply_update() downloads the archive, verifies, and applies."""
-    import hashlib
-
-    content = b"mock-update-archive"
     resp = MagicMock()
     resp.ok = True
-    resp.content = content
+    resp.content = archive
     mock_get.return_value = resp
 
-    manifest = UpdateManifest(
-        version=valid_manifest.version,
-        url=valid_manifest.url,
-        signature=valid_manifest.signature,
-        checksum_sha256=hashlib.sha256(content).hexdigest(),
-    )
-
-    result = updater.apply_update(manifest)
+    result = updater.apply_update(valid_manifest)
 
     assert result.ok is True
-    assert updater.pending_update is manifest  # staged for the restart swap
+    assert updater.pending_update is valid_manifest  # staged for the restart swap
+
+
+@patch("requests.get")
+def test_apply_update_rejects_unsigned_archive(
+    mock_get: MagicMock, updater: Updater, archive: bytes
+) -> None:
+    """A tampered archive whose signature does not match is never staged."""
+    resp = MagicMock()
+    resp.ok = True
+    resp.content = archive
+    mock_get.return_value = resp
+
+    tampered = UpdateManifest(
+        version="1.1.0",
+        url="https://updates.example.com/releases/v1.1.0.tar.gz",
+        signature=sign(b"some-other-archive"),
+        checksum_sha256=hashlib.sha256(archive).hexdigest(),
+    )
+
+    result = updater.apply_update(tampered)
+
+    assert result.ok is False
+    assert "signature" in (result.error or "").lower()
+    assert updater.pending_update is None
 
 
 @patch("requests.get")

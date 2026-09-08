@@ -35,7 +35,6 @@ from mercure_gateway.config import (
 )
 from mercure_gateway.disk import DiskMonitor
 from mercure_gateway.forwarder import Forwarder
-from mercure_gateway.forwarder.handlers.dicom import DICOMHandler
 from mercure_gateway.hotplug import (
     HotplugDetector,
     run_shutdown_sequence,
@@ -120,19 +119,65 @@ def _install_shutdown_signal_handlers(shutdown_done: threading.Event) -> None:
 
 
 def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) -> Forwarder:
-    """Register a DICOM handler for every enabled ``dicom`` destination.
+    """Register a handler for every enabled destination.
 
-    Handlers are registered *per destination* (``target_name``) — a type-only
-    registry would collapse two enabled ``dicom`` destinations onto the last
-    handler and misdeliver every study.
+    Every target type the config models (dicom, dicom_tls, dicomweb, sftp,
+    rsync, s3, folder, xnat) is wired here — previously only ``dicom`` was, so
+    a ``sftp``/``s3``/… destination could never be delivered (review C3).
+    Handlers are registered *per destination* (``target_name``): a type-only
+    registry would collapse two enabled destinations of the same type onto the
+    last handler and misdeliver every study.
     """
     from mercure_gateway.audit import AuditLog
+    from mercure_gateway.forwarder.handlers.dicom import DICOMHandler, DICOMTLSHandler
+    from mercure_gateway.forwarder.handlers.dicomweb import DICOMwebHandler
+    from mercure_gateway.forwarder.handlers.folder import FolderHandler
+    from mercure_gateway.forwarder.handlers.rsync import RsyncHandler
+    from mercure_gateway.forwarder.handlers.s3 import S3Handler
+    from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+    from mercure_gateway.forwarder.handlers.xnat import XNATHandler
 
     forwarder = Forwarder(config, spool, audit=AuditLog(database))
     for destination in config.destinations:
-        if destination.type == "dicom" and destination.enabled:
+        if not destination.enabled:
+            continue
+        if destination.type == "dicom":
             forwarder.register_handler(
                 "dicom", DICOMHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "dicom_tls":
+            forwarder.register_handler(
+                "dicom_tls", DICOMTLSHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "dicomweb":
+            forwarder.register_handler(
+                "dicomweb", DICOMwebHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "sftp":
+            forwarder.register_handler(
+                "sftp", SFTPHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "rsync":
+            forwarder.register_handler(
+                "rsync", RsyncHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "s3":
+            forwarder.register_handler(
+                "s3", S3Handler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "folder":
+            forwarder.register_handler(
+                "folder", FolderHandler(destination, spool), target_name=destination.name
+            )
+        elif destination.type == "xnat":
+            forwarder.register_handler(
+                "xnat", XNATHandler(destination, spool), target_name=destination.name
+            )
+        else:
+            logger.warning(
+                "no forwarding handler for destination type %r (destination %r)",
+                destination.type,
+                destination.name,
             )
     return forwarder
 

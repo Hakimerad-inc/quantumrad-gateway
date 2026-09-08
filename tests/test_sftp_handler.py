@@ -23,6 +23,7 @@ from paramiko import AuthenticationException, SSHException
 
 from mercure_gateway.config import SFTPDestination, default_config
 from mercure_gateway.forwarder import Forwarder, RetryPolicy
+from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
 from mercure_gateway.spool import Spool, StudyState
 from mercure_gateway.spool.db import mem_database
 
@@ -176,3 +177,95 @@ def test_sftp_handler_through_forwarder(mock_ssh, tmp_path: Path, spool: Spool) 
     fwd.process_once()
 
     assert spool.state(study_id) == StudyState.SENT
+
+# ══════════════════════════════════════════════════════════════════════
+# Host key verification (review H4)
+# ══════════════════════════════════════════════════════════════════════
+
+@patch("paramiko.SSHClient")
+def test_sftp_no_longer_auto_accepts_host_keys(mock_ssh, tmp_path: Path, spool: Spool) -> None:
+    """The AutoAddPolicy (blind trust) must be gone, replaced by RejectPolicy."""
+    import paramiko
+
+    mock_client = MagicMock()
+    mock_ssh.return_value = mock_client
+    mock_client.open_sftp.return_value = MagicMock()
+
+    study_id = _write_study(spool)
+    dest = SFTPDestination(
+        name="nas", type="sftp", host="nas.local", port=22, username="u", password="pw"
+    )
+    task = _claim_task(spool, study_id, dest)
+    result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+
+    assert result.ok is True
+    mock_client.set_missing_host_key_policy.assert_called_once()
+    policy = mock_client.set_missing_host_key_policy.call_args[0][0]
+    assert isinstance(policy, paramiko.RejectPolicy)
+    assert not isinstance(policy, paramiko.AutoAddPolicy)
+
+
+@patch("paramiko.SSHClient")
+def test_sftp_loads_configured_known_hosts(mock_ssh, tmp_path: Path, spool: Spool) -> None:
+    """A configured known_hosts file is loaded for verification."""
+    mock_client = MagicMock()
+    mock_ssh.return_value = mock_client
+    mock_client.open_sftp.return_value = MagicMock()
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("nas.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5example\n")
+
+    study_id = _write_study(spool)
+    dest = SFTPDestination(
+        name="nas", type="sftp", host="nas.local", port=22, username="u",
+        password="pw", known_hosts=str(known_hosts),
+    )
+    task = _claim_task(spool, study_id, dest)
+    result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+
+    assert result.ok is True
+    mock_client.load_host_keys.assert_called_once_with(str(known_hosts))
+
+
+@patch("paramiko.SSHClient")
+def test_sftp_creates_missing_known_hosts_file(mock_ssh, tmp_path: Path, spool: Spool) -> None:
+    """A configured but absent known_hosts file is created (then rejects)."""
+    mock_client = MagicMock()
+    mock_ssh.return_value = mock_client
+    mock_client.open_sftp.return_value = MagicMock()
+
+    known_hosts = tmp_path / "nested" / "known_hosts"
+
+    study_id = _write_study(spool)
+    dest = SFTPDestination(
+        name="nas", type="sftp", host="nas.local", port=22, username="u",
+        password="pw", known_hosts=str(known_hosts),
+    )
+    task = _claim_task(spool, study_id, dest)
+    result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+
+    assert known_hosts.exists()
+    assert result.ok is True
+
+
+@patch("paramiko.SSHClient")
+def test_sftp_rejects_unknown_host_key(mock_ssh, tmp_path: Path, spool: Spool) -> None:
+    """With no trusted keys, a connection is rejected rather than open (H4)."""
+    from paramiko.ssh_exception import SSHException
+
+    mock_client = MagicMock()
+    mock_ssh.return_value = mock_client
+    # RejectPolicy raises this when the host key is not in known_hosts.
+    mock_client.connect.side_effect = SSHException(
+        "Server 'nas.local' not found in known_hosts"
+    )
+
+    study_id = _write_study(spool)
+    dest = SFTPDestination(
+        name="nas", type="sftp", host="nas.local", port=22, username="u", password="pw"
+    )
+    task = _claim_task(spool, study_id, dest)
+    result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+
+    assert result.ok is False
+    assert "known_hosts" in (result.error or "").lower()

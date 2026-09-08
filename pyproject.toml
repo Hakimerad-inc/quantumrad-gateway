@@ -16,6 +16,8 @@ dependencies = [
     "boto3>=1.43.83",
     "requests>=2.34.2",
     "keyring>=25.7.0",
+    # Required by starlette for multipart form parsing (POST /api/config/import).
+    "python-multipart>=0.0.9",
 ]
 
 [project.scripts]

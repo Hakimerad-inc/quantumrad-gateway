@@ -1,12 +1,14 @@
 /** Login page for web UI authentication (S06-T8). */
 
 import { useState, FormEvent } from 'react';
+import { useAuth } from '../context/AuthContext';
 
 interface LoginViewProps {
-  onLogin: () => void;
+  onLogin?: () => void;
 }
 
 export default function LoginView({ onLogin }: LoginViewProps) {
+  const { login } = useAuth();
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -17,21 +19,15 @@ export default function LoginView({ onLogin }: LoginViewProps) {
     setLoading(true);
 
     try {
-      const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ password }),
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ detail: 'Login failed' }));
-        setError(data.detail || 'Login failed');
+      // Delegate to AuthContext so `isAuthenticated` flips and the app leaves
+      // the login screen. Calling /api/login directly here sets the cookie but
+      // leaves the auth state stale, which re-renders this view forever (C1).
+      const result = await login(password);
+      if (!result.ok) {
+        setError(result.error ?? 'Login failed');
         return;
       }
-
-      // Successful login
-      onLogin();
+      onLogin?.();
     } catch {
       setError('Network error. Please try again.');
     } finally {

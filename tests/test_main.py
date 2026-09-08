@@ -11,17 +11,34 @@ from __future__ import annotations
 
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from mercure_gateway.config import (
+    DICOMDestination,
+    DICOMTLSDestination,
+    DICOMwebDestination,
+    FolderDestination,
     GatewayConfig,
     ReceiverConfig,
+    RsyncDestination,
+    S3Destination,
+    SFTPDestination,
+    XNATDestination,
     default_config,
     save_config,
 )
+from mercure_gateway.forwarder.handlers.dicom import DICOMHandler, DICOMTLSHandler
+from mercure_gateway.forwarder.handlers.dicomweb import DICOMwebHandler
+from mercure_gateway.forwarder.handlers.folder import FolderHandler
+from mercure_gateway.forwarder.handlers.rsync import RsyncHandler
+from mercure_gateway.forwarder.handlers.s3 import S3Handler
+from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+from mercure_gateway.forwarder.handlers.xnat import XNATHandler
+from mercure_gateway.main import _build_forwarder
 from mercure_gateway.spool.db import open_database
 
 
@@ -103,3 +120,96 @@ def test_main_receives_study_graceful_shutdown(tmp_path: Path) -> None:
             stdout, stderr = proc.communicate(timeout=5)
 
     assert proc.returncode == 0, f"main() exited {proc.returncode}: {stderr}"
+
+
+# ── C3: every destination type is wired to a handler (review C3) ────────────
+# Previously only ``dicom`` destinations registered a handler, so sftp/s3/…
+# destinations were dead code that could never deliver a study. These tests
+# pin the wiring end-to-end by inspecting the forwarder's handler registry.
+
+_EXPECTED_HANDLERS = {
+    "dicom": (DICOMDestination, DICOMHandler),
+    "dicom_tls": (DICOMTLSDestination, DICOMTLSHandler),
+    "dicomweb": (DICOMwebDestination, DICOMwebHandler),
+    "sftp": (SFTPDestination, SFTPHandler),
+    "rsync": (RsyncDestination, RsyncHandler),
+    "s3": (S3Destination, S3Handler),
+    "folder": (FolderDestination, FolderHandler),
+    "xnat": (XNATDestination, XNATHandler),
+}
+
+
+def _one_destination_of_each_type() -> list:
+    """Return one *enabled* destination of every supported type."""
+    return [
+        DICOMDestination(name="d1", host="127.0.0.1", port=11112, aet_target="PACS"),
+        DICOMTLSDestination(name="d2", host="127.0.0.1", port=11112, aet_target="PACS"),
+        DICOMwebDestination(name="d3", url="https://pacs.example/stow"),
+        SFTPDestination(name="d4", host="127.0.0.1", username="u", remote_path="/r"),
+        RsyncDestination(name="d5", host="127.0.0.1", username="u", remote_path="/r"),
+        S3Destination(name="d6", bucket="b"),
+        FolderDestination(name="d7", path="/tmp/out"),
+        XNATDestination(name="d8", url="https://xnat", username="u", password="p", project="p"),
+    ]
+
+
+class _StubSpool:
+    """Minimal spool stand-in: handlers only store it at construction time."""
+
+    def __init__(self) -> None:
+        self.spool_dir = "/tmp"
+
+
+def _build(config: GatewayConfig):
+    db = sqlite3.connect(":memory:")
+    return _build_forwarder(config, _StubSpool(), db)
+
+
+def test_build_forwarder_registers_every_destination_type() -> None:
+    """Each enabled type resolves to exactly the right handler class."""
+    cfg = default_config()
+    cfg.destinations = _one_destination_of_each_type()
+    forwarder = _build(cfg)
+
+    for type_name, (_, handler_cls) in _EXPECTED_HANDLERS.items():
+        matches = [k for k in forwarder._handlers if k.startswith(f"{type_name}:")]
+        assert matches, f"no handler registered for type {type_name!r}"
+        # The per-destination key must map to the correct handler class.
+        dest = next(d for d in cfg.destinations if d.type == type_name)
+        key = f"{type_name}:{dest.name}"
+        assert key in forwarder._handlers, f"missing per-destination key {key!r}"
+        assert isinstance(forwarder._handlers[key], handler_cls), (
+            f"{key} mapped to {type(forwarder._handlers[key]).__name__}, "
+            f"expected {handler_cls.__name__}"
+        )
+
+
+def test_build_forwarder_skips_disabled_destinations() -> None:
+    """A disabled destination registers no handler (no silent dead routing)."""
+    cfg = default_config()
+    cfg.destinations = _one_destination_of_each_type()
+    # Disable the sftp destination.
+    for d in cfg.destinations:
+        if d.type == "sftp":
+            d.enabled = False
+    forwarder = _build(cfg)
+
+    assert all(
+        not k.startswith("sftp:") for k in forwarder._handlers
+    ), "disabled sftp destination should not register a handler"
+    # The other seven are still wired.
+    assert len(forwarder._handlers) == 7
+
+
+def test_build_forwarder_registers_two_destinations_of_same_type() -> None:
+    """Two enabled destinations of one type get distinct per-destination keys."""
+    cfg = default_config()
+    cfg.destinations = [
+        DICOMDestination(name="a", host="127.0.0.1", port=11112, aet_target="PACS"),
+        DICOMDestination(name="b", host="127.0.0.1", port=11113, aet_target="PACS2"),
+    ]
+    forwarder = _build(cfg)
+    assert "dicom:a" in forwarder._handlers
+    assert "dicom:b" in forwarder._handlers
+    assert forwarder._handlers["dicom:a"].destination.port == 11112
+    assert forwarder._handlers["dicom:b"].destination.port == 11113

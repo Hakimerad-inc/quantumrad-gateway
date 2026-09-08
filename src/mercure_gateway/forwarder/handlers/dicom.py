@@ -20,26 +20,23 @@ from pathlib import Path
 import pydicom
 from pydicom.uid import (
     AllTransferSyntaxes,
-    CTImageStorage,
     JPEGBaseline8Bit,
     JPEGLossless,
-    MRImageStorage,
     RLELossless,
 )
 from pynetdicom import AE
 
-from mercure_gateway.config import DICOMDestination
+from mercure_gateway.config import DICOMDestination, DICOMTLSDestination
 from mercure_gateway.forwarder import DeliveryResult
+from mercure_gateway.sop_classes import STORAGE_SOP_CLASSES, sop_classes_for_files
 from mercure_gateway.spool import ClaimedTask, Spool
 
-__all__ = ["DICOMHandler"]
+__all__ = ["DICOMHandler", "DICOMTLSHandler"]
 
-# Default presentation contexts to negotiate with the SCP. All standard
-# transfer syntaxes are offered per context (compressed + native).
-_STORAGE_CONTEXTS = [
-    CTImageStorage,
-    MRImageStorage,
-]
+# Fallback when a study's SOP classes cannot be determined (unreadable file,
+# or a class outside :data:`STORAGE_SOP_CLASSES`). Offering all of them keeps
+# delivery working rather than failing the task on a header we cannot parse.
+_STORAGE_CONTEXTS = list(STORAGE_SOP_CLASSES)
 
 # Compressed syntaxes offered as dedicated per-syntax presentation contexts.
 # DICOM allows the acceptor only ONE transfer syntax per accepted context and
@@ -68,6 +65,14 @@ class DICOMHandler:
         self.destination = destination
         self.spool = spool
 
+    def _open_association(self, ae: AE) -> object:
+        """Open the association to the destination. Overridden by the TLS variant."""
+        return ae.associate(
+            self.destination.host,
+            self.destination.port,
+            ae_title=self.destination.aet_target,
+        )
+
     def deliver(self, task: ClaimedTask, spool_dir: Path) -> DeliveryResult:
         """Locate the study's DICOM files and C-STORE them to the destination."""
         try:
@@ -90,19 +95,20 @@ class DICOMHandler:
         """Open a single association and send all files."""
         ae = AE(ae_title=self.destination.aet_source)
         ae.maximum_pdu_size = _MAX_PDU_SIZE
-        for ctx in _STORAGE_CONTEXTS:
+        # Request only the SOP classes this study actually contains. Negotiating
+        # all 111 classes × 4 syntaxes would blow the 128-context protocol
+        # limit, and it used to request CT+MR only — which made every other
+        # modality undeliverable (review C4).
+        contexts = list(sop_classes_for_files(files)) or list(_STORAGE_CONTEXTS)
+        for ctx in contexts:
             ae.add_requested_context(ctx, AllTransferSyntaxes)
         # Explicitly request dedicated contexts per compressed syntax so
         # studies stored as-received forward unchanged (F7).
         for syntax in _COMPRESSED_SYNTAXES:
-            for ctx in _STORAGE_CONTEXTS:
+            for ctx in contexts:
                 ae.add_requested_context(ctx, syntax)
 
-        assoc = ae.associate(
-            self.destination.host,
-            self.destination.port,
-            ae_title=self.destination.aet_target,
-        )
+        assoc = self._open_association(ae)
         if not assoc.is_established:
             raise ConnectionError("association rejected by remote SCP")
 
@@ -118,3 +124,39 @@ class DICOMHandler:
                     )
         finally:
             assoc.release()
+
+
+class DICOMTLSHandler(DICOMHandler):
+    """C-STORE SCU over DICOM-TLS (``dicom_tls`` target type, PRD §2.3 v1.1).
+
+    Reuses the plain handler's file discovery and C-STORE loop; only the
+    association is wrapped in a TLS context built from the destination's
+    ``cacert`` / ``verify_peer`` settings. ``verify_peer`` enforces the server
+    certificate (and its hostname); when it is off the channel is encrypted but
+    the peer is not authenticated. A client certificate would be added by
+    extending this class with ``ctx.load_cert_chain`` once the config carries
+    one.
+    """
+
+    def __init__(self, destination: DICOMTLSDestination, spool: Spool) -> None:
+        super().__init__(destination, spool)
+
+    def _open_association(self, ae: AE) -> object:
+        import ssl
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if self.destination.cacert:
+            ctx.load_verify_locations(self.destination.cacert)
+        if self.destination.verify_peer:
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            ctx.check_hostname = True
+        else:
+            ctx.verify_mode = ssl.CERT_NONE
+            ctx.check_hostname = False
+
+        return ae.associate(
+            self.destination.host,
+            self.destination.port,
+            ae_title=self.destination.aet_target,
+            tls_args=(ctx, self.destination.host),
+        )

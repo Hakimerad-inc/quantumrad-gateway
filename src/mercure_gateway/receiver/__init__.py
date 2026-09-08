@@ -27,19 +27,18 @@ from pydicom.uid import AllTransferSyntaxes
 from pynetdicom import AE
 from pynetdicom import evt as pynetdicom_evt
 from pynetdicom.events import Event
-from pynetdicom.sop_class import CTImageStorage, MRImageStorage  # type: ignore[attr-defined]
 
 from mercure_gateway.config import ReceiverConfig
+from mercure_gateway.sop_classes import STORAGE_SOP_CLASSES
 from mercure_gateway.spool import Spool
 
 __all__ = ["Receiver"]
 
-# SOP classes the SCP supports (CT/MR baseline — the PRD's modality-agnostic
-# scope is tracked for expansion; see review note CR-037).
-_STORAGE_CONTEXTS = [
-    CTImageStorage,
-    MRImageStorage,
-]
+# Every standard storage SOP class: the gateway is modality-agnostic (PRD
+# §2.1), so a US/CR/DX/NM/PT/SR/PDF study must associate just like CT/MR.
+# Previously this was CT + MR only, which silently rejected every other
+# modality at association time (review C4).
+_STORAGE_CONTEXTS = list(STORAGE_SOP_CLASSES)
 
 # Large PDUs are the single biggest throughput lever for C-STORE transfers.
 _MAX_PDU_SIZE = 131072

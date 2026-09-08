@@ -8,7 +8,7 @@ import AuditView from "./pages/AuditView";
 import SetupWizardPage from "./pages/SetupWizard";
 import PipelineView from "./pages/PipelineView";
 import LoginView from "./pages/LoginView";
-import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, navigate, type DiskStatus } from "./api";
+import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, type DiskStatus } from "./api";
 import {
   IconBrand,
   IconPulse,
@@ -22,7 +22,7 @@ import {
   IconLogout,
 } from "./ui/icons";
 
-type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup" | "login";
+type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
 
 export function Dashboard() {
   const [status, setStatus] = useState<{ receiver: string; forwarder: string; report_retriever: string; uptime_sec: number; version: string; hub_registered: boolean | null; hub_streaming: boolean | null } | null>(null);
@@ -129,22 +129,6 @@ export function Dashboard() {
   );
 }
 
-// Protected route wrapper
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isLoading } = useAuth();
-
-  if (isLoading) {
-    return <div className="loading">Loading…</div>;
-  }
-
-  if (!isAuthenticated) {
-    navigate('login');
-    return null;
-  }
-
-  return <>{children}</>;
-}
-
 const NAV: Array<{ key: Page; icon: React.ReactNode; label: string }> = [
   { key: "dashboard", icon: <IconPulse />, label: "Dashboard" },
   { key: "pipeline", icon: <IconWorkflow />, label: "Pipeline" },
@@ -180,9 +164,10 @@ function AppContent() {
     setPage(key);
   };
 
+  // Clearing the session flips `isAuthenticated` to false, which re-renders
+  // AppContent into the LoginView branch below. No explicit navigation needed.
   const handleLogout = async () => {
     await logout();
-    navigate('login');
   };
 
   // Show login page when not authenticated (and not loading)
@@ -226,16 +211,14 @@ function AppContent() {
         </div>
       </aside>
       <main className="main">
-        <ProtectedRoute>
-          {page === "dashboard" && <Dashboard />}
-          {page === "pipeline" && <PipelineView />}
-          {page === "queue" && <QueueView />}
-          {page === "setup" && <SetupWizardPage />}
-          {page === "reports" && <ReportsView />}
-          {page === "audit" && <AuditView />}
-          {page === "config" && <ConfigView />}
-          {page === "logs" && <LogsView />}
-        </ProtectedRoute>
+        {page === "dashboard" && <Dashboard />}
+        {page === "pipeline" && <PipelineView />}
+        {page === "queue" && <QueueView />}
+        {page === "setup" && <SetupWizardPage />}
+        {page === "reports" && <ReportsView />}
+        {page === "audit" && <AuditView />}
+        {page === "config" && <ConfigView />}
+        {page === "logs" && <LogsView />}
       </main>
     </div>
   );

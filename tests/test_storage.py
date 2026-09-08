@@ -226,3 +226,105 @@ class TestSelectiveDecompression:
         study_id = spool.store_instance(ds)
         assert study_id > 0
         assert len(spool.study_files("1.2.3.4.5")) == 1
+
+
+class TestStoreBeforeAcknowledgeDurability:
+    """Review H1: the ack is only honest if the bytes survive power loss.
+
+    ``store_instance`` must flush the instance file and the directory entries
+    that name it *before* the database row claims the study is RECEIVED.  If
+    those two steps are swapped, a crash in between leaves a study the database
+    insists exists with no file behind it — and the C-STORE was already acked.
+    """
+
+    def test_fsync_barrier_runs_before_the_database_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spool = make_spool(tmp_path)
+        events: list[str] = []
+
+        real_fsync = spool._fsync_instance
+        real_upsert = spool._db.upsert_study_instance
+
+        def fsync_spy(path: Path, *, dirs: list[Path]) -> None:
+            events.append("fsync")
+            real_fsync(path, dirs=dirs)
+
+        def upsert_spy(**kwargs: object) -> int:
+            events.append("commit")
+            return real_upsert(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(spool, "_fsync_instance", fsync_spy)
+        monkeypatch.setattr(spool._db, "upsert_study_instance", upsert_spy)
+
+        spool.store_instance(make_dataset())
+
+        assert "fsync" in events and "commit" in events
+        assert events.index("fsync") < events.index("commit"), (
+            f"instance bytes must be durable before the DB row commits, got {events}"
+        )
+
+    def test_barrier_flushes_the_file_and_its_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spool = make_spool(tmp_path)
+        fsynced: list[int] = []
+        monkeypatch.setattr(
+            "mercure_gateway.spool.os.fsync", lambda fd: fsynced.append(fd)
+        )
+
+        path = tmp_path / "spool" / "1.2.3.4.5" / "1.2.3.4.5.1" / "1.2.3.4.5.1.1.dcm"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"DICM")
+
+        spool._fsync_instance(path, dirs=[path.parent])
+
+        # One fsync for the file, one for the directory entry naming it.
+        assert len(fsynced) == 2
+
+    def test_newly_created_ancestors_are_synced_too(self, tmp_path: Path) -> None:
+        out_dir = tmp_path / "spool" / "1.2.3.4.5" / "1.2.3.4.5.1"
+        out_dir.mkdir(parents=True)
+
+        # Nothing pre-existed: the series dir is new, so the study dir that
+        # names it must be synced, and so must the spool root that names it.
+        dirs = Spool._dirs_to_sync(out_dir, set())
+        assert dirs == [out_dir, out_dir.parent, out_dir.parent.parent]
+
+        # Everything already existed: only the file's own directory is needed.
+        dirs = Spool._dirs_to_sync(out_dir, {out_dir, out_dir.parent})
+        assert dirs == [out_dir]
+
+    def test_store_refuses_to_acknowledge_when_fsync_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spool = make_spool(tmp_path)
+
+        def boom(fd: int) -> None:
+            raise OSError("ENOSPC: cannot flush")
+
+        monkeypatch.setattr("mercure_gateway.spool.os.fsync", boom)
+
+        with pytest.raises(OSError):
+            spool.store_instance(make_dataset())
+
+        # Nothing was committed: the study must not appear as received.
+        assert spool._db.list_studies() == []
+
+    def test_database_commits_are_durable_across_power_loss(self, tmp_path: Path) -> None:
+        """WAL + synchronous=NORMAL would lose an acked commit on power loss.
+
+        Only FULL fsyncs the WAL at COMMIT. The DB is the source of truth for
+        "we hold this study", so it must not be able to forget (review H1).
+        """
+        from mercure_gateway.spool.db import open_database
+
+        db = open_database(tmp_path / "spool.db")
+        try:
+            mode = db._conn.execute("PRAGMA journal_mode").fetchone()[0]
+            synchronous = db._conn.execute("PRAGMA synchronous").fetchone()[0]
+        finally:
+            db.close()
+
+        assert mode.lower() == "wal"
+        assert synchronous == 2, f"synchronous must be FULL (2), got {synchronous}"

@@ -8,6 +8,11 @@ remote directory via SFTP.  Credentials come from the destination's own
 (:class:`~mercure_gateway.credentials.CredentialVault`) when those are unset.
 
 The operation is a **copy** — spool files remain intact.
+
+Security: the server's host key is verified against ``known_hosts`` (configured
+per destination). Unknown keys are rejected, not auto-accepted — an operator
+must pre-seed ``known_hosts`` (e.g. with ``ssh-keyscan``), otherwise every
+connection fails closed (review H4).
 """
 
 from __future__ import annotations
@@ -75,7 +80,23 @@ class SFTPHandler:
         password, private_key, passphrase = self._resolve_credentials()
 
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # Reject unknown host keys instead of blindly trusting the first
+        # connection (the old AutoAddPolicy let a MITM impersonate the PACS,
+        # review H4). Keys are taken from a configured known_hosts file; with
+        # no file configured, nothing is trusted and connections fail closed.
+        known_hosts = self.destination.known_hosts
+        if known_hosts:
+            known_hosts_path = Path(known_hosts)
+            if not known_hosts_path.exists():
+                known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+                known_hosts_path.touch()
+            try:
+                client.load_host_keys(str(known_hosts_path))
+            except (OSError, ValueError) as exc:
+                return DeliveryResult(
+                    ok=False, error=f"could not read known_hosts file: {exc}"
+                )
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         try:
             if private_key:
                 key = self._load_private_key(private_key, passphrase)

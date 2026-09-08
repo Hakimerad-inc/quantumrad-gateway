@@ -2,10 +2,15 @@
 
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 
+export interface LoginResult {
+  ok: boolean;
+  error?: string;
+}
+
 interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (password: string) => Promise<boolean>;
+  login: (password: string) => Promise<LoginResult>;
   logout: () => Promise<void>;
   checkAuth: () => Promise<void>;
 }
@@ -31,7 +36,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     checkAuth();
   }, []);
 
-  const login = async (password: string): Promise<boolean> => {
+  // Single source of truth for authentication: callers (LoginView) must go
+  // through this rather than posting to /api/login themselves, otherwise the
+  // session cookie is set while `isAuthenticated` stays false and the app
+  // re-renders the login screen forever (review C1).
+  const login = async (password: string): Promise<LoginResult> => {
     try {
       const res = await fetch('/api/login', {
         method: 'POST',
@@ -41,11 +50,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       if (res.ok) {
         setIsAuthenticated(true);
-        return true;
+        return { ok: true };
       }
-      return false;
+      const data = await res.json().catch(() => null);
+      const detail =
+        (data && typeof data.detail === 'string' && data.detail) ||
+        (res.status === 401 ? 'invalid credentials' : 'Login failed');
+      return { ok: false, error: detail };
     } catch {
-      return false;
+      return { ok: false, error: 'Network error. Please try again.' };
     }
   };
 

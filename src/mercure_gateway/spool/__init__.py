@@ -20,6 +20,7 @@ Security note:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import threading
@@ -217,6 +218,9 @@ class Spool:
         instance_uid = validate_uid(str(dataset.SOPInstanceUID), what="SOPInstanceUID")
 
         out_dir = self._spool_dir / study_uid / series_uid
+        # A directory created here only becomes durable once its *parent* has
+        # been fsynced, so remember which ancestors are new (durability, H1).
+        pre_existing = {p for p in (out_dir, out_dir.parent) if p.exists()}
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{instance_uid}.dcm"
         new_instance = not path.exists()
@@ -228,6 +232,13 @@ class Spool:
             series_uid=series_uid,
             instance_uid=instance_uid,
         )
+
+        # Durability barrier. The instance bytes and the directory entries that
+        # name them must reach stable storage BEFORE the row below says
+        # RECEIVED — otherwise a crash between COMMIT and the writeback leaves
+        # a study the database insists exists with no file behind it, and the
+        # C-STORE has already been acknowledged (PRD §3.4, review H1).
+        self._fsync_instance(path, dirs=self._dirs_to_sync(out_dir, pre_existing))
 
         study_id = self._db.upsert_study_instance(
             study_uid=study_uid,
@@ -245,6 +256,51 @@ class Spool:
             self._requeue_complete_routes(study_id)
         self._arm_auto_enqueue(study_id)
         return study_id
+
+    @staticmethod
+    def _dirs_to_sync(out_dir: Path, pre_existing: set[Path]) -> list[Path]:
+        """Return the directories whose entries must be fsynced for durability.
+
+        The file's own directory always needs a sync so the new name survives.
+        Each ancestor that ``mkdir`` just created additionally needs *its*
+        parent synced, otherwise a crash can lose the directory entry while
+        the file inside it is durable — an orphaned, unreachable instance.
+        """
+        dirs = [out_dir]
+        if out_dir not in pre_existing:
+            dirs.append(out_dir.parent)
+            if out_dir.parent not in pre_existing:
+                dirs.append(out_dir.parent.parent)
+        return dirs
+
+    def _fsync_instance(self, path: Path, *, dirs: list[Path]) -> None:
+        """Flush *path* and the directory entries naming it to stable storage.
+
+        Raises ``OSError`` if the file itself cannot be flushed: acknowledging
+        a C-STORE whose bytes we cannot guarantee are durable would silently
+        lose the study, which is exactly what PRD §3.4 forbids (review H1).
+
+        The ``.tags`` sidecar is deliberately *not* fsynced — it is derived
+        data, rebuildable from the DICOM file, and syncing it would double the
+        fsync cost of every receive for no durability benefit.
+
+        Directory fsync is best-effort: Windows cannot open a directory handle
+        at all, so there is no equivalent operation there.
+        """
+        with open(path, "rb") as f:
+            os.fsync(f.fileno())
+        for directory in dirs:
+            try:
+                fd = os.open(directory, os.O_RDONLY)
+            except OSError:
+                logger.debug("directory fsync unavailable for %s (platform limitation)", directory)
+                continue
+            try:
+                os.fsync(fd)
+            except OSError:
+                logger.warning("could not fsync directory %s", directory)
+            finally:
+                os.close(fd)
 
     def _requeue_complete_routes(self, study_id: int) -> None:
         """Reset complete routes to waiting when new content arrived.

@@ -159,6 +159,11 @@ class SFTPDestination(BaseDestination):
     private_key: str | None = None
     passphrase: str | None = None
     remote_path: str = "/"
+    # Path to an OpenSSH ``known_hosts`` file used to verify the server's host
+    # key. Required for secure operation: an unset value means no keys are
+    # trusted and every connection is rejected (review H4). The recommended
+    # setup pre-seeds this file with the PACS host key (``ssh-keyscan``).
+    known_hosts: str = ""
 
 
 class RsyncDestination(BaseDestination):

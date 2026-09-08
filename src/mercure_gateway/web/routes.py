@@ -19,6 +19,7 @@ would stall the event loop (freezing every endpoint) on a slow query.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from datetime import UTC, datetime
@@ -404,10 +405,8 @@ def study_timeline(request: Request, study_id: int) -> list[dict[str, Any]]:
     events = []
     for e in sp._db.list_audit_for_study(row["study_uid"], limit=50):
         entry = _row_to_dict(e)
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             entry["detail"] = _json.loads(entry["detail"]) if entry["detail"] else {}
-        except (TypeError, ValueError):
-            pass
         events.append(entry)
     return events
 

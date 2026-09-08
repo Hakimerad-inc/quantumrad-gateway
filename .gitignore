@@ -43,7 +43,7 @@ build/
 dist/
 
 # Runtime
-spool/
+/spool/
 "C:\mercure-gateway\spool"/
 *.db
 *.db-wal

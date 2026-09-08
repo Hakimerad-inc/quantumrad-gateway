@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from mercure_gateway.web.echo import echo_destination
@@ -105,7 +105,7 @@ class DestinationHealthMonitor:
         latency_ms = int((time.monotonic() - started) * 1000)
         return {
             "status": status,
-            "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "latency_ms": latency_ms,
         }
 
@@ -137,7 +137,7 @@ def pipeline_snapshot(
         entry["last_activity"] = row["last_activity"]
 
     one_hour_ago = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%d %H:%M:%S")
     received_hour = sum(
         1 for row in spool._db.list_studies_with_route_counts()
@@ -149,7 +149,7 @@ def pipeline_snapshot(
         if not dest.enabled:
             continue
         info = rollup.get(dest.name, {"routes": {}})
-        entry: dict[str, Any] = {
+        dest_view: dict[str, Any] = {
             "name": dest.name,
             "type": dest.type,
             "routes": {
@@ -161,11 +161,11 @@ def pipeline_snapshot(
             "last_activity": info.get("last_activity"),
         }
         if dest.type == "dicom":
-            entry["host"] = dest.host
-            entry["port"] = dest.port
-            entry["aet"] = dest.aet_target
-            entry["health"] = (health or {}).get(dest.name)
-        destinations.append(entry)
+            dest_view["host"] = dest.host
+            dest_view["port"] = dest.port
+            dest_view["aet"] = dest.aet_target
+            dest_view["health"] = (health or {}).get(dest.name)
+        destinations.append(dest_view)
 
     return {
         "components": {
@@ -185,5 +185,5 @@ def pipeline_snapshot(
         },
         "receiver_counts": {"received_last_hour": received_hour},
         "destinations": destinations,
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }

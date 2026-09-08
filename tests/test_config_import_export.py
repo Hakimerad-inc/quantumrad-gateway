@@ -11,10 +11,12 @@ Behaviors:
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
-from mercure_gateway.config import DICOMDestination, SFTPDestination, default_config, load_config
+from mercure_gateway.config import SFTPDestination, default_config, load_config, save_config
 from mercure_gateway.spool import Spool
 from mercure_gateway.spool.db import mem_database
 from mercure_gateway.web import create_app
@@ -37,24 +39,9 @@ def client(app) -> TestClient:
     return TestClient(app)
 
 
-# Type aliases for test fixtures
-from mercure_gateway.spool import Spool
-from mercure_gateway.web import create_app
-from fastapi.testclient import TestClient
-from _pytest.monkeypatch import MonkeyPatch
-from _pytest.tmpdir import TempPathFactory
-from pathlib import Path
-
-AppFixture = create_app
-SpoolFixture = Spool
-ClientFixture = TestClient
-
-
 def test_import_config_file_upload(client: TestClient, tmp_path: Path) -> None:
     """POST /config/import accepts multipart file, validates, applies, and saves."""
     config_path = tmp_path / "gw.json"
-    from mercure_gateway.config import save_config
-
     save_config(default_config(), config_path)
     client.app.state.config_path = str(config_path)
 
@@ -79,8 +66,6 @@ def test_import_config_file_upload(client: TestClient, tmp_path: Path) -> None:
 def test_import_config_validates_schema(client: TestClient, tmp_path: Path) -> None:
     """Invalid config JSON returns 400 with validation details."""
     config_path = tmp_path / "gw.json"
-    from mercure_gateway.config import save_config
-
     save_config(default_config(), config_path)
     client.app.state.config_path = str(config_path)
 
@@ -96,8 +81,6 @@ def test_import_config_validates_schema(client: TestClient, tmp_path: Path) -> N
 def test_import_config_preserves_secrets(client: TestClient, tmp_path: Path) -> None:
     """Round-trip: import preserves redacted secrets from current config (like PUT /config)."""
     config_path = tmp_path / "gw.json"
-    from mercure_gateway.config import save_config
-
     save_config(default_config(), config_path)
     client.app.state.config_path = str(config_path)
 
@@ -151,8 +134,6 @@ def test_export_config_has_version(client: TestClient) -> None:
 def test_import_config_rejects_unknown_version(client: TestClient, tmp_path: Path) -> None:
     """Future config_version that we don't understand is rejected (safety)."""
     config_path = tmp_path / "gw.json"
-    from mercure_gateway.config import save_config
-
     save_config(default_config(), config_path)
     client.app.state.config_path = str(config_path)
 
@@ -170,8 +151,6 @@ def test_import_config_rejects_unknown_version(client: TestClient, tmp_path: Pat
 def test_import_config_accepts_supported_version(client: TestClient, tmp_path: Path) -> None:
     """Known config_version is accepted."""
     config_path = tmp_path / "gw.json"
-    from mercure_gateway.config import save_config
-
     save_config(default_config(), config_path)
     client.app.state.config_path = str(config_path)
 

@@ -56,7 +56,7 @@ def echo_destination(
         return "refused"
     if not assoc.is_established:
         from pynetdicom.presentation import build_context
-        from pynetdicom.sop_class import CTImageStorage  # noqa: F401 — any storage UID works
+        from pynetdicom.sop_class import CTImageStorage  # type: ignore[attr-defined]
 
         ae.requested_contexts = [build_context(CTImageStorage)]
         try:

@@ -47,6 +47,7 @@ def test_windows_service_backend_rejects_non_windows() -> None:
     with patch("sys.platform", "linux"):
         # Re-import to trigger platform check
         import importlib
+
         import mercure_gateway.service_backend as sb
 
         importlib.reload(sb)

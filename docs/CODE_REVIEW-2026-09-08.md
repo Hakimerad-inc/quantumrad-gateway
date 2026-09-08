@@ -40,7 +40,7 @@ The quality bar in the *code* is RC-grade. The *integration* and *claims* are pr
 | Web SPA size | — | 17 TS/TSX files, **2,066 LOC**; **2 test files, 143 LOC** |
 | Tauri shell | — | 3 files, **147 LOC** |
 | Version | "v1.1-RC" | **`0.1.0`** everywhere (`pyproject.toml:3`, `__init__.py`, `tauri.conf.json`, `web/package.json`) |
-| `uv.lock` | "pinned dependencies via uv.lock" | **Gitignored and untracked** ❌ |
+| `uv.lock` | "pinned dependencies via uv.lock" | **Tracked and regenerated** ✅ |
 
 ---
 
@@ -229,11 +229,15 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 
 ## 5. Medium
 
-### M1. CI never runs on the development branch
+### M1. CI never runs on the development branch  ✅ **FIXED**
 `.github/workflows/ci.yml:4-9` triggers only on `push`/`pull_request` to `main`. All active work is on `docs/sprint-plan` (20 commits of Sprint 09/10 work). **Every gate — tests, mypy, ruff, coverage, pip-audit, perf, packaging — is not executing on the branch being developed.** Add the branch pattern or `workflow_dispatch`.
 
-### M2. `uv.lock` is gitignored and untracked
+> **Status: FIXED (2026-09-08).** Added `docs/sprint-plan` to both `push` and `pull_request` branch triggers in `.github/workflows/ci.yml`. Gates now run on the active development branch.
+
+### M2. `uv.lock` is gitignored and untracked  ✅ **FIXED**
 `.gitignore:13` ignores `uv.lock`; `git ls-files` confirms 0 tracked entries. `PRODUCT_BRIEF.md:141` claims "pinned dependencies via `uv.lock`". Every CI run re-resolves from ranges (e.g. `pynetdicom>=3.0.4`, `boto3>=1.43.83`), so builds are not reproducible and supply-chain pinning is nominal. Commit the lockfile.
+
+> **Status: FIXED (2026-09-08).** Removed `uv.lock` from `.gitignore`, ran `uv lock` to regenerate after `python-multipart` addition (H6), and committed the lockfile. Builds are now reproducible.
 
 ### M3. Dead code and unenforced config
 - `receiver.accept_compressed` — defined (`config/__init__.py:90`), **never read**.
@@ -364,7 +368,7 @@ Worth stating plainly, because this is not a bad codebase:
 9. ~~H5 — either reload components on config change or surface "restart required" in the UI.~~ **DONE** — `restart_required` returned by both config endpoints; persistent banner in `App.tsx` + save note in `ConfigView.tsx`; 2 frontend tests.
 
 **Hygiene (parallel, low risk):**
-10. M1/M2 — CI on the dev branch; commit `uv.lock`.
+10. ~~M1/M2 — CI on the dev branch; commit `uv.lock`.~~ **DONE** — `docs/sprint-plan` added to CI triggers; `uv.lock` tracked and regenerated.
 11. M5/M6/M7 — unify PHI redaction; add `Spool` façade methods; add `study_uid` column to `audit_events`.
 12. M8 — add ESLint; add frontend tests for `api.ts` and the two largest views.
 13. M3/M9 — delete dead modules and unused config fields; gitignore built SPA assets.

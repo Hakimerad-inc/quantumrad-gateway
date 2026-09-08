@@ -36,7 +36,11 @@ from mercure_gateway.config import (
 from mercure_gateway.disk import DiskMonitor
 from mercure_gateway.forwarder import Forwarder
 from mercure_gateway.forwarder.handlers.dicom import DICOMHandler
-from mercure_gateway.hotplug import HotplugDetector, write_shutdown_marker
+from mercure_gateway.hotplug import (
+    HotplugDetector,
+    run_shutdown_sequence,
+    write_shutdown_marker,
+)
 from mercure_gateway.hub_client import HubClient
 from mercure_gateway.hub_events import HubEventStreamer
 from mercure_gateway.receiver import Receiver
@@ -314,17 +318,17 @@ def main(argv: list[str] | None = None) -> int:
 
     shutdown_done = threading.Event()
 
-    # Hot-unplug detection (USB mode only). The removal callback must stay
-    # fail-safe: the device may vanish between the debounce probe and the
-    # marker write (F10), so the marker write is best-effort and the
-    # shutdown signal is always delivered.
+    # Hot-unplug detection (USB mode only). The removal callback delegates to
+    # the §7.2 sequence (hotplug.run_shutdown_sequence): receiver.stop →
+    # bounded flush → fsynced shutdown marker, each step best-effort because
+    # the device may vanish at any instant (review F10).
     def _on_usb_removal() -> None:
-        try:
-            write_shutdown_marker(spool.spool_dir)
-        except OSError:
-            # Device already gone — nothing to flush, nothing to recover.
-            logger.warning("could not write shutdown marker (device already removed)")
-        receiver.stop()
+        run_shutdown_sequence(
+            stop_receiver=receiver.stop,
+            flush=lambda: hub_streamer.flush(timeout=5.0) if hub_streamer else None,
+            spool_dir=spool.spool_dir,
+            flush_timeout_sec=config.usb_mode.flush_timeout_sec,
+        )
         print("\nUSB device removed — gateway shut down safely")
         shutdown_done.set()
 

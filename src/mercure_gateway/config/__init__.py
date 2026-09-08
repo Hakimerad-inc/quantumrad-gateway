@@ -430,6 +430,13 @@ class USBModeConfig(BaseModel):
         default=True,
         description="Enable graceful shutdown on USB removal detection.",
     )
+    flush_timeout_sec: float = Field(
+        default=10.0, gt=0,
+        description=(
+            "Max seconds the hot-unplug flush may run before removal is "
+            "forced (K10: flush ≤10 s)."
+        ),
+    )
     auto_start_on_boot: bool = Field(
         default=True,
         description="Auto-start gateway on USB boot or plug-in.",

@@ -39,6 +39,7 @@ __all__ = [
     "write_shutdown_marker",
     "has_shutdown_marker",
     "clear_shutdown_marker",
+    "run_shutdown_sequence",
 ]
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,74 @@ def clear_shutdown_marker(spool_dir: Path) -> None:
     if marker.exists():
         marker.unlink()
         logger.info("Shutdown marker cleared")
+
+
+def run_shutdown_sequence(
+    *,
+    stop_receiver: Callable[[], None],
+    flush: Callable[[], None],
+    spool_dir: Path,
+    flush_timeout_sec: float = _FLUSH_TIMEOUT_SEC,
+) -> bool:
+    """Execute the §7.2 graceful shutdown sequence and return flush outcome.
+
+    Order (each step after the first is best-effort — the device is being
+    yanked, so any step may raise ``OSError`` at any moment):
+
+        1. ``stop_receiver`` — stop accepting new DICOM associations
+        2. ``flush`` — drain in-flight studies / audit events, bounded by
+           ``flush_timeout_sec`` (K10: ≤10 s allows forced removal)
+        3. Write the shutdown marker as the *last filesystem act*, fsynced
+           so the classification survives a subsequent power loss
+
+    Returns ``True`` when the flush completed (or raised-and-unwound —
+    indistinguishable from done on a dying device), ``False`` when it hung
+    past ``flush_timeout_sec`` and removal was forced.
+    """
+    logger.warning("USB removal — shutdown sequence started")
+    stop_receiver()
+
+    # The flush runs on a helper thread so a hung drain cannot exceed the
+    # deadline: past the timeout removal is forced (K10) and the marker is
+    # written anyway. A raising flush counts as "completed" — the OSError
+    # is expected on a device that is already vanishing.
+    completed = threading.Event()
+
+    def _flush_and_signal() -> None:
+        try:
+            flush()
+        finally:
+            # Signal even on exception — a raising flush has unwound, so it
+            # is not hung; only a flush stuck *inside* must hit the timeout.
+            completed.set()
+
+    flush_thread = threading.Thread(
+        target=_flush_and_signal, name="hotplug-flush", daemon=True
+    )
+    flush_thread.start()
+    finished = completed.wait(timeout=flush_timeout_sec)
+
+    if not finished:
+        logger.warning(
+            "flush did not complete within %.1fs — forcing removal", flush_timeout_sec
+        )
+    try:
+        _write_shutdown_marker_fsynced(spool_dir)
+    except OSError:
+        # Device already gone — nothing further to persist, nothing to
+        # recover on next boot (the recovery scan will run regardless).
+        logger.warning("could not write shutdown marker (device already removed)")
+    return finished
+
+
+def _write_shutdown_marker_fsynced(spool_dir: Path) -> None:
+    """Write the shutdown marker and fsync it before returning."""
+    marker = spool_dir / _SHUTDOWN_MARKER
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("shutdown")
+        f.flush()
+        os.fsync(f.fileno())
+    logger.info("Shutdown marker written (fsynced) to %s", marker)
 
 
 class HotplugDetector:

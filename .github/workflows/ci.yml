@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, docs/sprint-plan]
   pull_request:
-    branches: [main]
+    branches: [main, docs/sprint-plan]
 
 jobs:
   quality:

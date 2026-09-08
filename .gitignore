@@ -10,7 +10,9 @@ build/
 
 # uv
 .venv/
-uv.lock
+# uv.lock is committed (review M2) — it pins exact dependency versions for
+# reproducible builds.  Run `uv lock` after any pyproject.toml change.
+# uv.lock
 
 # Node / SPA build
 web/node_modules/

@@ -20,7 +20,7 @@ S06-T7 provides config import/export for USB deployment.
 | S10-T2 | **Linux boot environment (no TDD):** Alpine Linux minimal + gateway binary + Python 3.12 runtime on P1; systemd service auto-starts gateway on boot; network config via DHCP or static | usb-dongle-spec §4.1, §5.1 | Boot test on 3+ PC models (UEFI + legacy BIOS); gateway starts and web UI accessible | Linux mode boots and starts gateway in ≤30 s (K9) | ☐ |
 | S10-T3 | **Windows auto-launch (no TDD):** portable Python + gateway exe + scheduled task (not autorun.inf — blocked by default since Win7) on P2; auto-start on USB plug-in; tray icon in system tray | usb-dongle-spec §4.1, §5.1 | Auto-launch test on Windows 10/11; gateway starts without reboot; tray icon visible | Windows mode starts in ≤15 s (K9) | ☐ |
 | S10-T4 | **Hot-unplug detection:** udev rule (Linux) monitoring `/sys/block/sdX/device/remove`; `WM_DEVICECHANGE` (Windows) monitoring `DBT_DEVICEREMOVECOMPLETE`; triggers graceful shutdown sequence | usb-dongle-spec §7 | `tests/test_hot_unplug.py` — removal triggers shutdown sequence (receiver.stop → flush → fsync → shutdown marker); timeout after 10s allows forced removal | Graceful shutdown works in both modes; flush ≤10 s (K10) | ☐ |
-| S10-T5 | **USB-specific config defaults:** `usb_mode` section in `GatewayConfig` model; `usb_mode.enabled` auto-detected; `retention_delivered_hours: 24` (aggressive); `storage_budget_gb: 18`; `hot_unplug_safe: true`; `led_enabled: false` | usb-dongle-spec §6 | Config model tests pass; USB defaults applied when `usb_mode.enabled=true`; auto-detection works | Config auto-detects USB mode | ☐ |
+| S10-T5 | **USB-specific config defaults:** `usb_mode` section in `GatewayConfig` model; `usb_mode.enabled` auto-detected; `retention_delivered_hours: 24` (aggressive); `storage_budget_gb: 18`; `hot_unplug_safe: true`; `led_enabled: false` | usb-dongle-spec §6 | Config model tests pass; USB defaults applied when `usb_mode.enabled=true`; auto-detection works | Config auto-detects USB mode | ✅ |
 | S10-T6 | **LED status indicator:** GPIO control for Linux mode (BCM pin from config); USB HID control if device supports; state machine: 🔵 idle, 🟢 receiving/forwarding, 🟡 error/retry, 🔴 critical, ⚪ safe to remove, ⚫ off | usb-dongle-spec §3.3 | `tests/test_led.py` — LED state changes per gateway status; GPIO pin configurable; graceful fallback when no LED hardware | LED reflects receiver/forwarder status (or no-op if no hardware) | ☐ |
 | S10-T7 | **Disk full management:** 90% capacity warning (web UI banner + LED 🟡); auto-purge oldest DELIVERED studies when capacity exceeded; undelivered/FAILED studies never purged; capacity dashboard in web admin | usb-dongle-spec §5.3 | `tests/test_disk_full.py` — purge triggered at 90%; delivered studies removed oldest-first; undelivered retained; web UI shows capacity | USB doesn't run out of space; PRD §3.4 retention preserved | ☐ |
 | S10-T8 | **Recovery scan on USB boot:** detect previous shutdown marker; scan spool dir vs DB; mark incomplete studies as RECEIVED (eligible for re-forward); clear shutdown marker; log recovery actions | usb-dongle-spec §7.3 | `tests/test_usb_recovery.py` — interrupted study recovered; partial study marked incomplete; marker cleared; recovery logged | USB survives unclean removal; studies recoverable | ☐ |
@@ -29,6 +29,13 @@ S06-T7 provides config import/export for USB deployment.
 | S10-T11 | **USB variant UAT (no TDD):** scripted walkthrough — flash USB, plug into PC, boot Linux mode, wizard, first study forwarded, hot-unplug, re-plug, recovery, switch to Windows mode | usb-dongle-spec §10 | UAT checklist + timing in `docs/qa/usb-uat-10.md` | USB variant formally validated | ☐ |
 
 **Evidence:** _(links to commits/PRs when done)_
+
+- S10-T5 ✅ — `feat:` commit (config S10-T5): `is_removable_volume()` / `detect_usb_mode()`
+  (Linux: `/proc/mounts` → `/sys/class/block/<dev>/removable`; Windows: `GetDriveTypeW`),
+  `apply_usb_defaults()` (purge-on-disk-full, 90 % warning, spool budget = `storage_budget_gb`),
+  hour-granular retention (`usb_mode.retention_delivered_hours` wins in `Spool.purge_delivered`),
+  main.py auto-detect on startup before the pipeline is built. 10 new config tests + 2 new
+  retention tests — suite 530 passed / 4 skipped; `ruff check .` and `mypy .` (56 files) clean.
 
 **Notes:**
 - S10-T1/T2/T3 are packaging/environment tasks — they don't change the gateway Python code, only

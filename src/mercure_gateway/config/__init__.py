@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_origin
@@ -50,7 +51,10 @@ __all__ = [
     "WebUIConfig",
     "XNATDestination",
     "apply_env_overrides",
+    "apply_usb_defaults",
     "default_config",
+    "detect_usb_mode",
+    "is_removable_volume",
     "load_config",
     "save_config",
 ]
@@ -477,6 +481,164 @@ def save_config(config: GatewayConfig, path: str | Path) -> None:
         config.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+# ── USB variant: removable-volume detection + defaults profile (S10-T5) ─
+#
+# The USB dongle gateway runs its spool from a removable drive.  Spec §5.3/
+# §6 prescribes auto-detection (spool on removable media → usb_mode profile:
+# aggressive retention, disk-full purge at 90%, spool budgeted to the data
+# partition).  Linux detection is stdlib-only: /proc/mounts → block device →
+# the kernel's ``removable`` flag under /sys/class/block.  Windows uses the
+# Win32 GetDriveTypeW API.
+
+_REMOVABLE_BASE_RE = re.compile(
+    r"^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|mmcblk\d+|sr\d+|nvme\d+n\d+)(?:p?\d+)?$"
+)
+
+
+def _block_base(device: str) -> str | None:
+    """Map a partition device (``/dev/sdb1``) to its removable-media base
+    (``/dev/sdb``).  Returns ``None`` for non-block devices (mapper, tmpfs)."""
+    if not device.startswith("/dev/"):
+        return None
+    name = device[len("/dev/") :]
+    match = _REMOVABLE_BASE_RE.match(name)
+    return match.group(1) if match else None
+
+
+def _read_removable(device: str) -> bool:
+    """True when the kernel marks the block device as removable."""
+    base = _block_base(device)
+    if base is None:
+        return False
+    flag = Path("/sys/class/block") / base / "removable"
+    try:
+        return flag.read_text(encoding="ascii").strip() == "1"
+    except OSError:
+        return False
+
+
+def _linux_mounts() -> list[tuple[str, str]]:
+    """Parse ``/proc/mounts`` into ``[(mountpoint, device)]`` pairs.
+
+    Pseudo / memory filesystems (proc, tmpfs, cgroup, ...) are skipped — their
+    backing "devices" never map to removable media.
+    """
+    pseudo = {
+        "proc",
+        "sysfs",
+        "tmpfs",
+        "devtmpfs",
+        "devpts",
+        "cgroup",
+        "cgroup2",
+        "overlay",
+    }
+    try:
+        lines = Path("/proc/mounts").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    mounts: list[tuple[str, str]] = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        device, mountpoint, fstype = fields[0], fields[1], fields[2]
+        if fstype in pseudo:
+            continue
+        # /proc/mounts escapes spaces/tabs/newlines as \040, \011, \012.
+        device = device.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n")
+        mountpoint = mountpoint.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n")
+        mounts.append((mountpoint, device))
+    return mounts
+
+
+def _mount_device_for(mounts: list[tuple[str, str]], raw_path: str) -> str | None:
+    """Device backing the *deepest* mount containing ``raw_path``."""
+    best_device: str | None = None
+    best_len = -1
+    for mountpoint, device in mounts:
+        if (raw_path == mountpoint or raw_path.startswith(mountpoint + "/")) and len(
+            mountpoint
+        ) > best_len:
+            best_device, best_len = device, len(mountpoint)
+    return best_device
+
+
+def _linux_removable(path: Path) -> bool:
+    """Resolve *path* to a block device and test its removable flag.
+
+    The supplied directory may be covered by a mount even before it exists on
+    disk (the spool dir is created only after detection).  Falling back to the
+    nearest existing ancestor keeps the probe working for not-yet-created
+    paths whose parents are mounts (e.g. ``/media/user/USB/spool``).
+    """
+    probe = path.resolve()
+    while True:
+        device = _mount_device_for(_linux_mounts(), str(probe).rstrip("/") or "/")
+        if device is not None:
+            return _read_removable(device)
+        if probe.exists() or probe == probe.parent:
+            return False
+        probe = probe.parent
+
+
+def _windows_removable(path: Path) -> bool:
+    """Win32 ``GetDriveTypeW`` == ``DRIVE_REMOVABLE`` on the path's drive."""
+    import ctypes
+
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return False
+    drive = os.path.splitdrive(str(path))[0]
+    if not drive:
+        return False
+    try:
+        return int(windll.kernel32.GetDriveTypeW(f"{drive}\\")) == 2  # DRIVE_REMOVABLE
+    except Exception:
+        return False
+
+
+def is_removable_volume(path: str | Path) -> bool:
+    """True when ``path`` lives on removable (USB) media (S10-T5).
+
+    - Linux: ``/proc/mounts`` maps the path to its block device, whose kernel
+      ``removable`` flag (``/sys/class/block/<dev>/removable``) decides.  When
+      the spool directory does not exist yet, the nearest existing ancestor is
+      probed instead.
+    - Windows: Win32 ``GetDriveTypeW == DRIVE_REMOVABLE``.
+    - Anything else: ``False`` — the USB variant targets Linux + Windows only.
+    """
+    path = Path(path)
+    if sys.platform == "win32":
+        return _windows_removable(path)
+    if sys.platform.startswith("linux"):
+        return _linux_removable(path)
+    return False
+
+
+def detect_usb_mode(spool_dir: str | Path) -> bool:
+    """Auto-detect the USB variant: True when the spool directory is on
+    removable media (usb-dongle-gateway-spec §5.3)."""
+    return is_removable_volume(spool_dir)
+
+
+def apply_usb_defaults(config: GatewayConfig) -> GatewayConfig:
+    """Apply the USB-specific storage profile when ``config.usb_mode.enabled``.
+
+    usb-dongle-gateway-spec §5.3/§6 (S10-T5/T7): the USB variant adopts
+    aggressive, self-managing storage — purge oldest delivered studies when
+    capacity crosses the 90 % warning threshold, and budget the spool to the
+    USB data partition (``usb_mode.storage_budget_gb``).  Returns the
+    (mutated) config; a no-op for non-USB configurations.
+    """
+    if not config.usb_mode.enabled:
+        return config
+    config.storage.purge_on_disk_full = True
+    config.storage.disk_full_warning_pct = 90
+    config.storage.max_spool_gb = config.usb_mode.storage_budget_gb
+    return config
 
 
 _ENV_PREFIX = "MERCURE_GATEWAY_"

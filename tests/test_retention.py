@@ -120,6 +120,57 @@ def test_delivered_not_expired_kept(tmp_path: Path) -> None:
 # ── Test 5: purge only touches eligible studies ───────────────────────
 
 
+def test_usb_mode_uses_hour_granular_retention(tmp_path: Path) -> None:
+    """With usb_mode.enabled the purge honors the aggressive 24 h window
+    (usb-dongle-gateway-spec §6), not the day-granular default."""
+    cfg = default_config()
+    cfg.storage.spool_dir = str(tmp_path / "spool")
+    cfg.storage.retention_delivered_days = 5  # would keep 30 h — must NOT apply
+    cfg.usb_mode.enabled = True
+    cfg.usb_mode.retention_delivered_hours = 24
+    spool = Spool(mem_database(), cfg)
+
+    stale = deliver_study(spool, "1.2.3.4.7")
+    make_study_file(spool, "1.2.3.4.7", "1.2.3.4.7.1")
+    spool.mark_delivered(stale)
+    spool._db.connection().execute(
+        "UPDATE studies SET retention_delivered_at = datetime('now', '-30 hours') WHERE id = ?",
+        (stale,),
+    )
+    fresh = deliver_study(spool, "1.2.3.4.8")
+    make_study_file(spool, "1.2.3.4.8", "1.2.3.4.8.1")
+    spool.mark_delivered(fresh)
+    spool._db.connection().execute(
+        "UPDATE studies SET retention_delivered_at = datetime('now', '-12 hours') WHERE id = ?",
+        (fresh,),
+    )
+    spool._db.connection().commit()
+
+    purged = spool.purge_delivered()
+
+    assert purged == 1
+    assert spool._db.get_study(stale) is None
+    assert spool._db.get_study(fresh) is not None
+    assert not (spool.spool_dir / "1.2.3.4.7").exists()
+
+
+def test_usb_mode_disabled_keeps_day_retention(tmp_path: Path) -> None:
+    """Without usb_mode the day-granular window still wins (S10-T5)."""
+    spool = make_spool(tmp_path, retention_days=1)
+    study_id = deliver_study(spool, "1.2.3.4.9")
+    make_study_file(spool, "1.2.3.4.9", "1.2.3.4.9.1")
+    spool.mark_delivered(study_id)
+    # 30 h ago = just past the 1-day window → purged.
+    spool._db.connection().execute(
+        "UPDATE studies SET retention_delivered_at = datetime('now', '-30 hours') WHERE id = ?",
+        (study_id,),
+    )
+    spool._db.connection().commit()
+
+    assert spool.purge_delivered() == 1
+    assert spool._db.get_study(study_id) is None
+
+
 def test_purge_does_not_touch_other_studies(tmp_path: Path) -> None:
     spool = make_spool(tmp_path, retention_days=3)
     expired = deliver_study(spool, "1.2.3.4.5")

@@ -624,16 +624,29 @@ class Spool:
         ``retention_delivered_at`` are removed. Undelivered studies
         (FAILED/ERROR/QUEUED/RECEIVED) are never touched (US-04/PRD §3.4-5).
         Returns the number of studies purged.
+
+        Effective window (S10-T5): with ``usb_mode.enabled`` the aggressive
+        ``usb_mode.retention_delivered_hours`` window applies; otherwise
+        ``storage.retention_delivered_days`` is used (day-granular default).
         """
         if self._config is None:
             return 0
-        retention_days = self._config.storage.retention_delivered_days
-        rows = self._db.list_purgable_delivered(retention_days)
+        retention_hours = self._effective_retention_hours()
+        rows = self._db.list_purgable_delivered(retention_hours)
         for row in rows:
             self._purge_study_dir(raw_uid=str(row["study_uid"]), study_id=int(row["id"]))
         if rows:
             logger.info("retention: purged %d delivered study(ies)", len(rows))
         return len(rows)
+
+    def _effective_retention_hours(self) -> int:
+        """Retention window in hours for the current config profile (S10-T5)."""
+        config = self._config
+        if config is None:
+            return 0
+        if config.usb_mode.enabled:
+            return config.usb_mode.retention_delivered_hours
+        return config.storage.retention_delivered_days * 24
 
     def purge_oldest_delivered(self) -> bool:
         """Purge the single oldest delivered study (disk-full auto-recovery).

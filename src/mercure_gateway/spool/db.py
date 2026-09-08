@@ -419,9 +419,12 @@ class Database:
                 (study_id,),
             )
 
-    def list_purgable_delivered(self, retention_days: int) -> list[sqlite3.Row]:
-        """Return SENT studies delivered more than *retention_days* ago.
+    def list_purgable_delivered(self, retention_hours: int) -> list[sqlite3.Row]:
+        """Return SENT studies delivered more than *retention_hours* ago.
 
+        Hour granularity covers both the day-based default
+        (``storage.retention_delivered_days`` converted by the caller) and the
+        USB variant's aggressive ``usb_mode.retention_delivered_hours`` window.
         Only fully-delivered (state ``SENT``) studies with a delivery stamp are
         eligible; undelivered/FAILED/ERROR studies are never returned here
         (US-04: local copy is never auto-deleted unless delivered).
@@ -434,7 +437,7 @@ class Database:
                   AND retention_delivered_at IS NOT NULL
                   AND retention_delivered_at < datetime('now', ?)
                 """,
-                (f"-{max(0, retention_days)} days",),
+                (f"-{max(0, retention_hours)} hours",),
             ).fetchall()
 
     def delete_study(self, study_id: int) -> None:

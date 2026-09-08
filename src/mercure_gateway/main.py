@@ -27,7 +27,9 @@ from mercure_gateway import __version__
 from mercure_gateway.config import (
     GatewayConfig,
     apply_env_overrides,
+    apply_usb_defaults,
     default_config,
+    detect_usb_mode,
     load_config,
     save_config,
 )
@@ -240,6 +242,19 @@ def main(argv: list[str] | None = None) -> int:
     # 12-factor overrides: MERCURE_GATEWAY_* env vars win over the config file
     # (secrets such as the hub api_key can be injected without touching disk).
     config = apply_env_overrides(config)
+
+    # USB variant auto-detection (S10-T5): when the spool directory lives on
+    # removable media, adopt the USB profile — aggressive retention, disk-full
+    # purge at 90 % capacity, storage budgeted to the data partition — before
+    # any pipeline component is constructed from the config.
+    if not config.usb_mode.enabled and detect_usb_mode(config.storage.spool_dir):
+        config.usb_mode.enabled = True
+        apply_usb_defaults(config)
+        logger.info(
+            "USB variant detected: spool on removable media — usb_mode.enabled; "
+            "retention %dh, disk-full purge at 90%%",
+            config.usb_mode.retention_delivered_hours,
+        )
 
     _warn_insecure(config)
 

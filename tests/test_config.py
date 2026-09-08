@@ -10,7 +10,10 @@ from mercure_gateway.config import (
     GatewayConfig,
     SFTPDestination,
     apply_env_overrides,
+    apply_usb_defaults,
     default_config,
+    detect_usb_mode,
+    is_removable_volume,
     load_config,
     save_config,
 )
@@ -196,3 +199,120 @@ def test_env_boolean_value_false() -> None:
         environ={"MERCURE_GATEWAY_WEB_UI_AUTH_ENABLED": "false"},
     )
     assert cfg.web_ui.auth_enabled is False
+
+
+# ── USB variant: config defaults + auto-detection (S10-T5) ───────────────
+
+
+def test_usb_mode_defaults() -> None:
+    """Default usb_mode matches usb-dongle-gateway-spec §5.3."""
+    usb = default_config().usb_mode
+    assert usb.enabled is False
+    assert usb.storage_budget_gb == 18
+    assert usb.retention_delivered_hours == 24
+    assert usb.hot_unplug_safe is True
+    assert usb.led_enabled is False
+
+
+def test_apply_usb_defaults_noop_when_disabled() -> None:
+    """USB profile is inert unless usb_mode.enabled — a non-USB config keeps
+    its administered storage settings (S10-T5)."""
+    cfg = default_config()
+    cfg.storage.purge_on_disk_full = False
+    cfg.storage.disk_full_warning_pct = 80
+    cfg.storage.max_spool_gb = 40
+
+    result = apply_usb_defaults(cfg)
+
+    assert result is cfg
+    assert cfg.storage.purge_on_disk_full is False
+    assert cfg.storage.disk_full_warning_pct == 80
+    assert cfg.storage.max_spool_gb == 40
+
+
+def test_apply_usb_defaults_profile_when_enabled() -> None:
+    """Enabling usb_mode adopts the aggressive storage defaults (S10-T5/T7):
+    purge on disk-full, 90% warning threshold, spool budgeted to the USB
+    data partition (usb_mode.storage_budget_gb)."""
+    cfg = default_config()
+    cfg.usb_mode.enabled = True
+    cfg.usb_mode.storage_budget_gb = 18
+    cfg.storage.max_spool_gb = 40  # administered value, overridden for USB
+
+    result = apply_usb_defaults(cfg)
+
+    assert result.storage.purge_on_disk_full is True
+    assert result.storage.disk_full_warning_pct == 90
+    assert result.storage.max_spool_gb == 18
+
+
+def test_apply_usb_defaults_is_idempotent() -> None:
+    cfg = default_config()
+    cfg.usb_mode.enabled = True
+    first = apply_usb_defaults(cfg)
+    second = apply_usb_defaults(cfg)
+    assert first.storage.model_dump() == second.storage.model_dump()
+
+
+def test_detect_usb_mode_delegates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "mercure_gateway.config.is_removable_volume",
+        lambda path: str(path).endswith("usb"),
+    )
+    assert detect_usb_mode("/mnt/usb") is True
+    assert detect_usb_mode("/home/local/spool") is False
+
+
+def test_is_removable_volume_linux_removable_device(monkeypatch) -> None:
+    """A path on a removable block device resolves to True."""
+    monkeypatch.setattr(
+        "mercure_gateway.config._linux_mounts",
+        lambda: [("/mnt/usb", "/dev/sdb1")],
+    )
+    monkeypatch.setattr("mercure_gateway.config._read_removable", lambda dev: dev == "/dev/sdb1")
+    assert is_removable_volume("/mnt/usb/spool") is True
+
+
+def test_is_removable_volume_linux_uses_deepest_mount(monkeypatch) -> None:
+    """A nested USB mount under a non-removable parent is found by longest
+    mount-point matching."""
+    monkeypatch.setattr(
+        "mercure_gateway.config._linux_mounts",
+        lambda: [
+            ("/mnt", "/dev/sda1"),
+            ("/mnt/usb", "/dev/sdb1"),
+        ],
+    )
+    monkeypatch.setattr(
+        "mercure_gateway.config._read_removable",
+        lambda dev: dev == "/dev/sdb1",
+    )
+    assert is_removable_volume("/mnt/usb/mercure/spool") is True
+
+
+def test_is_removable_volume_false_when_device_not_removable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "mercure_gateway.config._linux_mounts",
+        lambda: [("/local", "/dev/sda3")],
+    )
+    monkeypatch.setattr("mercure_gateway.config._read_removable", lambda dev: False)
+    assert is_removable_volume("/local/spool") is False
+
+
+def test_is_removable_volume_windows_removable(monkeypatch) -> None:
+    monkeypatch.setattr("sys.platform", "win32", raising=False)
+    monkeypatch.setattr("mercure_gateway.config._windows_removable", lambda path: True)
+    assert is_removable_volume(r"C:\mercure-gateway\spool") is True
+
+
+def test_block_base_maps_partitions_to_media_device() -> None:
+    from mercure_gateway.config import _block_base
+
+    assert _block_base("/dev/sdb1") == "sdb"
+    assert _block_base("/dev/sdb") == "sdb"
+    assert _block_base("/dev/vda2") == "vda"
+    assert _block_base("/dev/mmcblk0p1") == "mmcblk0"
+    assert _block_base("/dev/nvme0n1p3") == "nvme0n1"
+    assert _block_base("/dev/sr0") == "sr0"
+    assert _block_base("/dev/mapper/luks-root") is None
+    assert _block_base("/tmp/not-a-device") is None

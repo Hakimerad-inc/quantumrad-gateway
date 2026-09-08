@@ -122,6 +122,82 @@ def test_main_receives_study_graceful_shutdown(tmp_path: Path) -> None:
     assert proc.returncode == 0, f"main() exited {proc.returncode}: {stderr}"
 
 
+# ── Integration: end-to-end boot with two destinations (review suggested work) ──
+
+
+def test_main_end_to_end_two_destinations(tmp_path: Path) -> None:
+    """main() boots with two destinations; a received study gets routes for both."""
+    receiver_port = free_port()
+    spool_dir = tmp_path / "spool"
+    drop_dir = tmp_path / "drop"
+    drop_dir.mkdir()
+
+    cfg = default_config()
+    cfg.receiver = ReceiverConfig(
+        ae_title="GATEWAY", port=receiver_port, auto_enqueue_delay_sec=0.0
+    )
+    cfg.storage.spool_dir = str(spool_dir)
+    cfg.destinations = [
+        FolderDestination(name="drop", type="folder", path=str(drop_dir)),
+        DICOMDestination(
+            name="pacs", type="dicom", host="127.0.0.1", port=11112, aet_target="PACS"
+        ),
+    ]
+    config_path = tmp_path / "mercure-gateway.json"
+    write_config(config_path, cfg)
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "mercure_gateway.main",
+            "--config",
+            str(config_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        wait_for_port("127.0.0.1", receiver_port)
+
+        from demo.fake_modality import FakeModality
+
+        fake = FakeModality(ae_title="TESTMODALITY")
+        datasets = fake.create_synthetic_study("1.2.840.10008.99.2")
+        result = fake.send_study(
+            datasets,
+            host="127.0.0.1",
+            port=receiver_port,
+            aet_target="GATEWAY",
+        )
+        assert result["success"] == 1
+        assert result["failure"] == 0
+
+        db_path = spool_dir / "mercure-gateway.db"
+        db = open_database(db_path)
+        studies = db.list_studies()
+        assert len(studies) == 1
+        assert studies[0]["study_uid"] == "1.2.840.10008.99.2"
+
+        # With auto_enqueue_delay_sec=0, routes are created synchronously.
+        routes = db.get_routes(studies[0]["id"])
+        assert len(routes) == 2
+        target_names = {r["target_name"] for r in routes}
+        assert target_names == {"drop", "pacs"}
+        db.close()
+    finally:
+        proc.send_signal(signal.SIGINT)
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=5)
+
+    assert proc.returncode == 0, f"main() exited {proc.returncode}: {stderr}"
+
+
 # ── C3: every destination type is wired to a handler (review C3) ────────────
 # Previously only ``dicom`` destinations registered a handler, so sftp/s3/…
 # destinations were dead code that could never deliver a study. These tests

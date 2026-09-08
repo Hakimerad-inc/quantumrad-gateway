@@ -30,7 +30,7 @@ The quality bar in the *code* is RC-grade. The *integration* and *claims* are pr
 
 | Metric | Claimed | Measured |
 |---|---|---|
-| Tests passing | "470+" | **599 passed / 4 skipped** ✅ (559 after H6; 585 after H1/H2/C4 +26; 589 after H4 +5 sftp; 592 after C3 +3 main wiring; 599 after H3 +7 config encryption) |
+| Tests passing | "470+" | **600 passed / 4 skipped** ✅ (559 after H6; 585 after H1/H2/C4 +26; 589 after H4 +5 sftp; 592 after C3 +3 main wiring; 599 after H3 +7 config encryption; 600 after end-to-end integration test) |
 | `mypy` strict | "clean" | **Clean, 57 source files** ✅ |
 | `ruff` | "clean" | **All checks passed** ✅ |
 | Branch coverage | "84%" | **83.24%** ✅ (gate 80% met) |
@@ -372,7 +372,7 @@ Worth stating plainly, because this is not a bad codebase:
 11. M5/M6/M7 — unify PHI redaction; add `Spool` façade methods; add `study_uid` column to `audit_events`.
 12. M8 — add ESLint; add frontend tests for `api.ts` and the two largest views.
 13. M3/M9 — delete dead modules and unused config fields; gitignore built SPA assets.
-14. Add an integration test that boots `main()` end-to-end (temp spool, two destinations, one delivery). This closes the 29% gap on the composition root and is the highest-leverage single test you can add.
+14. ~~Add an integration test that boots `main()` end-to-end (temp spool, two destinations, one delivery). This closes the 29% gap on the composition root and is the highest-leverage single test you can add.~~ **DONE** — `test_main_end_to_end_two_destinations`: boots `main()` subprocess with folder+DICOM destinations, sends synthetic study via `FakeModality`, verifies study persisted and routes created for both destinations, SIGINT graceful shutdown.
 15. ~~M14 — de-flake the 10k latency test; replace the two `sleep()`-based race tests with event synchronisation.~~ **DONE** — latency budget 500→2000 ms; retry_backoff and concurrent_forwarder now poll on events instead of fixed sleeps.
 16. Re-run this review after 0–9.
 

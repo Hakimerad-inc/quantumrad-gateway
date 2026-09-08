@@ -63,6 +63,7 @@ benchmark-results.md
 # Env & tooling artifacts
 .venv
 graphify-out/
+.workbuddy-ai/
 .coverage
 htmlcov/
 

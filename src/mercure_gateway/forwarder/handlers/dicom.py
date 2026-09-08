@@ -25,6 +25,7 @@ from pydicom.uid import (
     RLELossless,
 )
 from pynetdicom import AE
+from pynetdicom.association import Association
 
 from mercure_gateway.config import DICOMDestination, DICOMTLSDestination
 from mercure_gateway.forwarder import DeliveryResult
@@ -61,11 +62,13 @@ class DICOMHandler:
         forwarder.register_handler("dicom", handler)
     """
 
-    def __init__(self, destination: DICOMDestination, spool: Spool) -> None:
+    def __init__(
+        self, destination: DICOMDestination | DICOMTLSDestination, spool: Spool
+    ) -> None:
         self.destination = destination
         self.spool = spool
 
-    def _open_association(self, ae: AE) -> object:
+    def _open_association(self, ae: AE) -> Association:
         """Open the association to the destination. Overridden by the TLS variant."""
         return ae.associate(
             self.destination.host,
@@ -138,10 +141,12 @@ class DICOMTLSHandler(DICOMHandler):
     one.
     """
 
+    destination: DICOMTLSDestination
+
     def __init__(self, destination: DICOMTLSDestination, spool: Spool) -> None:
         super().__init__(destination, spool)
 
-    def _open_association(self, ae: AE) -> object:
+    def _open_association(self, ae: AE) -> Association:
         import ssl
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)

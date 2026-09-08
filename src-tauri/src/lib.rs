@@ -7,6 +7,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
+use tauri_plugin_shell::ShellExt;
 
 // Tray states matching the Python derive_tray_state() output.
 const TRAY_IDLE: u8 = 0;
@@ -100,6 +101,32 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // ── Backend sidecar (review C2) ──────────────────────
+            // Launch the Python backend so the web admin API is reachable on
+            // 127.0.0.1:8080 (the SPA, loaded from the tauri://localhost
+            // origin, calls it there). The binary is a packaging artifact: the
+            // build pipeline must freeze the backend (e.g. via PyInstaller) into
+            // `src-tauri/binaries/mercure-gateway-<target-triple>` and declare it
+            // in tauri.conf.json `bundle.externalBin`. Until then this spawn
+            // fails gracefully (logged below) and the app still launches — it
+            // just has no backend to talk to.
+            match app.shell().sidecar("mercure-gateway") {
+                Ok(cmd) => match cmd.args(["--web"]).spawn() {
+                    Ok((mut rx, child)) => {
+                        // Keep the child alive for the app's lifetime and drain
+                        // its stdout/stderr so the OS pipes never fill and block
+                        // it. The async task ends when the child exits and the
+                        // channel closes.
+                        tauri::async_runtime::spawn(async move {
+                            let _child = child;
+                            while let Some(_event) = rx.recv().await {}
+                        });
+                    }
+                    Err(e) => eprintln!("mercure-gateway sidecar failed to start: {e}"),
+                },
+                Err(e) => eprintln!("mercure-gateway sidecar not configured: {e}"),
+            }
 
             // ── Background poller ──────────────────────────────────
             let tray_handle = tray.clone();

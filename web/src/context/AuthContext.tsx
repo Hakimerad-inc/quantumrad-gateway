@@ -1,6 +1,7 @@
 /** Auth context for web UI session management (S06-T8). */
 
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { apiUrl } from '../api';
 
 export interface LoginResult {
   ok: boolean;
@@ -23,7 +24,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const checkAuth = async () => {
     try {
-      const res = await fetch('/api/system/status', { credentials: 'include' });
+      const res = await fetch(apiUrl('/api/system/status'), { credentials: 'include' });
       setIsAuthenticated(res.ok);
     } catch {
       setIsAuthenticated(false);
@@ -42,7 +43,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // re-renders the login screen forever (review C1).
   const login = async (password: string): Promise<LoginResult> => {
     try {
-      const res = await fetch('/api/login', {
+      const res = await fetch(apiUrl('/api/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -64,7 +65,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
-      await fetch('/api/logout', { method: 'POST', credentials: 'include' });
+      await fetch(apiUrl('/api/logout'), { method: 'POST', credentials: 'include' });
     } finally {
       setIsAuthenticated(false);
     }

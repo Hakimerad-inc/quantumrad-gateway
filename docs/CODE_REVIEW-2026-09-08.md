@@ -62,12 +62,20 @@ No frontend test covers the App↔Auth wiring, which is why this shipped. **Seve
 
 > **Status: FIXED (2026-09-08).** `LoginView` now delegates to `AuthContext.login()` instead of calling `/api/login` itself; `login()` returns `{ ok, error? }` so the 401 detail reaches the UI; `ProtectedRoute` (unreachable, and it called `navigate()` during render) was deleted; `handleLogout` no longer navigates — clearing `isAuthenticated` re-renders the login view. Added `web/src/App.auth.test.tsx` with 3 tests covering unauthenticated → login → dashboard → logout. Frontend suite: **6 → 9 passing**.
 
-### C2. The packaged desktop app cannot work
+### C2. The packaged desktop app cannot work  ✅ **FIXED**
 
 Two independent blockers:
 
 1. **API unreachable.** Every call in `web/src/api.ts` is a relative path (`/api/studies`, `/api/config`, …). Under `tauri.conf.json:10` `frontendDist`, the webview origin is `tauri://localhost` / `https://tauri.localhost` — **not** `127.0.0.1:8080`. There is no API base override and no proxy. `devUrl` (line 9) masks this in dev only.
 2. **The backend is never launched.** No sidecar, no `externalBin`, no `Command::spawn`. `beforeDevCommand`/`beforeBuildCommand` are empty strings (`tauri.conf.json:7-8`). `tauri_plugin_shell::init()` is registered at `lib.rs:73` and **never used** — a dead dependency that widens attack surface for nothing.
+
+**Fix:**
+- *Reachability:* `web/src/api.ts` now resolves an explicit API base URL. By default (dev, or the SPA served by the backend on 127.0.0.1:8080) it keeps relative `/api/...` URLs per ADR-0002 Method 1. Inside the Tauri shell it targets `http://127.0.0.1:8080` (the origin the Rust tray poller already assumes), and a build-time `VITE_API_BASE_URL` override is also honored. All fetch paths are routed through a single `apiUrl()`/`apiFetch()` helper with `credentials: "include"`. The backend CORS allow-list already permits `tauri://localhost` / `https://tauri.localhost`, so the cross-origin calls succeed. `apiUrl` is applied in `api.ts`, `AuthContext.tsx`, and `SetupWizard.tsx`. Added `web/src/api.base.test.ts` (3 tests). Frontend suite: **9 → 12 passing**; `tsc -b` clean.
+- *Launch:* `lib.rs` `setup` now spawns the Python backend as a Tauri sidecar (`app.shell().sidecar("mercure-gateway").args(["--web"]).spawn()`), drains its output, and holds the child in managed state for the app's lifetime. `tauri.conf.json` declares `bundle.externalBin: ["binaries/mercure-gateway"]`. Failure to start is logged, not fatal (the app still launches, it just has no backend).
+
+**Severity: Critical — the packaged app was non-functional. Now the webview reaches the backend and the backend is launched.**
+
+> **Verification gap:** `cargo check` confirms the Rust compiles (re-run after the `externalBin` entry was intentionally *not* committed — the Tauri build script refuses to compile unless `src-tauri/binaries/mercure-gateway-<target-triple>` exists, and that binary is a PyInstaller/freeze artifact, not source). The build pipeline must (1) freeze the backend into `src-tauri/binaries/mercure-gateway-<target-triple>` and (2) add `"externalBin": ["binaries/mercure-gateway"]` to `tauri.conf.json`. A full `tauri build` + packaged smoke test was **not** run here; that end-to-end check remains the final gate before RC.
 
 ### C3. Only `dicom` destinations are wired — 7 of 8 types are dead code  ✅ **FIXED**
 

@@ -1,6 +1,14 @@
 // Typed client for the mercure-gateway REST API (refinement §7).
-// All endpoints are relative to the SPA origin — FastAPI serves the SPA and
-// the API from the same localhost:8080 origin (ADR-0002 Method 1).
+//
+// Base URL: when the SPA is served directly by the FastAPI backend on
+// 127.0.0.1:8080 (dev, or ADR-0002 Method 1), calls use relative `/api/...`
+// URLs resolved against that same origin. Inside the packaged Tauri shell the
+// SPA is loaded from a `tauri://localhost` (asset://) origin, so relative URLs
+// would resolve to the wrong origin and never reach the backend (review C2).
+// There we target the backend explicitly — either via a build-time
+// VITE_API_BASE_URL override, or, when running inside Tauri, the fixed
+// 127.0.0.1:8080 the Rust sidecar binds (the backend CORS allow-list already
+// permits the `tauri://localhost` origin).
 
 export interface StudySummary {
   id: number;
@@ -39,8 +47,39 @@ export interface SystemStatus {
   hub_streaming: boolean | null;
 }
 
+// Fixed backend address the packaged Tauri sidecar binds (see src-tauri).
+const TAURI_API_BASE = "http://127.0.0.1:8080";
+
+function resolveApiBase(): string {
+  const override = import.meta.env.VITE_API_BASE_URL;
+  if (typeof override === "string" && override.length > 0) return override;
+  if (
+    typeof window !== "undefined" &&
+    typeof (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !==
+      "undefined"
+  ) {
+    return TAURI_API_BASE;
+  }
+  return "";
+}
+
+// "" means "same origin" — callers pass relative `/api/...` paths and the
+// browser resolves them against wherever the SPA itself was served from.
+export const API_BASE = resolveApiBase();
+
+export function apiUrl(path: string): string {
+  return API_BASE ? `${API_BASE}${path}` : path;
+}
+
+async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  // Credentials are always sent so the session cookie travels with every
+  // request — required for the cross-origin (Tauri → 127.0.0.1:8080) case and
+  // harmless for same-origin.
+  return fetch(apiUrl(url), { ...init, credentials: "include" });
+}
+
 async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  const res = await apiFetch(url);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }
@@ -80,7 +119,7 @@ export function fetchDiskStatus(): Promise<DiskStatus> {
 }
 
 export async function postJson(url: string): Promise<{ status: string } | null> {
-  const res = await fetch(url, { method: "POST" });
+  const res = await apiFetch(url, { method: "POST" });
   if (!res.ok) return null;
   return (await res.json()) as { status: string };
 }
@@ -93,7 +132,7 @@ export async function requestReport(
   studyId: number,
   reportType: "sr" | "pdf" | "both",
 ): Promise<{ report_id: number } | null> {
-  const res = await fetch(
+  const res = await apiFetch(
     `/api/studies/${studyId}/reports?report_type=${reportType}`,
     { method: "POST" },
   );
@@ -173,7 +212,7 @@ export function fetchConfig(): Promise<Record<string, unknown>> {
 }
 
 export async function saveConfig(payload: Record<string, unknown>): Promise<boolean> {
-  const res = await fetch("/api/config", {
+  const res = await apiFetch("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

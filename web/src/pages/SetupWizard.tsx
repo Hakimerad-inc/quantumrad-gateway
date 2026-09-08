@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { fetchConfig, saveConfig } from "../api";
+import { fetchConfig, saveConfig, apiUrl } from "../api";
 import { IconCheck, IconX, IconChevronLeft, IconChevronRight } from "../ui/icons";
 
 const STEPS = ["receiver", "destinations", "reports", "summary"];
@@ -18,10 +18,11 @@ interface WizardData {
 }
 
 async function validateStep(step: string, data: unknown): Promise<string[]> {
-  const res = await fetch("/api/wizard/validate/" + step, {
+  const res = await fetch(apiUrl("/api/wizard/validate/" + step), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
+    credentials: "include",
   });
   if (!res.ok) return ["validation failed"];
   const json = await res.json();
@@ -29,10 +30,11 @@ async function validateStep(step: string, data: unknown): Promise<string[]> {
 }
 
 async function echoProbe(host: string, port: number, aet: string): Promise<string> {
-  const res = await fetch("/api/echo", {
+  const res = await fetch(apiUrl("/api/echo"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "probe", host, port, aet }),
+    credentials: "include",
   });
   if (!res.ok) return "error";
   const json = await res.json();

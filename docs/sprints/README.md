@@ -46,7 +46,7 @@ decision artifact, benchmark, or CI gate. Everything else is explicit RED→GREE
 | [07](sprint-07.md) | 13–14 | v1.1 destinations + forwarding rules | US-09 | ✅ (401 passed, mypy+ruff clean) |
 | [08](sprint-08.md) | 15–16 | Hub reporting + pluggable report transports + Linux | US-10, US-11 | ✅ (436 passed, mypy+ruff clean; commit `b338053`) |
 | [09](sprint-09.md) | 17–18 | Hardening, perf/security gates, release candidate | all | 🔄 (T1/T2/T3/T4/T5/T6/T8 ✅ — 518 passed; T7 Windows VM, T9 USB hw pending) |
-| [10](sprint-10.md) | 19–20 | USB dongle variant (dual-mode, hot-unplug, LED) | US-12, US-13 | 🔄 (T4,T5,T7,T8 ✅ — 540 passed; T1–T3/T6/T9–T11 usb hw / Windows VM / packaging pending) |
+| [10](sprint-10.md) | 19–20 | USB dongle variant (dual-mode, hot-unplug, LED) | US-12, US-13 | 🔄 (T4–T8 ✅ — 559 passed; T1–T3/T9–T11 usb hw / Windows VM / packaging pending) |
 
 MVP = Sprints 01–06. Phase 2 (v1.1) = Sprints 07–09. USB Dongle = Sprint 10.
 

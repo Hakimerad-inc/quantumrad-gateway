@@ -21,7 +21,7 @@ S06-T7 provides config import/export for USB deployment.
 | S10-T3 | **Windows auto-launch (no TDD):** portable Python + gateway exe + scheduled task (not autorun.inf — blocked by default since Win7) on P2; auto-start on USB plug-in; tray icon in system tray | usb-dongle-spec §4.1, §5.1 | Auto-launch test on Windows 10/11; gateway starts without reboot; tray icon visible | Windows mode starts in ≤15 s (K9) | ☐ |
 | S10-T4 | **Hot-unplug detection:** udev rule (Linux) monitoring `/sys/block/sdX/device/remove`; `WM_DEVICECHANGE` (Windows) monitoring `DBT_DEVICEREMOVECOMPLETE`; triggers graceful shutdown sequence | usb-dongle-spec §7 | `tests/test_hot_unplug.py` — removal triggers shutdown sequence (receiver.stop → flush → fsync → shutdown marker); timeout after 10s allows forced removal | Graceful shutdown works in both modes; flush ≤10 s (K10) | ✅ |
 | S10-T5 | **USB-specific config defaults:** `usb_mode` section in `GatewayConfig` model; `usb_mode.enabled` auto-detected; `retention_delivered_hours: 24` (aggressive); `storage_budget_gb: 18`; `hot_unplug_safe: true`; `led_enabled: false` | usb-dongle-spec §6 | Config model tests pass; USB defaults applied when `usb_mode.enabled=true`; auto-detection works | Config auto-detects USB mode | ✅ |
-| S10-T6 | **LED status indicator:** GPIO control for Linux mode (BCM pin from config); USB HID control if device supports; state machine: 🔵 idle, 🟢 receiving/forwarding, 🟡 error/retry, 🔴 critical, ⚪ safe to remove, ⚫ off | usb-dongle-spec §3.3 | `tests/test_led.py` — LED state changes per gateway status; GPIO pin configurable; graceful fallback when no LED hardware | LED reflects receiver/forwarder status (or no-op if no hardware) | ☐ |
+| S10-T6 | **LED status indicator:** GPIO control for Linux mode (BCM pin from config); USB HID control if device supports; state machine: 🔵 idle, 🟢 receiving/forwarding, 🟡 error/retry, 🔴 critical, ⚪ safe to remove, ⚫ off | usb-dongle-spec §3.3 | `tests/test_led.py` — LED state changes per gateway status; GPIO pin configurable; graceful fallback when no LED hardware | LED reflects receiver/forwarder status (or no-op if no hardware) | ✅ |
 | S10-T7 | **Disk full management:** 90% capacity warning (web UI banner + LED 🟡); auto-purge oldest DELIVERED studies when capacity exceeded; undelivered/FAILED studies never purged; capacity dashboard in web admin | usb-dongle-spec §5.3 | `tests/test_disk_full.py` — purge triggered at 90%; delivered studies removed oldest-first; undelivered retained; web UI shows capacity | USB doesn't run out of space; PRD §3.4 retention preserved | ✅ |
 | S10-T8 | **Recovery scan on USB boot:** detect previous shutdown marker; scan spool dir vs DB; mark incomplete studies as RECEIVED (eligible for re-forward); clear shutdown marker; log recovery actions | usb-dongle-spec §7.3 | `tests/test_usb_recovery.py` — interrupted study recovered; partial study marked incomplete; marker cleared; recovery logged | USB survives unclean removal; studies recoverable | ✅ |
 | S10-T9 | **USB flashing documentation + script (no TDD):** step-by-step guide for creating USB dongles; includes Linux boot, Windows auto-launch, and shared data setup; template config for common modality/hub combos | usb-dongle-spec §8.2 | Docs complete; script tested on Windows 10/11; template configs validated | Admin can create USB dongle in <15 min; guide reviewed by non-technical user | ☐ |
@@ -60,6 +60,17 @@ S06-T7 provides config import/export for USB deployment.
   skips (so a later crash is not mistaken for clean shutdown), recovery actions logged. Functional
   coverage shared with `tests/test_recovery.py` (S02-T6) and `tests/chaos/test_crash_recovery.py`
   (S09-T1); `main()` already calls `recover(spool)` at startup before the pipeline starts.
+- S10-T6 ✅ — `feat:` commit (LED status indicator): new `mercure_gateway/led.py` — pure §3.3 state
+  machine (`LedColor`/`LedStatus`/`resolve_led_state`, precedence safe → critical → warning → active
+  → idle → off; critical = forwarder down while receiver up, or disk over threshold with auto-purge
+  disabled) with two backends: `SysfsLed` (Linux GPIO, BCM pin parsed from `usb_mode.led_pin`) and
+  `NoopLed` — the graceful no-hardware fallback (off-the-shelf USB sticks have no LED;
+  `led_enabled=False` by default per §6). USB HID is deferred: no HID-LED device is on the supported
+  hardware list, and the `Led` protocol makes a third backend additive. 15 new tests in
+  `tests/test_led.py` — suite 559 passed / 4 skipped; `ruff check .` and `mypy .` (57 files) clean.
+  Wiring into the main loop status ticker is a follow-up commit (state machine + backends are the
+  DoD deliverable; the loop that feeds `LedStatus` does not exist yet — status is currently polled
+  per-request by the web UI).
 
 **Notes:**
 - S10-T1/T2/T3 are packaging/environment tasks — they don't change the gateway Python code, only

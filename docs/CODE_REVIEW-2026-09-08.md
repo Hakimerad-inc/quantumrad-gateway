@@ -239,11 +239,13 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 
 > **Status: FIXED (2026-09-08).** Removed `uv.lock` from `.gitignore`, ran `uv lock` to regenerate after `python-multipart` addition (H6), and committed the lockfile. Builds are now reproducible.
 
-### M3. Dead code and unenforced config
+### M3. Dead code and unenforced config  ✅ **PARTIALLY FIXED**
 - `receiver.accept_compressed` — defined (`config/__init__.py:90`), **never read**.
 - `storage.max_spool_gb` — set by `apply_usb_defaults` (`:647`), **never enforced**. `DiskMonitor` only watches `disk_full_warning_pct`, so the advertised spool-size cap is inert.
 - `keyring_store.py` (96 LOC), `service_controller.py` + `service_backend.py` (99 LOC) — no non-test callers.
 - `ui/__init__.py` — 22 LOC, excluded from coverage, purpose unclear.
+
+> **Status: PARTIALLY FIXED (2026-09-08).** Removed `receiver.accept_compressed` from `ReceiverConfig` and from `mercure-gateway.json` sample config — it had zero readers in `src/`. Added a description note to `storage.max_spool_gb` documenting it as currently unenforced (wiring it into `DiskMonitor` is a follow-up). `keyring_store.py` is no longer dead — it was wired into `config/encryption.py` as the OS-keyring backend (H3). `service_controller.py` + `service_backend.py` and `ui/__init__.py` still have no non-test callers.
 
 ### M4. Audit tamper-evidence is weaker than advertised
 `audit/__init__.py:284-329` (`prune`) drops the append-only triggers, deletes rows, and **recomputes every hash from genesis** so `verify()` still passes. That is a reasonable retention design, but it means the same code path is a legitimate history-rewriting tool. Combined with unkeyed SHA-256 (correctly acknowledged at `:16-19`) and `head_hash()` never being anchored anywhere by default, "tamper-evident" is aspirational. Anchor the head hash to the hub or an append-only external sink, and record prunes as a signed range.
@@ -273,8 +275,10 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 ### M11. `Spool._seen_series` is in-memory only and unbounded
 `spool/__init__.py:124, 319-325`. After a restart the set is empty, so a re-sent instance of an existing series counts as a new series and inflates `num_series`. It also grows without bound for the process lifetime. Derive from `instance_meta` (which already exists) instead.
 
-### M12. Windows CI size gate is likely broken
+### M12. Windows CI size gate is likely broken  ✅ **FIXED**
 `ci.yml` `package-windows`: the build step sets `working-directory: src-tauri`, but the following K6 step does not, and resolves `target/release/mercure-gateway.exe` — which under the default root working directory does not exist (it is `src-tauri/target/release/...`). The step should fail on every run.
+
+> **Status: FIXED (2026-09-08).** Added `working-directory: src-tauri` to the K6 size gate step so `target/release/mercure-gateway.exe` resolves correctly.
 
 ### M13. Version and status claims are inconsistent
 `PRODUCT_BRIEF.md:3` says "v1.1-RC"; `pyproject.toml:3`, `src/mercure_gateway/__init__.py:1`, `tauri.conf.json:4`, `web/package.json:4` all say `0.1.0`. The brief's own §6 lists the RC sweep as blocked ("needs Windows VM"), so the RC label is aspirational. Align the version source of truth before tagging.
@@ -371,7 +375,7 @@ Worth stating plainly, because this is not a bad codebase:
 10. ~~M1/M2 — CI on the dev branch; commit `uv.lock`.~~ **DONE** — `docs/sprint-plan` added to CI triggers; `uv.lock` tracked and regenerated.
 11. M5/M6/M7 — unify PHI redaction; add `Spool` façade methods; add `study_uid` column to `audit_events`.
 12. M8 — add ESLint; add frontend tests for `api.ts` and the two largest views.
-13. M3/M9 — delete dead modules and unused config fields; gitignore built SPA assets.
+13. ~~M3/M9 — delete dead modules and unused config fields; gitignore built SPA assets.~~ **PARTIALLY DONE** — `accept_compressed` removed; built SPA assets gitignored and deleted from tracking. `max_spool_gb` still unenforced; `service_controller.py` + `service_backend.py` + `ui/__init__.py` still have no non-test callers.
 14. ~~Add an integration test that boots `main()` end-to-end (temp spool, two destinations, one delivery). This closes the 29% gap on the composition root and is the highest-leverage single test you can add.~~ **DONE** — `test_main_end_to_end_two_destinations`: boots `main()` subprocess with folder+DICOM destinations, sends synthetic study via `FakeModality`, verifies study persisted and routes created for both destinations, SIGINT graceful shutdown.
 15. ~~M14 — de-flake the 10k latency test; replace the two `sleep()`-based race tests with event synchronisation.~~ **DONE** — latency budget 500→2000 ms; retry_backoff and concurrent_forwarder now poll on events instead of fixed sleeps.
 16. Re-run this review after 0–9.

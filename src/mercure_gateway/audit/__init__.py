@@ -41,10 +41,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _GENESIS_HASH = hashlib.sha256(b"mercure-gateway-genesis").hexdigest()
 
@@ -101,6 +105,18 @@ class AuditLog:
         else:
             self._conn = db.connection()
             self._transaction = db.transaction
+        self._sink: Callable[[str, dict[str, Any], str | None], None] | None = None
+
+    def set_sink(self, sink: Callable[[str, dict[str, Any], str | None], None] | None) -> None:
+        """Attach a callback invoked after every successful :meth:`append`.
+
+        Used by the composition root to stream audit events to the hub
+        bookkeeper (the callback is the ``HubEventStreamer.feed``).  The sink
+        runs *after* the append transaction commits, so events that were not
+        persisted are never reported; a failing sink can never break the audit
+        log (US-10 isolation invariant).
+        """
+        self._sink = sink
 
     def append(
         self, event: str, detail: dict[str, Any] | None = None, user: str | None = None
@@ -132,10 +148,21 @@ class AuditLog:
 
         if self._transaction is not None:
             with self._transaction() as conn:
-                return _do(conn)
-        # Legacy path: raw connection — serialize appends with a local lock.
-        with _LEGACY_LOCK:
-            return _do(self._conn)
+                rowid = _do(conn)
+        else:
+            # Legacy path: raw connection — serialize appends with a local lock.
+            with _LEGACY_LOCK:
+                rowid = _do(self._conn)
+        self._notify_sink(event, detail, user)
+        return rowid
+
+    def _notify_sink(self, event: str, detail: dict[str, Any] | None, user: str | None) -> None:
+        if self._sink is None:
+            return
+        try:
+            self._sink(event, dict(detail or {}), user)
+        except Exception:  # noqa: BLE001 — boundary: reporting must not break audit
+            logger.exception("hub event sink failed for %s", event)
 
     def head_hash(self) -> str:
         """Return the hash of the newest event (or the genesis hash).

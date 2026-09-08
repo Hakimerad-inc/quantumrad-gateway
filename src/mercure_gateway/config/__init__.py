@@ -16,11 +16,13 @@ Deviation note (per quality bar):
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, get_origin
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 __all__ = [
     "AuditConfig",
@@ -47,6 +49,7 @@ __all__ = [
     "USBModeConfig",
     "WebUIConfig",
     "XNATDestination",
+    "apply_env_overrides",
     "default_config",
     "load_config",
     "save_config",
@@ -474,3 +477,54 @@ def save_config(config: GatewayConfig, path: str | Path) -> None:
         config.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+_ENV_PREFIX = "MERCURE_GATEWAY_"
+
+
+def apply_env_overrides(config: GatewayConfig, environ: Any | None = None) -> GatewayConfig:
+    """Apply ``MERCURE_GATEWAY_*`` environment overrides onto ``config`` in place.
+
+    12-factor value injection: env vars win over the config file so secrets
+    (e.g. the hub ``api_key``) never have to be written to disk and deployment
+    can retarget a host/port without editing JSON.  Keys mirror the model path:
+
+    - ``MERCURE_GATEWAY_WEB_UI_PORT=9090``
+    - ``MERCURE_GATEWAY_RECEIVER_AE_TITLE=DEPLOY``
+    - ``MERCURE_GATEWAY_AUDIT_HUB_REPORTING_API_KEY=...``
+
+    Values are coerced to the field type (JSON-decoded first, then passed
+    raw), so booleans/int are placed as ``true``/``8080``.  Collection fields
+    (``destinations[]``, ``forwarding_rules[]``) are deliberately skipped — they
+    stay in the config file.  An unset/absent variable leaves the field as-is.
+    """
+    environ = os.environ if environ is None else environ
+
+    def _coerce(annotation: Any, raw: str) -> Any:
+        adapter = TypeAdapter(annotation)
+        try:
+            return adapter.validate_python(json.loads(raw))
+        except (json.JSONDecodeError, ValidationError):
+            return adapter.validate_python(raw)
+
+    def _walk(model: BaseModel, prefix: str) -> None:
+        for name, field in type(model).model_fields.items():
+            annotation: Any = field.annotation
+            key = f"{prefix}{name.upper()}"
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                _walk(getattr(model, name), f"{key}_")
+                continue
+            if get_origin(annotation) in (list, tuple):
+                continue
+            if key not in environ:
+                continue
+            raw = environ[key]
+            try:
+                setattr(model, name, _coerce(annotation, raw))
+            except ValidationError as exc:
+                raise ValueError(
+                    f"environment variable {key}={raw!r} cannot be interpreted as {annotation}"
+                ) from exc
+
+    _walk(config, _ENV_PREFIX)
+    return config

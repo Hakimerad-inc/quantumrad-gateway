@@ -73,6 +73,11 @@ class HubEventStreamer:
         with self._lock:
             return len(self._deque) + self._inflight
 
+    @property
+    def is_running(self) -> bool:
+        """True while the background delivery worker is active."""
+        return self._running
+
     def start(self) -> None:
         """Start the background delivery worker (idempotent)."""
         if self._running:

@@ -6,9 +6,10 @@ and optionally launches the web admin panel (FastAPI on localhost:8080).
 The desktop shell is the Tauri wrapper per ADR-0002.
 
 Composition root: this module owns construction and shutdown ordering of all
-components — receiver, forwarder, hotplug detector, web admin, database.
-Shutdown order is the reverse of construction: web → hotplug → forwarder →
-receiver → database close.
+components — hub reporting, receiver, forwarder, hotplug detector, disk
+monitor, web admin, database. Shutdown order is the reverse of construction:
+disk monitor → web → hotplug → forwarder → receiver → report retriever → hub
+streamer flush → database close.
 """
 
 from __future__ import annotations
@@ -16,16 +17,26 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import signal
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
 from mercure_gateway import __version__
-from mercure_gateway.config import GatewayConfig, default_config, load_config, save_config
+from mercure_gateway.config import (
+    GatewayConfig,
+    apply_env_overrides,
+    default_config,
+    load_config,
+    save_config,
+)
+from mercure_gateway.disk import DiskMonitor
 from mercure_gateway.forwarder import Forwarder
 from mercure_gateway.forwarder.handlers.dicom import DICOMHandler
 from mercure_gateway.hotplug import HotplugDetector, write_shutdown_marker
+from mercure_gateway.hub_client import HubClient
+from mercure_gateway.hub_events import HubEventStreamer
 from mercure_gateway.receiver import Receiver
 from mercure_gateway.recovery import recover
 from mercure_gateway.spool import Spool
@@ -84,6 +95,24 @@ def _warn_insecure(config: GatewayConfig) -> None:
         )
 
 
+def _install_shutdown_signal_handlers(shutdown_done: threading.Event) -> None:
+    """Force SIGINT/SIGTERM to trigger graceful headless shutdown.
+
+    Python only installs its default ``KeyboardInterrupt`` handler at startup
+    when SIGINT is not already ignored (POSIX background-job semantics). Under
+    test harnesses and some service managers SIGINT can be inherited as
+    ignored, which would silently defeat Ctrl+C shutdown. Explicitly
+    installing a non-raising handler makes shutdown deterministic regardless
+    of the inherited disposition.
+    """
+
+    def _request_shutdown(signum: int, _frame: Any) -> None:
+        shutdown_done.set()
+
+    signal.signal(signal.SIGINT, _request_shutdown)
+    signal.signal(signal.SIGTERM, _request_shutdown)
+
+
 def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) -> Forwarder:
     """Register a DICOM handler for every enabled ``dicom`` destination.
 
@@ -102,20 +131,55 @@ def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) ->
     return forwarder
 
 
-def _build_hub_status(config: GatewayConfig) -> dict[str, Any] | None:
-    """Build a hub-status snapshot for the web admin panel (S08-T8).
+def _register_hub_in_background(hub_status: dict[str, Any], client: Any) -> None:
+    """Register with the hub bookkeeper on a daemon thread (never blocks boot)."""
 
-    Returns ``None`` when hub reporting is not enabled, so the UI renders
-    ``—`` instead of a misleading "inactive".
+    def _run() -> None:
+        try:
+            result = client.register()
+            hub_status["registered"] = bool(getattr(result, "ok", False))
+        except Exception as exc:  # noqa: BLE001 — boundary: registration must not kill the gateway
+            hub_status["registered"] = False
+            hub_status["error"] = str(exc)
+        finally:
+            hub_status["registering"] = False
+
+    threading.Thread(target=_run, name="hub-registration", daemon=True).start()
+
+
+def _start_hub_reporting(
+    config: GatewayConfig, audit: Any
+) -> tuple[dict[str, Any] | None, HubEventStreamer | None]:
+    """Wire hub event streaming + registration when enabled; else ``(None, None)``.
+
+    Returns a live hub-status dict (mutated by the background registration
+    thread and read by the web admin panel) and the started streamer.  When hub
+    reporting is disabled or under-configured, returns ``(None, None)``.
     """
     hub = config.audit.hub_reporting
     if not hub.enabled or not hub.bookkeeper_url:
-        return None
-    return {
+        return None, None
+    if not hub.api_key:
+        logger.warning("audit.hub_reporting enabled but api_key is empty — hub reporting stays off")
+        return None, None
+    streamer = HubEventStreamer(hub.bookkeeper_url, hub.api_key, config.general.appliance_name)
+    streamer.start()
+    audit.set_sink(lambda event, detail, _user: streamer.feed(event, detail))
+    hub_status: dict[str, Any] = {
         "registered": False,
-        "streaming": False,
+        "registering": True,
+        "streaming": streamer.is_running,
         "bookkeeper_url": hub.bookkeeper_url,
     }
+    client = HubClient(
+        hub.bookkeeper_url,
+        hub.api_key,
+        config.general.appliance_name,
+        __version__,
+    )
+    _register_hub_in_background(hub_status, client)
+    logger.info("hub reporting enabled (bookkeeper %s)", hub.bookkeeper_url)
+    return hub_status, streamer
 
 
 def _run_web_admin(
@@ -127,6 +191,7 @@ def _run_web_admin(
     port: int,
     text_log: TextLog | None = None,
     config_path: Path | None = None,
+    hub_status: dict[str, Any] | None = None,
 ) -> None:
     """Start the FastAPI web admin panel (blocking)."""
     import uvicorn
@@ -137,7 +202,7 @@ def _run_web_admin(
     app.state.receiver = receiver
     app.state.forwarder = forwarder
     app.state.report_retriever = report_retriever
-    app.state.hub_status = _build_hub_status(config)
+    app.state.hub_status = hub_status
     # Destination health monitor (pipeline view): daemon thread, stopped when
     # uvicorn exits the blocking call below.
     from mercure_gateway.web.pipeline import DestinationHealthMonitor
@@ -172,6 +237,10 @@ def main(argv: list[str] | None = None) -> int:
         save_config(config, args.config)
         print(f"No configuration found; wrote default to {args.config}")
 
+    # 12-factor overrides: MERCURE_GATEWAY_* env vars win over the config file
+    # (secrets such as the hub api_key can be injected without touching disk).
+    config = apply_env_overrides(config)
+
     _warn_insecure(config)
 
     spool_dir = Path(config.storage.spool_dir)
@@ -180,6 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     from mercure_gateway.audit import AuditLog
 
     audit = AuditLog(database)
+
+    # Hub reporting (S08): streams every audit event to the bookkeeper and
+    # registers the gateway in the background — boot never blocks on the hub.
+    hub_status, hub_streamer = _start_hub_reporting(config, audit)
 
     # Operations text log alongside the SQLite audit chain (S04-T3).
     text_log = TextLog(
@@ -247,11 +320,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     hotplug.start()
 
+    disk_monitor = DiskMonitor(
+        spool,
+        warning_pct=config.storage.disk_full_warning_pct,
+        purge_on_full=config.storage.purge_on_disk_full,
+    )
+    disk_monitor.start()
+
     print(f"mercure-gateway {__version__}")
     print(f"  receiver  : AET={config.receiver.ae_title} port={config.receiver.port}")
     print(f"  forwarder : {forwarder.is_running and 'running' or 'stopped'}")
     print(f"  spool     : {spool.spool_dir}")
     print(f"  queued    : {spool.queued_count()} studies awaiting delivery")
+    if hub_status is not None:
+        print(f"  hub       : streaming to {config.audit.hub_reporting.bookkeeper_url}")
 
     exit_code = 0
     try:
@@ -267,18 +349,29 @@ def main(argv: list[str] | None = None) -> int:
                     web_port,
                     text_log,
                     config_path=args.config,
+                    hub_status=hub_status,
                 )
             except KeyboardInterrupt:
                 print("\nShutting down web admin...")
         else:
             # Headless mode: run until interrupt or USB removal.
+            _install_shutdown_signal_handlers(shutdown_done)
             with contextlib.suppress(KeyboardInterrupt):
-                shutdown_done.wait()
+                # Poll with a timeout so the handler (and any pending signal)
+                # is processed on the next wake-up and graceful shutdown is
+                # deterministic.
+                while not shutdown_done.wait(timeout=1.0):
+                    pass
     finally:
+        disk_monitor.stop()
         hotplug.stop()
         forwarder.stop()
         receiver.stop()
         report_retriever.stop()
+        if hub_streamer is not None:
+            # Final flush so shutdown events reach the bookkeeper, then stop.
+            hub_streamer.flush(timeout=5.0)
+            hub_streamer.stop()
         spool.stop()
         # Graceful shutdown marker: its presence lets the next boot skip the
         # recovery scan (a crash/power-loss leaves no marker → scan runs).

@@ -9,6 +9,7 @@ from mercure_gateway.config import (
     DICOMDestination,
     GatewayConfig,
     SFTPDestination,
+    apply_env_overrides,
     default_config,
     load_config,
     save_config,
@@ -127,3 +128,71 @@ def test_unknown_top_level_key_ignored_by_default() -> None:
     # Extra keys are ignored (model_config default). Config is a superset-friendly JSON.
     cfg = GatewayConfig.model_validate({"general": {"appliance_name": "Unit"}, "bogus": 1})
     assert cfg.general.appliance_name == "Unit"
+
+
+# ── MERCURE_GATEWAY_* 12-factor env overrides ────────────────────────────
+
+
+def test_env_overrides_scalar_fields_recursively() -> None:
+    cfg = apply_env_overrides(
+        default_config(),
+        environ={
+            "MERCURE_GATEWAY_GENERAL_APPLIANCE_NAME": "Deploy-1",
+            "MERCURE_GATEWAY_RECEIVER_PORT": "11114",
+            "MERCURE_GATEWAY_RECEIVER_AE_TITLE": "DEPLOY",
+            "MERCURE_GATEWAY_WEB_UI_AUTH_ENABLED": "true",
+            "MERCURE_GATEWAY_STORAGE_DISK_FULL_WARNING_PCT": "85",
+            "MERCURE_GATEWAY_GENERAL_LOG_LEVEL": "DEBUG",
+        },
+    )
+    assert cfg.general.appliance_name == "Deploy-1"
+    assert cfg.general.log_level == "DEBUG"
+    assert cfg.receiver.port == 11114
+    assert cfg.receiver.ae_title == "DEPLOY"
+    assert cfg.web_ui.auth_enabled is True
+    assert cfg.storage.disk_full_warning_pct == 85
+
+
+def test_env_secret_injection_for_hub_api_key() -> None:
+    """Secrets can be injected without ever touching the config file."""
+    cfg = apply_env_overrides(
+        default_config(),
+        environ={
+            "MERCURE_GATEWAY_AUDIT_HUB_REPORTING_ENABLED": "true",
+            "MERCURE_GATEWAY_AUDIT_HUB_REPORTING_BOOKKEEPER_URL": "https://hub.example.com",
+            "MERCURE_GATEWAY_AUDIT_HUB_REPORTING_API_KEY": "change-me-now",
+        },
+    )
+    assert cfg.audit.hub_reporting.enabled is True
+    assert cfg.audit.hub_reporting.bookkeeper_url == "https://hub.example.com"
+    assert cfg.audit.hub_reporting.api_key == "change-me-now"
+
+
+def test_unset_env_vars_leave_fields_unchanged() -> None:
+    cfg = apply_env_overrides(default_config(), environ={})
+    assert cfg == default_config()
+
+
+def test_env_collection_fields_are_skipped() -> None:
+    """destinations[] is too complex for env vars — the config file owns it."""
+    cfg = apply_env_overrides(
+        default_config(),
+        environ={"MERCURE_GATEWAY_DESTINATIONS": '{"bogus": "json"} {"n": 1}'},
+    )
+    assert cfg.destinations == []
+
+
+def test_env_invalid_value_raises_value_error() -> None:
+    with pytest.raises(ValueError):
+        apply_env_overrides(
+            default_config(),
+            environ={"MERCURE_GATEWAY_WEB_UI_PORT": "not-a-port"},
+        )
+
+
+def test_env_boolean_value_false() -> None:
+    cfg = apply_env_overrides(
+        default_config(),
+        environ={"MERCURE_GATEWAY_WEB_UI_AUTH_ENABLED": "false"},
+    )
+    assert cfg.web_ui.auth_enabled is False

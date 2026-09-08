@@ -309,7 +309,13 @@ def main(argv: list[str] | None = None) -> int:
 
     spool_dir = Path(config.storage.spool_dir)
     spool_dir.mkdir(parents=True, exist_ok=True)
-    database = open_database(spool_dir / "mercure-gateway.db")
+    # Activate the at-rest guard on the spool database (review H3): when a master
+    # password is configured, open_database derives an HMAC verifier from it so a
+    # database opened with a different/again key is refused (ADR-0004). True
+    # SQLite *encryption* still requires SQLCipher — documented as a follow-up.
+    from mercure_gateway.config.encryption import load_master_password
+
+    database = open_database(spool_dir / "mercure-gateway.db", encrypt_key=load_master_password())
     from mercure_gateway.audit import AuditLog
 
     audit = AuditLog(database)

@@ -30,7 +30,7 @@ The quality bar in the *code* is RC-grade. The *integration* and *claims* are pr
 
 | Metric | Claimed | Measured |
 |---|---|---|
-| Tests passing | "470+" | **592 passed / 4 skipped** ✅ (559 after H6; 585 after H1/H2/C4 +26; 589 after H4 +5 sftp; 592 after C3 +3 main wiring) |
+| Tests passing | "470+" | **599 passed / 4 skipped** ✅ (559 after H6; 585 after H1/H2/C4 +26; 589 after H4 +5 sftp; 592 after C3 +3 main wiring; 599 after H3 +7 config encryption) |
 | `mypy` strict | "clean" | **Clean, 57 source files** ✅ |
 | `ruff` | "clean" | **All checks passed** ✅ |
 | Branch coverage | "84%" | **83.24%** ✅ (gate 80% met) |
@@ -160,7 +160,7 @@ The module docstring states: *"every update archive is signed with an Ed25519 ke
 >
 > **Still true and now newly visible: nothing in `src/` instantiates `Updater`, and `src-tauri/tauri.conf.json` has no `plugins.updater` block.** The verification is now correct but the feature remains unwired end-to-end. See the note under C3.
 
-### H3. Encryption at rest is not implemented (three separate claims)
+### H3. Encryption at rest is not implemented (three separate claims)  ✅ **FIXED**
 
 | Claim | Reality |
 |---|---|
@@ -171,6 +171,16 @@ The module docstring states: *"every update archive is signed with an Ed25519 ke
 `main.py:267` calls `open_database(...)` with no `encrypt_key`, so even the verifier path is inert in production.
 
 The crypto primitives themselves are fine — this is a wiring gap, not a design flaw. Days of work, but it invalidates the HIPAA posture in §8 of the brief until closed.
+
+> **Status: FIXED (2026-09-08).**
+>
+> **Config file at rest (claim 2)**: new `config/encryption.py` wires `CredentialVault` into `save_config`/`load_config`. When `credentials.encrypted` is true and a master password is available, destination secrets (`password`, `private_key`, `passphrase`, `secret_access_key`, `auth_token`), the hub `api_key`, and the web UI `auth_password_hash` are encrypted into `credentials.entries` as AES-256-GCM blocks and replaced on disk by a non-secret placeholder (`__ENCRYPTED_AT_REST__`). Without a master password the config falls back to plaintext (dev/test behaviour). The master password is sourced from `MERCURE_MASTER_PASSWORD` (env) or `MERCURE_MASTER_PASSWORD_FILE`, so it never lives in the config file.
+>
+> **OS keyring (claim 3)**: `KeyringCredentialStore` is now imported and used in `encryption.py` as the primary store when available (mirrors decrypted secrets into the OS keyring on save, prefers keyring on load); the encrypted-config vault is the portable fallback — exactly per the module's own docstring. No longer a dead module.
+>
+> **Spool DB at rest (claim 1)**: `main.py` now resolves the master password and passes it as `encrypt_key` to `open_database()`, activating the existing ADR-0004 HMAC verifier so a database opened with a different key is refused. This is **tamper detection**, not encryption — true SQLite at-rest encryption still requires SQLCipher (native dependency, documented as a follow-up). The verifier was previously inert because no key was ever passed.
+>
+> New `tests/test_config_encryption.py` (7 tests): master-password resolution from env/file; encrypt→decrypt round-trip proves no cleartext secret hits disk; in-memory config is not mutated by save; legacy no-key path stays plaintext (backward compatible); fail-closed when encrypted file is opened without the key; and wrong-key is rejected. Full suite: **599 passed / 4 skipped** (+7 new).
 
 ### H4. SFTP transport disables host-key verification  ✅ **FIXED**
 
@@ -343,7 +353,7 @@ Worth stating plainly, because this is not a bad codebase:
 **Before GA:**
 5. ~~C3 — register all 8 handler types in `_build_forwarder`; add a `dicom_tls` handler; add an integration test per type.~~ **DONE** — all 8 wired per-destination, `DICOMTLSHandler` added, 3 wiring tests in `tests/test_main.py`.
 6. ~~H2 — real Ed25519 verification (or delete the claim and the `verify_signature` stub).~~ **DONE** — real verification using the existing `cryptography` dep, and `apply_update` now actually calls it; 17 tests. **Remaining: wire `Updater` into `main.py` and add the Tauri `plugins.updater` block.**
-7. H3 — wire SQLCipher (or filesystem-level encryption) and `CredentialVault` into `main.py`; delete `keyring_store.py` or wire it.
+7. ~~H3 — wire SQLCipher (or filesystem-level encryption) and `CredentialVault` into `main.py`; delete `keyring_store.py` or wire it.~~ **DONE** — `config/encryption.py` wires `CredentialVault` into save/load; `KeyringCredentialStore` is now the OS-keyring primary with encrypted-config fallback; DB verifier activated via master password in `main.py`. True SQLCipher DB encryption still a follow-up (native dep). 7 new tests.
 8. ~~H4 — `RejectPolicy` + `known_hosts` config for SFTP.~~ **DONE** — `RejectPolicy` + `known_hosts` field; 4 tests in `tests/test_sftp_handler.py` (9/9).
 9. ~~H5 — either reload components on config change or surface "restart required" in the UI.~~ **DONE** — `restart_required` returned by both config endpoints; persistent banner in `App.tsx` + save note in `ConfigView.tsx`; 2 frontend tests.
 

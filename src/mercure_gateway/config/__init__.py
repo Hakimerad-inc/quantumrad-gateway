@@ -481,16 +481,52 @@ def default_config() -> GatewayConfig:
     return GatewayConfig()
 
 
-def load_config(path: str | Path) -> GatewayConfig:
-    """Load and strictly validate ``mercure-gateway.json`` from ``path``."""
+def _resolve_master_password(master_password: str | None) -> str | None:
+    """Return *master_password* if given, else resolve it from the environment."""
+    if master_password is not None:
+        return master_password
+    from .encryption import load_master_password
+
+    return load_master_password()
+
+
+def load_config(
+    path: str | Path, *, master_password: str | None = None
+) -> GatewayConfig:
+    """Load and strictly validate ``mercure-gateway.json`` from ``path``.
+
+    When the config is encrypted at rest, secrets are decrypted back into the
+    in-memory model using the master password (from *master_password* or the
+    ``MERCURE_MASTER_PASSWORD`` / ``MERCURE_MASTER_PASSWORD_FILE`` env vars).
+    """
     with Path(path).open("r", encoding="utf-8") as fh:
-        return GatewayConfig.model_validate_json(fh.read())
+        config = GatewayConfig.model_validate_json(fh.read())
+    mp = _resolve_master_password(master_password)
+    if mp is not None or config.credentials.encrypted:
+        from .encryption import decrypt_config_from_storage
+
+        config = decrypt_config_from_storage(config, mp)
+    return config
 
 
-def save_config(config: GatewayConfig, path: str | Path) -> None:
-    """Serialize ``config`` to ``path`` as pretty-printed JSON."""
+def save_config(
+    config: GatewayConfig, path: str | Path, *, master_password: str | None = None
+) -> None:
+    """Serialize ``config`` to ``path`` as pretty-printed JSON.
+
+    When encryption at rest is enabled (``credentials.encrypted``) and a master
+    password is available, secrets are encrypted into ``credentials.entries`` and
+    replaced on disk by a non-secret placeholder.  Without a master password the
+    config is written in cleartext (dev/test behaviour).
+    """
+    mp = _resolve_master_password(master_password)
+    to_write = config
+    if mp is not None and config.credentials.encrypted:
+        from .encryption import encrypt_config_for_storage
+
+        to_write = encrypt_config_for_storage(config, mp)
     Path(path).write_text(
-        config.model_dump_json(indent=2) + "\n",
+        to_write.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
 

@@ -20,11 +20,11 @@ export default function LogsView() {
     }
   }, [limit]);
 
-  useEffect(() => {
+  useEffect(function loadLogsOnLimitChange() {
     load();
   }, [load]);
 
-  useEffect(() => {
+  useEffect(function pollLogsWhileAuto() {
     if (!auto) return;
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
@@ -33,7 +33,7 @@ export default function LogsView() {
   return (
     <div>
       <h2>Operations Log</h2>
-      {error && <div className="error-banner" role="alert">Log refresh failed: {error}</div>}
+      {error ? <div className="error-banner" role="alert">Log refresh failed: {error}</div> : null}
       <div className="toolbar">
         <label className="check">
           Lines

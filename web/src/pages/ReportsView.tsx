@@ -25,7 +25,7 @@ export default function ReportsView() {
     }
   }, []);
 
-  useEffect(() => {
+  useEffect(function loadReportsOnMount() {
     load();
   }, [load]);
 
@@ -50,7 +50,7 @@ export default function ReportsView() {
   return (
     <div>
       <h2>Reports</h2>
-      {error && <div className="error-banner" role="alert">Report action failed: {error}</div>}
+      {error ? <div className="error-banner" role="alert">Report action failed: {error}</div> : null}
       <div className="split">
         <div className="card" style={{ padding: 0, overflow: "hidden" }}>
           {reports.length === 0 ? (

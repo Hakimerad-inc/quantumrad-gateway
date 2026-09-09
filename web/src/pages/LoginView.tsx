@@ -45,7 +45,7 @@ export default function LoginView({ onLogin }: LoginViewProps) {
         <p className="subtitle">Sign in to access the admin panel</p>
 
         <form onSubmit={handleSubmit}>
-          {error && <div className="error-message" role="alert">{error}</div>}
+          {error ? <div className="error-message" role="alert">{error}</div> : null}
 
           <div className="form-group">
             <label htmlFor="password">Password</label>

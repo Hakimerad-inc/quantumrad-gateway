@@ -26,7 +26,7 @@ export default function ServiceCard() {
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
 
-  useEffect(() => {
+  useEffect(function refreshStatusOnMount() {
     refresh();
   }, [refresh]);
 

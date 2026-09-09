@@ -30,7 +30,7 @@ export default function UpdaterBanner() {
   const [busy, setBusy] = useState(false);
   const [dismissed, setDismissed] = useState(false);
 
-  useEffect(() => {
+  useEffect(function checkUpdateOnceOnMount() {
     if (!inTauri()) return;
     checkForUpdate()
       .then(setUpdate)

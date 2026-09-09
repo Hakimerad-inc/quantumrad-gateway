@@ -155,11 +155,11 @@ export default function SetupWizardPage() {
         </div>
 
         <div style={{ minHeight: 200 }}>
-          {errors.length > 0 && (
+          {errors.length > 0 ? (
             <div className="error-banner" style={{ marginBottom: 12 }}>
               {errors.map((e) => <div key={e}>{e}</div>)}
             </div>
-          )}
+          ) : null}
 
           {currentStep === "receiver" && (
             <div>

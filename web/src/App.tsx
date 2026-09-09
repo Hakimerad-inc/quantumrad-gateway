@@ -10,6 +10,7 @@ import PipelineView from "./pages/PipelineView";
 import LoginView from "./pages/LoginView";
 import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus, type SystemStatus } from "./api";
 import UpdaterBanner from "./ui/UpdaterBanner";
+import ErrorBoundary from "./ui/ErrorBoundary";
 import { BrandMark, IconPulse, IconQueue, IconBolt, IconFileText, IconShield, IconSettings, IconTerminal, IconWorkflow, IconLogout } from "./ui/icons";
 
 type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
@@ -24,7 +25,6 @@ export function Dashboard() {
     fetchQueueStats().then(setStats).catch(() => setStats(null));
     fetchDiskStatus().then(setDisk).catch(() => setDisk(null));
   }, []);
-
   const dot = (running: string) => (
     <span className={`status-dot ${running === "running" ? "green" : "gray"}`} />
   );
@@ -147,12 +147,19 @@ function AppContent() {
 
   useEffect(() => {
     fetchSystemStatus().then((s) => setVersion(s.version)).catch(() => {});
+  }, []);
+
+  // Re-read the hash on browser navigation (back/forward, manual edit).
+  useEffect(function syncPageWithHash() {
     const onHash = () => setPage(pageFromHash());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  useEffect(() => onRestartRequired(setRestartNeeded), []);
+  // Subscribe to the module-level "restart required" signal (review H5).
+  useEffect(function subscribeToRestartRequired() {
+    return onRestartRequired(setRestartNeeded);
+  }, []);
 
   const handleNavigate = (key: Page) => {
     window.location.hash = `/${key}`;
@@ -212,14 +219,19 @@ function AppContent() {
           </div>
         )}
         <UpdaterBanner />
-        {page === "dashboard" && <Dashboard />}
-        {page === "pipeline" && <PipelineView />}
-        {page === "queue" && <QueueView />}
-        {page === "setup" && <SetupWizardPage />}
-        {page === "reports" && <ReportsView />}
-        {page === "audit" && <AuditView />}
-        {page === "config" && <ConfigView />}
-        {page === "logs" && <LogsView />}
+        {/* Feature boundary (fault-tolerant-error-boundaries): a crash in one
+            panel degrades to a banner inside the panel area — the shell (nav,
+            banners) stays alive. Keyed by page so switching resets the gate. */}
+        <ErrorBoundary key={page}>
+          {page === "dashboard" && <Dashboard />}
+          {page === "pipeline" && <PipelineView />}
+          {page === "queue" && <QueueView />}
+          {page === "setup" && <SetupWizardPage />}
+          {page === "reports" && <ReportsView />}
+          {page === "audit" && <AuditView />}
+          {page === "config" && <ConfigView />}
+          {page === "logs" && <LogsView />}
+        </ErrorBoundary>
       </main>
     </div>
   );

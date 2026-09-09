@@ -19,7 +19,7 @@ export default function AuditView() {
     }
   }, []);
 
-  useEffect(() => {
+  useEffect(function loadAuditOnMount() {
     load();
   }, [load]);
 
@@ -45,7 +45,7 @@ export default function AuditView() {
   return (
     <div>
       <h2>Audit Log</h2>
-      {error && <div className="error-banner" role="alert">Failed to load audit log: {error}</div>}
+      {error ? <div className="error-banner" role="alert">Failed to load audit log: {error}</div> : null}
       <div className="toolbar">
         <button className="btn primary" onClick={doVerify} disabled={checking}>
           {checking ? "Verifying..." : "Verify Chain Integrity"}

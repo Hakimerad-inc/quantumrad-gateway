@@ -10,7 +10,7 @@ export default function ConfigView() {
   const [msg, setMsg] = useState("");
   const [loadError, setLoadError] = useState("");
 
-  useEffect(() => {
+  useEffect(function loadConfigOnMount() {
     fetchConfig()
       .then((c) => {
         setConfig(c);
@@ -58,7 +58,7 @@ export default function ConfigView() {
         <button className="btn primary" onClick={handleSave} disabled={!dirty || saving}>
           {saving ? "Saving..." : "Save"}
         </button>
-        {msg && <span className={msg.startsWith("Invalid") ? "error-banner" : "ok-note"} style={msg.startsWith("Invalid") ? { margin: 0 } : undefined}>{msg}</span>}
+        {msg ? <span className={msg.startsWith("Invalid") ? "error-banner" : "ok-note"} style={msg.startsWith("Invalid") ? { margin: 0 } : undefined}>{msg}</span> : null}
       </div>
       <div className="card">
         <textarea

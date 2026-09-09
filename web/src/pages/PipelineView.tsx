@@ -54,17 +54,17 @@ export default function PipelineView() {
     }
   }, []);
 
-  useEffect(() => {
+  useEffect(function loadSnapshotOnMount() {
     load();
   }, [load]);
 
-  useEffect(() => {
+  useEffect(function pollSnapshotWhileLive() {
     if (!auto) return;
     const id = setInterval(load, POLL_MS);
     return () => clearInterval(id);
   }, [auto, load]);
 
-  useEffect(() => {
+  useEffect(function pollSelectionDetail() {
     if (selection === null) return;
     let cancelled = false;
     const loadSelection = async () => {
@@ -126,7 +126,7 @@ export default function PipelineView() {
   return (
     <div>
       <h2>Pipeline</h2>
-      {error && <div className="error-banner">Error: {error}</div>}
+      {error ? <div className="error-banner">Error: {error}</div> : null}
       <div className="toolbar">
         <label className="check">
           <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />

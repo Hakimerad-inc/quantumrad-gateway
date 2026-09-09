@@ -33,7 +33,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  useEffect(() => {
+  useEffect(function checkSessionOnMount() {
     checkAuth();
   }, []);
 

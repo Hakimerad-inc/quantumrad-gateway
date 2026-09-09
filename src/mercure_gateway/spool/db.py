@@ -260,8 +260,13 @@ class Database:
         }
         if "study_uid" not in columns:
             self._conn.execute("ALTER TABLE audit_events ADD COLUMN study_uid TEXT")
-        # Backfill: extract the study_uid recorded in the event detail (both
-        # "study_uid" and the legacy "uid" keys appear in historic payloads).
+        # Backfill: extract the study_uid recorded in the event detail. The
+        # append-only triggers (present on every real database — the test
+        # fixtures that build a bare v4 table do not have them) abort any
+        # UPDATE, so they are dropped around the backfill and recreated
+        # immediately, the same way AuditLog.prune does its delete.
+        self._conn.execute("DROP TRIGGER IF EXISTS audit_events_no_update")
+        self._conn.execute("DROP TRIGGER IF EXISTS audit_events_no_delete")
         self._conn.execute(
             """
             UPDATE audit_events
@@ -271,6 +276,8 @@ class Database:
               AND json_extract(detail, '$.study_uid') IS NOT NULL
             """
         )
+        self._conn.execute(_AUDIT_NO_UPDATE)
+        self._conn.execute(_AUDIT_NO_DELETE)
 
     def _verify_or_create_key(self) -> None:
         """Enforce the at-rest encryption guard (ADR-0004).

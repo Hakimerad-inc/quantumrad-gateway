@@ -225,3 +225,54 @@ def test_v4_audit_events_backfilled_on_open(tmp_path):  # type: ignore[no-untype
     # Events without a study_uid in their detail stay NULL and match nothing.
     assert db.list_audit_for_study("1.2.3") == []
     db.close()
+
+
+def test_v4_backfill_survives_append_only_triggers(tmp_path):  # type: ignore[no-untyped-def]
+    """The v5 backfill must not trip the real database's append-only triggers.
+
+    Every real v4 database carries the ``audit_events_no_update`` /
+    ``audit_events_no_delete`` triggers (SCHEMA_SQL appends them), so the
+    backfill UPDATE aborts with ``sqlite3.IntegrityError: audit_events is
+    append-only`` unless the migration drops and recreates them — found live
+    when booting against an existing spool.
+    """
+    import sqlite3
+
+    from mercure_gateway.spool.db import _AUDIT_NO_DELETE, _AUDIT_NO_UPDATE, open_database
+
+    db_path = tmp_path / "spool.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE audit_events (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            event   TEXT NOT NULL,
+            detail  TEXT NOT NULL DEFAULT '{}',
+            user    TEXT,
+            hash    TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(_AUDIT_NO_UPDATE)
+    conn.execute(_AUDIT_NO_DELETE)
+    conn.execute(
+        "INSERT INTO audit_events (event, detail, hash) VALUES "
+        "('STUDY_RECEIVED', '{\"study_uid\":\"1.2.3.4\"}', 'h1'),"
+        "('PRUNE_AUDIT', '{\"pruned\":0}', 'h2')"
+    )
+    conn.commit()
+    conn.close()
+
+    db = open_database(db_path)
+    assert {row["event"] for row in db.list_audit_for_study("1.2.3.4")} == {"STUDY_RECEIVED"}
+    # The append-only guard must be back in place after the migration.
+    names = {
+        r[0]
+        for r in db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        ).fetchall()
+    }
+    assert "audit_events_no_update" in names
+    assert "audit_events_no_delete" in names
+    db.close()

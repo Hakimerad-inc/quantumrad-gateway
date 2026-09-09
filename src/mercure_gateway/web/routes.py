@@ -533,7 +533,9 @@ def update_config(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
         save_config(updated, str(config_path))
     # Keep the running config (with real secrets) in sync with what was saved.
     request.app.state.config = updated
-    return {"status": "ok", "message": "Config update saved"}
+    # Components hold their own config refs captured at construction, so a
+    # restart is required for the new config to take effect (review H5).
+    return {"status": "ok", "message": "Config update saved", "restart_required": True}
 
 
 @router.get("/config/export")

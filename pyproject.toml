@@ -62,7 +62,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 mypy_path = "src"
-exclude = ["tests", "build", "dist", "\\.venv"]
+exclude = ["tests", "build", "dist", "\\.venv", "src-tauri/binaries"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

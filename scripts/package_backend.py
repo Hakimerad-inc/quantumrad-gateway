@@ -78,7 +78,6 @@ def build() -> Path:
             "PyInstaller is not installed. Run: uv sync --extra package "
             "(or: uv pip install pyinstaller)"
         )
-    exe_name = "mercure-gateway.exe" if sys.platform == "win32" else "mercure-gateway"
     cmd = [
         sys.executable,
         "-m",
@@ -105,8 +104,6 @@ def build() -> Path:
     print("running:", " ".join(cmd))
     subprocess.run(cmd, check=True, cwd=REPO)
 
-    exe = DIST_DIR / "_internal"  # placeholder to keep type-checkers honest
-    _ = exe
     print(f"backend bundle: {DIST_DIR}")
     return DIST_DIR
 

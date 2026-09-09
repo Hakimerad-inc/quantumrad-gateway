@@ -118,9 +118,9 @@ fn derive_state(status: &serde_json::Value) -> u8 {
 
 fn state_label(state: u8) -> &'static str {
     match state {
-        TRAY_SENDING => "mercure-gateway — sending",
-        TRAY_ERROR => "mercure-gateway — attention needed",
-        _ => "mercure-gateway — idle",
+        TRAY_SENDING => "QuantumRAD Gateway — sending",
+        TRAY_ERROR => "QuantumRAD Gateway — attention needed",
+        _ => "QuantumRAD Gateway — idle",
     }
 }
 

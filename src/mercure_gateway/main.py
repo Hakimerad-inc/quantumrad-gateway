@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mercure-gateway",
+        prog="quantumrad-gateway",
         description="Lightweight desktop DICOM gateway (store-and-forward).",
     )
     parser.add_argument(
@@ -67,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"mercure-gateway {__version__}",
+        version=f"QuantumRAD Gateway {__version__}",
     )
     parser.add_argument(
         "--write-default-config",
@@ -503,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     disk_monitor.start()
 
-    print(f"mercure-gateway {__version__}")
+    print(f"QuantumRAD Gateway {__version__}")
     print(f"  receiver  : AET={config.receiver.ae_title} port={config.receiver.port}")
     print(f"  forwarder : {forwarder.is_running and 'running' or 'stopped'}")
     print(f"  spool     : {spool.spool_dir}")

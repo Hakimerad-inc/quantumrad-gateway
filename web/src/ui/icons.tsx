@@ -133,6 +133,46 @@ export const IconBrand = (p: IconProps) => (
   </Icon>
 );
 
+// ── QuantumRAD-Gateway brand mark ────────────────────────────────────────
+// The QuantumPACS "Orbit" (design-system/quantumpacs/BRAND-KIT §2): nucleus,
+// orbit ring + ellipse, scan-plane axis. Drawn on the 24px UI grid with the
+// non-negotiable three-stop brand gradient (blue-600 → cyan → teal).
+
+export const BrandGradientDefs = () => (
+  <defs>
+    <linearGradient id="qrad-brand-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stopColor="#0077B6" />
+      <stop offset="0.5" stopColor="#22D3EE" />
+      <stop offset="1" stopColor="#059669" />
+    </linearGradient>
+  </defs>
+);
+
+/** Full-color orbit mark for brand moments (sidebar, login). */
+export const BrandMark = ({ size = 24 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" role="img" aria-label="QuantumRAD-Gateway">
+    <BrandGradientDefs />
+    <circle cx="12" cy="12" r="9.5" stroke="url(#qrad-brand-gradient)" strokeWidth="2" />
+    <circle cx="12" cy="12" r="5.5" stroke="#22D3EE" strokeWidth="1.2" opacity="0.5" />
+    <ellipse cx="12" cy="12" rx="3.4" ry="1.5" stroke="#059669" strokeWidth="0.9" opacity="0.6" />
+    <line x1="12" y1="2.5" x2="12" y2="5.5" stroke="url(#qrad-brand-gradient)" strokeWidth="1.4" strokeLinecap="round" />
+    <line x1="12" y1="18.5" x2="12" y2="21.5" stroke="url(#qrad-brand-gradient)" strokeWidth="1.4" strokeLinecap="round" />
+    <circle cx="12" cy="12" r="1.6" fill="url(#qrad-brand-gradient)" />
+  </svg>
+);
+
+/** White reversed mark for dark surfaces (login gradient). */
+export const BrandMarkMonoLight = ({ size = 24 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" role="img" aria-label="QuantumRAD-Gateway">
+    <circle cx="12" cy="12" r="9.5" stroke="#FFFFFF" strokeWidth="2" />
+    <circle cx="12" cy="12" r="5.5" stroke="#FFFFFF" strokeWidth="1.2" opacity="0.5" />
+    <ellipse cx="12" cy="12" rx="3.4" ry="1.5" stroke="#FFFFFF" strokeWidth="0.9" opacity="0.6" />
+    <line x1="12" y1="2.5" x2="12" y2="5.5" stroke="#FFFFFF" strokeWidth="1.4" strokeLinecap="round" />
+    <line x1="12" y1="18.5" x2="12" y2="21.5" stroke="#FFFFFF" strokeWidth="1.4" strokeLinecap="round" />
+    <circle cx="12" cy="12" r="1.6" fill="#FFFFFF" />
+  </svg>
+);
+
 export const IconLogout = (p: IconProps) => (
   <Icon {...p}>
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />

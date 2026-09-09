@@ -43,9 +43,9 @@ export default function ServiceCard() {
   const run = async (action: ServiceAction) => {
     if (
       (action === "install" &&
-        !window.confirm("Install the mercure-gateway Windows service (auto-start on boot)?")) ||
+        !window.confirm("Install the QuantumRAD Gateway Windows service (auto-start on boot)?")) ||
       (action === "uninstall" &&
-        !window.confirm("Uninstall the mercure-gateway Windows service?"))
+        !window.confirm("Uninstall the QuantumRAD Gateway Windows service?"))
     ) {
       return;
     }

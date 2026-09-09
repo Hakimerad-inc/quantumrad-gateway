@@ -2,6 +2,7 @@
 
 import { useState, FormEvent } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { BrandMark } from '../ui/icons';
 
 interface LoginViewProps {
   onLogin?: () => void;
@@ -38,7 +39,9 @@ export default function LoginView({ onLogin }: LoginViewProps) {
   return (
     <div className="login-page">
       <div className="login-card">
-        <h1>Mercure Gateway</h1>
+        <div className="brand"><BrandMark size={48} /></div>
+        <h1>QuantumRAD Gateway</h1>
+        <p className="brand-tagline">Diagnostic Clarity, Quantum Fast.</p>
         <p className="subtitle">Sign in to access the admin panel</p>
 
         <form onSubmit={handleSubmit}>

@@ -124,9 +124,9 @@ def create_app(
     from mercure_gateway.web.routes import auth_router, router
 
     app = FastAPI(
-        title="mercure-gateway API",
+        title="QuantumRAD Gateway API",
         version="0.1.0",
-        description="REST API for mercure-gateway web admin panel",
+        description="REST API for the QuantumRAD Gateway web admin panel",
     )
 
     # Store shared references on app state for route access

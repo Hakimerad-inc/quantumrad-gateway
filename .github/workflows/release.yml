@@ -84,7 +84,7 @@ jobs:
               platforms[key] = {"signature": open(sig_path).read(), "url": f"{base}/{name}"}
           manifest = {
               "version": version,
-              "notes": f"mercure-gateway {version}",
+              "notes": f"QuantumRAD Gateway {version}",
               "pub_date": os.environ.get("RELEASE_PUB_DATE", ""),
               "platforms": platforms,
           }

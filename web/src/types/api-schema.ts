@@ -154,6 +154,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/service": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Service Status
+         * @description Windows service status for the admin panel (S07-T9).
+         *
+         *     On non-Windows composition roots (``app.state.service_controller is None``)
+         *     this returns 200 with ``available: false`` so the SPA renders a clean
+         *     "not supported" card instead of an error banner; the POST actions 501.
+         */
+        get: operations["service_status_api_service_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/service/{action}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Service Action
+         * @description Install/uninstall/start/stop the Windows service (S07-T9).
+         *
+         *     Install and uninstall are operator-confirm actions in the SPA; the API is
+         *     admin-auth'd like every other mutating endpoint on this router.
+         */
+        post: operations["service_action_api_service__action__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/queue/stats": {
         parameters: {
             query?: never;
@@ -839,6 +886,27 @@ export interface components {
             failed: number;
         };
         /**
+         * ServiceStatusModel
+         * @description Windows service install/run state for the admin panel.
+         */
+        ServiceStatusModel: {
+            /**
+             * Available
+             * @default false
+             */
+            available: boolean;
+            /**
+             * Installed
+             * @default false
+             */
+            installed: boolean;
+            /**
+             * State
+             * @default unsupported
+             */
+            state: string;
+        };
+        /**
          * StudyPage
          * @description Paginated studies list with metadata for page controls (§7.2).
          */
@@ -1087,6 +1155,59 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+        };
+    };
+    service_status_api_service_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceStatusModel"];
+                };
+            };
+        };
+    };
+    service_action_api_service__action__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                action: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

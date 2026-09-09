@@ -10,18 +10,7 @@ import PipelineView from "./pages/PipelineView";
 import LoginView from "./pages/LoginView";
 import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus, type SystemStatus } from "./api";
 import UpdaterBanner from "./ui/UpdaterBanner";
-import {
-  IconBrand,
-  IconPulse,
-  IconQueue,
-  IconBolt,
-  IconFileText,
-  IconShield,
-  IconSettings,
-  IconTerminal,
-  IconWorkflow,
-  IconLogout,
-} from "./ui/icons";
+import { BrandMark, IconPulse, IconQueue, IconBolt, IconFileText, IconShield, IconSettings, IconTerminal, IconWorkflow, IconLogout } from "./ui/icons";
 
 type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
 
@@ -190,9 +179,9 @@ function AppContent() {
     <div className="shell">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <span className="brand-mark"><IconBrand size={17} /></span>
+          <span className="brand-mark"><BrandMark size={22} /></span>
           <div>
-            <h1>Mercure Gateway</h1>
+            <h1>Quantum<span className="brand-accent">RAD</span> Gateway</h1>
             <div className="version">{version ? `v${version}` : ""}</div>
           </div>
         </div>

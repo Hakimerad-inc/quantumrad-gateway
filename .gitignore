@@ -80,3 +80,7 @@ src-tauri/binaries/
 .claude/settings.json
 .playwright-mcp/
 /live-*.png
+
+# Playwright E2E artifacts (traces, screenshots, reports)
+test-results/
+playwright-report/

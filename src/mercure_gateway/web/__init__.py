@@ -37,12 +37,18 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Loopback origins the Tauri webview / localhost SPA actually use — the same
 # set the CORS middleware allows.  A state-changing request whose Origin is
 # *not* in this set is CSRF (a cross-site form/post cannot spoof loopback).
+# The allow-list covers any port on loopback hosts: the SPA is served by the
+# gateway itself, so a request Origin that already matches the host on any
+# port is same-app, not cross-site (tests bind isolated web ports, e.g. E2E).
 _ALLOWED_ORIGINS = (
     "http://127.0.0.1:8080",
     "http://localhost:8080",
     "tauri://localhost",
     "https://tauri.localhost",
 )
+
+# Hosts (any port) whose origins are accepted in addition to the exact list.
+_ALLOWED_ORIGIN_HOSTS = {"127.0.0.1", "localhost"}
 
 # Non-loopback binding is only allowed when auth is enabled (main.py enforces
 # this); loopback is single-user by definition, so the CSRF origin check is a
@@ -92,12 +98,29 @@ class _SecurityMiddleware:
         if scope["method"] in self._STATE_CHANGING and scope["path"].startswith("/api/"):
             headers = dict(scope.get("headers", []))
             origin = headers.get(b"origin")
-            if origin is not None and origin.decode() not in self._allowed_origins:
-                response = JSONResponse(
-                    status_code=403, content={"detail": "origin not allowed"}
-                )
-                await response(scope, receive, send)
-                return
+            if origin is not None:
+                origin_str = origin.decode()
+                if origin_str in self._allowed_origins:
+                    origin_allowed = True
+                else:
+                    # Same-app loopback on a non-default port (e.g. tests on an
+                    # isolated web port): host must be loopback and the scheme
+                    # plain http — tauri:// and remote hosts stay rejected.
+                    from urllib.parse import urlsplit
+
+                    parts = urlsplit(origin_str)
+                    origin_allowed = (
+                        parts.scheme == "http"
+                        and parts.hostname in _ALLOWED_ORIGIN_HOSTS
+                        and parts.username is None
+                        and parts.password is None
+                    )
+                if not origin_allowed:
+                    response = JSONResponse(
+                        status_code=403, content={"detail": "origin not allowed"}
+                    )
+                    await response(scope, receive, send)
+                    return
 
         async def send_wrapper(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":

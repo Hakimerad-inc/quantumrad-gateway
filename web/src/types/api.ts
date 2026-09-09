@@ -142,3 +142,11 @@ export interface TimelineEvent {
   detail: Record<string, unknown>;
   user: string | null;
 }
+
+// ── Windows service management (S07-T9) ──────────────────────────────
+
+export interface ServiceStatus {
+  available: boolean;
+  installed: boolean;
+  state: string;
+}

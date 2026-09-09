@@ -27,18 +27,61 @@ def _win32() -> Any:
     return importlib.import_module("win32serviceutil")
 
 
+def _service_exe_args() -> str:
+    """Arguments the SCM passes to the service executable.
+
+    Source installs run ``<python> -m mercure_gateway --web``-equivalent via
+    ``exeArgs="--web"`` against the interpreter; a PyInstaller-frozen sidecar
+    (``sys.frozen``, packaging pipeline) is a standalone executable that takes
+    ``--web`` directly.
+    """
+    if getattr(sys, "frozen", False):
+        return "--web"
+    return "--web"
+
+
 class WindowsServiceBackend(ServiceBackend):
-    """Start/stop the gateway Windows service via ``win32serviceutil``."""
+    """Start/stop/install/uninstall the gateway Windows service."""
 
     def __init__(self, service_name: str = _SERVICE_NAME) -> None:
         self._service_name = service_name
 
-    def start(self) -> None:
+    def _require_windows(self) -> None:
         if sys.platform != "win32":
             raise RuntimeError("Windows service mode is only available on Windows")
+
+    def start(self) -> None:
+        self._require_windows()
         _win32().StartService(self._service_name)
 
     def stop(self) -> None:
-        if sys.platform != "win32":
-            raise RuntimeError("Windows service mode is only available on Windows")
+        self._require_windows()
         _win32().StopService(self._service_name)
+
+    def install(self) -> None:
+        """Register the service with the SCM (auto-start on boot)."""
+        self._require_windows()
+        util = _win32()
+        exe = sys.argv[0] if getattr(sys, "frozen", False) else sys.executable
+        util.InstallService(
+            pythonClassString="",  # unused when exeClassString path is taken
+            serviceName=self._service_name,
+            displayName="mercure-gateway",
+            exeName=exe,
+            exeArgs=_service_exe_args(),
+            autoStart=True,
+        )
+
+    def uninstall(self) -> None:
+        """Deregister the service from the SCM."""
+        self._require_windows()
+        _win32().RemoveService(self._service_name)
+
+    def installed(self) -> bool:
+        """True when the SCM currently has the service registered."""
+        self._require_windows()
+        try:
+            _win32().QueryServiceStatus(self._service_name)
+        except Exception:  # noqa: BLE001 — boundary: any SCM error means "absent"
+            return False
+        return True

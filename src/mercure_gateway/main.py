@@ -309,6 +309,15 @@ def _run_web_admin(
     health_monitor = DestinationHealthMonitor(config)
     health_monitor.start()
     app.state.health_monitor = health_monitor
+    # Windows service management (S07-T9): None off Windows — the /api/service
+    # endpoints degrade to available=false (GET) / 501 (POST).
+    if sys.platform == "win32":
+        from mercure_gateway.service_backend import WindowsServiceBackend
+        from mercure_gateway.service_controller import ServiceController
+
+        app.state.service_controller = ServiceController(WindowsServiceBackend())
+    else:
+        app.state.service_controller = None
     if text_log is not None:
         app.state.text_log_path = str(text_log._path)
     host = config.web_ui.host

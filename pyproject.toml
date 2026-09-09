@@ -36,6 +36,11 @@ dev = [
     "httpx2>=2.12,<3",
     "httpx>=0.27,<0.29",
 ]
+# Windows service management (S07-T9): SCM install/uninstall/start/stop via
+# pywin32. Windows-only marker so Linux/macOS installs skip the binary wheel.
+service = [
+    "pywin32>=306; sys_platform == 'win32'",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.30,<0.12.0"]

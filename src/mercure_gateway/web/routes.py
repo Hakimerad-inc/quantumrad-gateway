@@ -239,6 +239,75 @@ def system_stop(request: Request) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Windows service management  (PRD §13 Q3, S07-T9)
+# ---------------------------------------------------------------------------
+
+class ServiceStatusModel(BaseModel):
+    """Windows service install/run state for the admin panel."""
+
+    available: bool = False
+    installed: bool = False
+    state: str = "unsupported"
+
+
+def _service_controller(request: Request) -> object | None:
+    """The composition-root ServiceController, or None off Windows."""
+    return getattr(request.app.state, "service_controller", None)
+
+
+@router.get("/service", response_model=ServiceStatusModel)
+def service_status(request: Request) -> ServiceStatusModel:
+    """Windows service status for the admin panel (S07-T9).
+
+    On non-Windows composition roots (``app.state.service_controller is None``)
+    this returns 200 with ``available: false`` so the SPA renders a clean
+    "not supported" card instead of an error banner; the POST actions 501.
+    """
+    controller = _service_controller(request)
+    if controller is None:
+        return ServiceStatusModel(available=False, installed=False, state="unsupported")
+    status = controller.status()  # type: ignore[attr-defined]
+    return ServiceStatusModel(
+        available=True,
+        installed=status.installed,
+        state=status.state.value,
+    )
+
+
+@router.post("/service/{action}")
+def service_action(action: str, request: Request) -> dict[str, str]:
+    """Install/uninstall/start/stop the Windows service (S07-T9).
+
+    Install and uninstall are operator-confirm actions in the SPA; the API is
+    admin-auth'd like every other mutating endpoint on this router.
+    """
+    controller = _service_controller(request)
+    if controller is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Windows service management is only available on Windows",
+        )
+    try:
+        if action == "install":
+            controller.install()  # type: ignore[attr-defined]
+        elif action == "uninstall":
+            controller.uninstall()  # type: ignore[attr-defined]
+        elif action == "start":
+            controller.start()  # type: ignore[attr-defined]
+        elif action == "stop":
+            controller.stop()  # type: ignore[attr-defined]
+        else:
+            raise HTTPException(status_code=404, detail=f"unknown service action {action!r}")
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — boundary: SCM errors → 500 with detail
+        raise HTTPException(status_code=500, detail=f"service operation failed: {exc}") from exc
+    return {"status": action}
+
+
+# ---------------------------------------------------------------------------
 # Queue / Studies endpoints  (§7.2)
 # ---------------------------------------------------------------------------
 

@@ -26,6 +26,7 @@ import type {
   ReportContent,
   ReportRow,
   SaveConfigResult,
+  ServiceStatus,
   StudyDetail,
   StudyPage,
   StudyRouteDetail,
@@ -47,6 +48,7 @@ export type {
   ReportContent,
   ReportRow,
   SaveConfigResult,
+  ServiceStatus,
   StudyDetail,
   StudyPage,
   StudyRouteDetail,
@@ -234,6 +236,19 @@ export function fetchStudyDetail(studyId: number): Promise<StudyDetail> {
 
 export function fetchStudyTimeline(studyId: number): Promise<TimelineEvent[]> {
   return getJson<TimelineEvent[]>(`/api/studies/${studyId}/timeline`);
+}
+
+// ── Windows service management (S07-T9) ──────────────────────────────
+
+export function fetchServiceStatus(): Promise<ServiceStatus> {
+  return getJson<ServiceStatus>("/api/service");
+}
+
+export type ServiceAction = "start" | "stop" | "install" | "uninstall";
+
+export async function postServiceAction(action: ServiceAction): Promise<boolean> {
+  const res = await apiFetch(`/api/service/${action}`, { method: "POST" });
+  return res.ok;
 }
 
 // ── Navigation helper ────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { fetchConfig, saveConfig } from "../api";
+import ServiceCard from "../ui/ServiceCard";
 
 export default function ConfigView() {
   const [, setConfig] = useState<Record<string, unknown> | null>(null);
@@ -70,6 +71,7 @@ export default function ConfigView() {
           aria-label="Configuration JSON"
         />
       </div>
+      <ServiceCard />
     </div>
   );
 }

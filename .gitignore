@@ -74,3 +74,9 @@ C:\\mercure-gateway\\
 
 # Frozen backend sidecar (PyInstaller onedir, built by scripts/package_backend.py)
 src-tauri/binaries/
+
+# Local tooling artifacts — session screenshots, browser-automation logs,
+# per-user Claude settings. Never project source.
+.claude/settings.json
+.playwright-mcp/
+/live-*.png

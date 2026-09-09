@@ -8,7 +8,7 @@ import AuditView from "./pages/AuditView";
 import SetupWizardPage from "./pages/SetupWizard";
 import PipelineView from "./pages/PipelineView";
 import LoginView from "./pages/LoginView";
-import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus } from "./api";
+import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus, type SystemStatus } from "./api";
 import {
   IconBrand,
   IconPulse,
@@ -25,7 +25,7 @@ import {
 type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
 
 export function Dashboard() {
-  const [status, setStatus] = useState<{ receiver: string; forwarder: string; report_retriever: string; uptime_sec: number; version: string; hub_registered: boolean | null; hub_streaming: boolean | null } | null>(null);
+  const [status, setStatus] = useState<SystemStatus | null>(null);
   const [stats, setStats] = useState<{ queued: number; sending: number; sent: number; error: number; failed: number } | null>(null);
   const [disk, setDisk] = useState<DiskStatus | null>(null);
 

@@ -84,19 +84,31 @@ fn state_label(state: u8) -> &'static str {
     }
 }
 
-/// Apply the tray visuals for a state. Distinct state glyphs are still a
-/// polish item (one bundled icon), but the tooltip now reflects the polled
-/// state — previously the computed `TRAY_*` value was stored and never read
-/// anywhere, so the operator could not see status without opening the window
-/// (review M10).
+/// Apply the tray visuals for a state: a distinct icon glyph per state
+/// (green ring = idle, amber ring + dot = sending, red ring + exclamation =
+/// error) plus a tooltip naming the state. Previously the same icon was
+/// applied for every state, so the operator had no at-a-glance status without
+/// opening the window (review M10).
 fn apply_tray_state(
     tray: &tauri::tray::TrayIcon,
-    icon: &tauri::image::Image<'static>,
+    icons: &TrayIcons,
     state: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let icon = match state {
+        TRAY_SENDING => &icons.sending,
+        TRAY_ERROR => &icons.error,
+        _ => &icons.idle,
+    };
     tray.set_icon(Some(icon.clone()))?;
     tray.set_tooltip(Some(state_label(state)))?;
     Ok(())
+}
+
+/// The three bundled state glyphs, decoded once at startup.
+struct TrayIcons {
+    idle: tauri::image::Image<'static>,
+    sending: tauri::image::Image<'static>,
+    error: tauri::image::Image<'static>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -110,8 +122,13 @@ pub fn run() {
             // ── Tray icon ──────────────────────────────────────────
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit])?;
-            let icon = load_icon(include_bytes!("../icons/128x128.png"))?;
-            let icon_handle = Arc::new(icon);
+            let icons = TrayIcons {
+                idle: load_icon(include_bytes!("../icons/tray-idle.png"))?,
+                sending: load_icon(include_bytes!("../icons/tray-sending.png"))?,
+                error: load_icon(include_bytes!("../icons/tray-error.png"))?,
+            };
+            let icons = Arc::new(icons);
+            let icon_handle = Arc::new(icons.idle.clone());
 
             let tray = TrayIconBuilder::new()
                 .icon(icon_handle.as_ref().clone())
@@ -164,7 +181,7 @@ pub fn run() {
 
             // ── Background poller ──────────────────────────────────
             let tray_handle = tray.clone();
-            let poll_icon = icon_handle.clone();
+            let poll_icons = icons.clone();
             std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(Duration::from_secs(5));
@@ -176,7 +193,7 @@ pub fn run() {
                         Ok(None) | Err(_) => TRAY_ERROR,
                     };
                     state_clone.store(new_state, Ordering::Relaxed);
-                    let _ = apply_tray_state(&tray_handle, &poll_icon, new_state);
+                    let _ = apply_tray_state(&tray_handle, &poll_icons, new_state);
                 }
             });
 

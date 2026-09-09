@@ -73,6 +73,7 @@ export default function SetupWizardPage() {
 
   const handleSave = async () => {
     setSaving(true);
+    setErrors([]);
     try {
       const current = (await fetchConfig()) as Record<string, unknown>;
       current.general = { ...(current.general as object || {}), ...data.receiver };
@@ -88,6 +89,10 @@ export default function SetupWizardPage() {
       current.reports = { ...(current.reports as object || {}), ...data.reports };
       await saveConfig(current);
       setDone(true);
+    } catch (err) {
+      // Surface the failure in the step's error banner instead of failing
+      // silently — the operator cannot fix what they cannot see (review M8).
+      setErrors([err instanceof Error ? err.message : String(err)]);
     } finally {
       setSaving(false);
     }

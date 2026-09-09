@@ -81,3 +81,24 @@ refusal, wrong-key refusal, unkeyed-DB unchanged, no silent re-key).
 - Operators on non-FDE machines (or with audit over an unencrypted share) are
   documented to enable a key via the encrypted-config master password (S04-T5)
   and OS policy (BitLocker on the data volume).
+
+## Amendment (2026-09-09): v1.1 SQLCipher upgrade path formally declined
+
+The "v1.1 may add SQLCipher" upgrade path above was formally evaluated as part
+of the workbuddy review closure and **declined**:
+
+- The deployment model is unchanged (single-user, single-workstation — PRD
+  §6.2), so OS full-disk encryption (BitLocker/LUKS/FileVault) still covers the
+  at-rest attack surface of concern.
+- The key-required guard is implemented and tested
+  (`Database.encrypt_key` HMAC verifier, `tests/test_db_encryption.py`), which
+  closes the plaintext-open gap that motivated the guard.
+- A native C-extension dependency (`pysqlcipher3`/`sqlcipher3`) adds
+  Windows-build fragility and installer-size (K6 ≤ 250 MB) risk
+  disproportionate to the residual exposure under FDE.
+
+The SQLCipher swap points documented in the `spool/db.py` and
+`audit/__init__.py` module docstrings are **retained** as the recorded upgrade
+path should this posture change (e.g. multi-user deployments or an
+air-gapped-without-FDE site class). They describe pending-free mechanics, not
+scheduled work.

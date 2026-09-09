@@ -34,7 +34,13 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
-__all__ = ["UpdateManifest", "UpdateResult", "Updater"]
+__all__ = [
+    "UpdateManifest",
+    "UpdateResult",
+    "Updater",
+    "b64decode_strict",
+    "load_ed25519_public_key",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +94,13 @@ def _load_public_key(value: str | bytes | Ed25519PublicKey | None) -> Ed25519Pub
             f"Ed25519 public key must be {_ED25519_KEY_LEN} bytes, got {len(raw)}"
         )
     return Ed25519PublicKey.from_public_bytes(raw)
+
+
+# Public aliases: the signed-anchor verifier (audit.anchoring, review M4)
+# reuses the exact same Ed25519 key-parsing / base64 rules as update
+# verification, so both surfaces share one implementation.
+b64decode_strict = _b64decode
+load_ed25519_public_key = _load_public_key
 
 
 @dataclass(frozen=True)

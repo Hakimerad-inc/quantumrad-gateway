@@ -72,7 +72,14 @@ def redact_phi(detail: dict[str, Any], phi_scope: str = "minimal") -> dict[str, 
         copy.pop(field, None)
     return copy
 
-__all__ = ["AuditLog", "AuditEvent", "ChainError", "anchor_head_to_file"]
+__all__ = [
+    "AuditLog",
+    "AuditEvent",
+    "ChainError",
+    "anchor_head_to_file",
+    "SignedHeadAnchorer",
+    "verify_anchor_signatures",
+]
 
 
 # Detail keys holding a Study Instance UID. When present, the UID is copied
@@ -461,3 +468,12 @@ class AuditLog:
 
 # Serializes appends when AuditLog was built around a raw connection.
 _LEGACY_LOCK = threading.Lock()
+
+
+# Re-exports: the signed anchorer composes anchor_head_to_file, so importing
+# it from the package root must happen after this module defines it. Kept at
+# the bottom to avoid a circular import (anchoring imports from here).
+from mercure_gateway.audit.anchoring import (  # noqa: E402
+    SignedHeadAnchorer,
+    verify_anchor_signatures,
+)

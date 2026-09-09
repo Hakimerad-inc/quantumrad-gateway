@@ -194,6 +194,44 @@ def _audit_anchor_path(config: GatewayConfig) -> Path:
     return Path.home() / ".local" / "share" / "mercure-gateway" / "audit-heads.txt"
 
 
+def _signed_anchor_path(config: GatewayConfig) -> Path:
+    """Path of the hub-signed anchor JSONL (review M4 signed-anchor followup).
+
+    Sibling of :func:`_audit_anchor_path` — same outside-the-spool rationale.
+    """
+    return Path.home() / ".local" / "share" / "mercure-gateway" / "audit-heads-signed.jsonl"
+
+
+def _wire_head_anchorer(config: GatewayConfig, audit: Any) -> Any:
+    """Choose and attach the head anchorer for *audit* (review M4).
+
+    Returns the anchorer object when it owns a lifecycle (SignedHeadAnchorer
+    with a worker thread) so the caller can ``stop()`` it at shutdown, or
+    ``None`` when a plain file anchorer (no lifecycle) was wired.
+    """
+    hub = config.audit.hub_reporting
+    if hub.enabled and hub.bookkeeper_url and hub.anchor_public_key:
+        # Hub-signed anchoring: file anchor + authenticated head via the
+        # bookkeeper. The gateway holds no signing key (review M4).
+        from mercure_gateway.audit.anchoring import SignedHeadAnchorer
+
+        anchorer = SignedHeadAnchorer(
+            hub.bookkeeper_url,
+            hub.api_key,
+            _audit_anchor_path(config),
+            _signed_anchor_path(config),
+            verify_key=hub.anchor_public_key,
+            gateway_name=config.general.appliance_name,
+        )
+        anchorer.start()
+        audit.set_head_anchorer(anchorer.anchor)
+        return anchorer
+    from mercure_gateway.audit import anchor_head_to_file
+
+    audit.set_head_anchorer(anchor_head_to_file(_audit_anchor_path(config)))
+    return None
+
+
 def _check_for_updates(config: GatewayConfig) -> None:
     """Run the signed-update check at startup (ADR-0006, review H2 followup).
 
@@ -375,15 +413,17 @@ def main(argv: list[str] | None = None) -> int:
     from mercure_gateway.config.encryption import load_master_password
 
     database = open_database(spool_dir / "mercure-gateway.db", encrypt_key=load_master_password())
-    from mercure_gateway.audit import AuditLog, anchor_head_to_file
+    from mercure_gateway.audit import AuditLog
 
     audit = AuditLog(database)
     # Local head anchor (review M4): every chain head is appended to an
     # external file so rewriting the DB alone cannot forge an intact chain.
     # The file lives OUTSIDE the spool directory (platform data dir) so a
     # spool-directory-level attacker (USB dongle yanked and inspected
-    # elsewhere) does not get both the database and its anchor.
-    audit.set_head_anchorer(anchor_head_to_file(_audit_anchor_path(config)))
+    # elsewhere) does not get both the database and its anchor. When the hub
+    # bookkeeper holds a signing key (hub_reporting.anchor_public_key set),
+    # the anchorer additionally obtains an Ed25519 signature per head.
+    head_anchorer = _wire_head_anchorer(config, audit)
 
     # Hub reporting (S08): streams every audit event to the bookkeeper and
     # registers the gateway in the background — boot never blocks on the hub.
@@ -508,6 +548,9 @@ def main(argv: list[str] | None = None) -> int:
             # Final flush so shutdown events reach the bookkeeper, then stop.
             hub_streamer.flush(timeout=5.0)
             hub_streamer.stop()
+        if head_anchorer is not None:
+            head_anchorer.flush(timeout=5.0)
+            head_anchorer.stop()
         spool.stop()
         # Graceful shutdown marker: its presence lets the next boot skip the
         # recovery scan (a crash/power-loss leaves no marker → scan runs).

@@ -566,6 +566,8 @@ def _restore_redacted_secrets(payload: dict[str, Any], current: GatewayConfig) -
     prev_hub = current_data.get("audit", {}).get("hub_reporting", {})
     if hub.get("api_key") == _REDACTED_SENTINEL and prev_hub.get("api_key"):
         hub["api_key"] = prev_hub["api_key"]
+    if hub.get("anchor_public_key") == _REDACTED_SENTINEL and prev_hub.get("anchor_public_key"):
+        hub["anchor_public_key"] = prev_hub["anchor_public_key"]
 
     web_ui = data.get("web_ui", {})
     prev_ui = current_data.get("web_ui", {})

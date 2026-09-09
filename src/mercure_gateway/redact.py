@@ -51,4 +51,9 @@ def redact_config(data: dict[str, Any]) -> dict[str, Any]:
     update = redacted.get("update", {})
     if update.get("public_key"):
         update["public_key"] = "***"
+    if hub.get("anchor_public_key"):
+        # Same treatment as update.public_key: not secret-class in principle,
+        # but the sentinel preserves the GET → PUT config round-trip (review
+        # M8/M4 — a lost field would silently disable signed anchoring).
+        hub["anchor_public_key"] = "***"
     return redacted

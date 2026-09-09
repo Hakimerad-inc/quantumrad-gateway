@@ -268,6 +268,10 @@ class HubReporting(BaseModel):
     enabled: bool = False
     bookkeeper_url: str = ""
     api_key: str = ""
+    # Hub's Ed25519 public key (PEM or raw base64) for signed head anchors
+    # (review M4). Presence of the key enables signed anchoring — no separate
+    # boolean; empty means file-only anchoring.
+    anchor_public_key: str = ""
 
 
 class AuditConfig(BaseModel):

@@ -184,3 +184,50 @@ def test_event_vocabulary_is_consistent() -> None:
         REPORT_RETRIEVAL_FAILED,
         REPORT_SLA_EXPIRED,
     }
+
+
+def test_head_anchorer_receives_every_new_head(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """set_head_anchorer: the callback fires after every append with the head."""
+    heads: list[str] = []
+    audit = AuditLog(mem_database())
+    audit.set_head_anchorer(heads.append)
+
+    audit.append("STUDY_RECEIVED")
+    audit.append("STUDY_QUEUED")
+
+    assert heads[-1] == audit.head_hash()
+    assert len(heads) == 2
+
+
+def test_anchor_head_to_file_appends_all_heads(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """anchor_head_to_file appends one head per line; nothing is rewritten."""
+    from mercure_gateway.audit import anchor_head_to_file
+
+    path = tmp_path / "heads.txt"
+    anchor = anchor_head_to_file(path)
+
+    audit = AuditLog(mem_database())
+    audit.set_head_anchorer(anchor)
+    audit.append("STUDY_RECEIVED")
+    audit.append("STUDY_QUEUED")
+    audit.append("STUDY_SENT")
+
+    lines = path.read_text().strip().splitlines()
+    assert len(lines) == 3
+    assert lines[-1] == audit.head_hash()
+    # Historical heads survive (append-only).
+    assert len(set(lines)) == 3
+
+
+def test_failing_head_anchorer_never_breaks_append() -> None:
+    """A raising anchorer is isolated: the event is still persisted (US-10)."""
+    def boom(_head: str) -> None:
+        raise OSError("disk full")
+
+    audit = AuditLog(mem_database())
+    audit.set_head_anchorer(boom)
+
+    rowid = audit.append("STUDY_RECEIVED")  # must not raise
+
+    assert audit.list_events()[0].event == "STUDY_RECEIVED"
+    assert rowid >= 1

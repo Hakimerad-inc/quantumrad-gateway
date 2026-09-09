@@ -182,6 +182,18 @@ def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) ->
     return forwarder
 
 
+def _audit_anchor_path(config: GatewayConfig) -> Path:
+    """Path of the append-only audit head-anchor file (review M4).
+
+    Deliberately OUTSIDE the spool directory: the anchor's value is that an
+    attacker who obtains/rewrites the spool (including the whole-disk case of
+    a yanked USB dongle) does not also hold the anchored heads. Lives in the
+    user's platform data dir next to nothing else the gateway writes, so a
+    spool-level compromise does not reach it.
+    """
+    return Path.home() / ".local" / "share" / "mercure-gateway" / "audit-heads.txt"
+
+
 def _check_for_updates(config: GatewayConfig) -> None:
     """Run the signed-update check at startup (ADR-0006, review H2 followup).
 
@@ -354,9 +366,15 @@ def main(argv: list[str] | None = None) -> int:
     from mercure_gateway.config.encryption import load_master_password
 
     database = open_database(spool_dir / "mercure-gateway.db", encrypt_key=load_master_password())
-    from mercure_gateway.audit import AuditLog
+    from mercure_gateway.audit import AuditLog, anchor_head_to_file
 
     audit = AuditLog(database)
+    # Local head anchor (review M4): every chain head is appended to an
+    # external file so rewriting the DB alone cannot forge an intact chain.
+    # The file lives OUTSIDE the spool directory (platform data dir) so a
+    # spool-directory-level attacker (USB dongle yanked and inspected
+    # elsewhere) does not get both the database and its anchor.
+    audit.set_head_anchorer(anchor_head_to_file(_audit_anchor_path(config)))
 
     # Hub reporting (S08): streams every audit event to the bookkeeper and
     # registers the gateway in the background — boot never blocks on the hub.

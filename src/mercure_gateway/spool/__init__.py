@@ -122,7 +122,6 @@ class Spool:
         self._db = database
         self._config = config
         self._audit = audit
-        self._seen_series: set[tuple[str, str]] = set()
         if config is not None:
             self._spool_dir = Path(config.storage.spool_dir)
         else:
@@ -322,6 +321,13 @@ class Spool:
         path = out_dir / f"{instance_uid}.dcm"
         new_instance = not path.exists()
 
+        # New-series detection must run BEFORE _apply_transfer_syntax writes
+        # this instance's instance_meta row — otherwise the series we are
+        # about to create already "exists" and num_series never advances
+        # (review M11). It consults only prior, committed rows, so a duplicate
+        # instance of a known series still resolves to False correctly.
+        new_series = self._is_new_series(study_uid, series_uid)
+
         self._apply_transfer_syntax(
             dataset,
             path,
@@ -344,7 +350,7 @@ class Spool:
             patient_name=_tag(dataset, "PatientName"),
             modality=_tag(dataset, "Modality"),
             new_instance=new_instance,
-            new_series=self._is_new_series(study_uid, series_uid),
+            new_series=new_series,
         )
         if new_instance:
             # A genuinely NEW instance re-opens the study (the upsert demoted
@@ -470,12 +476,15 @@ class Spool:
             logger.exception("auto-enqueue failed for study %d", study_id)
 
     def _is_new_series(self, study_uid: str, series_uid: str) -> bool:
-        """True the first time this series is persisted for *study_uid*."""
-        key = (study_uid, series_uid)
-        if key in self._seen_series:
-            return False
-        self._seen_series.add(key)
-        return True
+        """True the first time this series is persisted for *study_uid*.
+
+        Derived from ``instance_meta`` (review M11): the previous in-memory
+        set was lost on every restart, so a re-sent instance of an existing
+        series counted as a new series and inflated ``num_series``. The DB
+        query is a one-row indexed lookup on the receive hot path and is the
+        same data the storage reconciler already trusts.
+        """
+        return not self._db.has_series(study_uid, series_uid)
 
     # Syntaxes decompressed on receive when ``receiver.decompress_common``
     # is set (refinement §2.1: "common" = JPEG 2000 lossless, JPEG-LS, RLE,

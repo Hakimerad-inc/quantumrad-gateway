@@ -131,3 +131,51 @@ def test_prune_within_window_removes_nothing() -> None:
     assert events.count("STUDY_RECEIVED") == 1
     assert events.count("STUDY_QUEUED") == 1
     assert events[0] == PRUNE_AUDIT  # prune is always recorded
+
+
+def test_prune_event_records_range_and_heads() -> None:
+    """PRUNE_AUDIT carries the deleted id/ts range and the chain head before
+    and after, so a history rewrite is visible and checkable against an
+    externally anchored head (review M4)."""
+    audit = AuditLog(mem_database())
+    old = audit.append("STUDY_RECEIVED")
+    _backdate(audit, [old], 400)
+    head_before = audit.head_hash()
+
+    audit.prune(older_than_days=365)
+
+    detail = audit.list_events()[0].detail
+    assert detail["pruned_range"]["min_id"] == old
+    assert detail["pruned_range"]["max_id"] == old
+    assert detail["pruned_range"]["min_ts"] is not None
+    assert detail["head_before"] == head_before
+    # The PRUNE_AUDIT event is appended *after* the re-anchored chain, so the
+    # head it recorded is the parent of the prune event itself — verify the
+    # newest event's hash recomputes from head_after.
+    newest = audit.list_events()[0]
+    ok, _ = audit.verify()
+    assert ok is True
+    # head_after is the chain head at the moment the re-anchor finished; the
+    # PRUNE_AUDIT event then chained from it. Verify by recomputing.
+    from mercure_gateway.audit import _compute_hash
+    computed = _compute_hash(
+        detail["head_after"], newest.ts, newest.event,
+        __import__("json").dumps(newest.detail, separators=(",", ":"), sort_keys=True),
+        newest.user,
+    )
+    assert computed == newest.hash
+
+
+def test_prune_nothing_still_records_null_range() -> None:
+    """A no-op prune records a null range with matching heads (idempotent)."""
+    audit = AuditLog(mem_database())
+    audit.append("STUDY_RECEIVED")
+
+    audit.prune(older_than_days=365)
+
+    detail = audit.list_events()[0].detail
+    assert detail["pruned"] == 0
+    assert detail["pruned_range"] == {
+        "min_id": None, "max_id": None, "min_ts": None, "max_ts": None,
+    }
+    assert detail["head_before"] == detail["head_after"]

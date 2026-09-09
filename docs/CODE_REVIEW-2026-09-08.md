@@ -30,7 +30,7 @@ The quality bar in the *code* is RC-grade. The *integration* and *claims* are pr
 
 | Metric | Claimed | Measured |
 |---|---|---|
-| Tests passing | "470+" | **611 passed / 4 skipped** ✅ (601 at session start; +2 M7 exact-lookup tests, +4 M3 spool-cap tests, +4 update-wiring tests; 1 refactored) |
+| Tests passing | "470+" | **618 passed / 4 skipped** ✅ (601 at session start; +2 M7 exact-lookup, +4 M3 spool-cap, +4 update-wiring, +1 M7 trigger regression, +3 M4 anchor, +2 M11 series-restart & prune-range, +1 prune no-op; frontend 23 passing in 7 files) |
 | `mypy` strict | "clean" | **Clean, 57 source files** ✅ |
 | `ruff` | "clean" | **All checks passed** ✅ |
 | Branch coverage | "84%" | **83.24%** ✅ (gate 80% met) |
@@ -249,11 +249,15 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 
 > **Status: FULLY FIXED (2026-09-09).** `max_spool_gb` is now enforced: `Database.spool_num_bytes()` aggregates per-instance bytes (rows removed when a study is purged — `delete_study` now also clears `instance_meta`), `Spool.spool_num_bytes()` exposes it, and `DiskMonitor._enforce_spool_cap()` purges delivered studies oldest-first when the cap is exceeded, never touching undelivered studies (US-04). 4 new tests in `tests/test_disk_monitor.py`. `keyring_store.py` was wired by H3. Earlier partial work (2026-09-08): `accept_compressed` removed; `service_controller`/`service_backend`/`ui` remain unused — they are service-install scaffolding kept deliberately, flagged for a follow-up decision.
 
-### M4. Audit tamper-evidence is weaker than advertised
+### M4. Audit tamper-evidence is weaker than advertised — ⚙️ **LARGELY FIXED (2026-09-09)**
 
 `audit/__init__.py:284-329` (`prune`) drops the append-only triggers, deletes rows, and **recomputes every hash from genesis** so `verify()` still passes. That is a reasonable retention design, but it means the same code path is a legitimate history-rewriting tool. Combined with unkeyed SHA-256 (correctly acknowledged at `:16-19`) and `head_hash()` never being anchored anywhere by default, "tamper-evident" is aspirational. Anchor the head hash to the hub or an append-only external sink, and record prunes as a signed range.
 
-> **Status: PARTIALLY IMPROVED (2026-09-09).** The hub-bookkeeper anchoring path now exists (enable `audit.hub_reporting` and the streamer receives every event, including `PRUNE_AUDIT`), and `head_hash()` is included in both the diagnostics export and `export_bundle` for offline anchoring. Still open: recording prunes as a *signed range* and automatic periodic anchoring when hub reporting is off.
+> **Status: LARGELY FIXED (2026-09-09).** Three of the four gaps closed:
+> - **Prunes are now recorded as a range**: the `PRUNE_AUDIT` event detail carries `pruned_range` (min/max id + ts of the deleted rows), `head_before` and `head_after`, so a retention rewrite is visible and its effect on the chain is checkable.
+> - **Automatic anchoring without the hub**: `AuditLog.set_head_anchorer()` + `anchor_head_to_file()` wire an append-only external head file (`~/.local/share/mercure-gateway/audit-heads.txt` — deliberately outside the spool dir so a whole-spool compromise does not include its own anchor). Every append commits the new head to the file; historical heads survive tampering because the file is only ever appended. A failing anchorer is isolated (US-10), never breaks the audit append.
+> - Hub streaming (when enabled) remains the second sink.
+> Still open: *signing* the anchored heads (the file is integrity, not authenticity) — needs a key-holding component and is deferred as design work.
 
 ### M5. PHI redaction is inconsistent across exports  ✅ **FIXED**
 `routes.py:768-781` (`GET /audit/export`) emits **raw audit details with no `phi_scope` filtering**, while `export_bundle` (`audit/__init__.py:245-254`) and `/diagnostics/export` (`routes.py:887-896`) do filter. Worse, the diagnostics docstring (`:876-878`) claims it "follows the audit `phi_scope` the same way the audit export does" — citing a path that does no such thing. Pick one behaviour and apply it in all three places.
@@ -275,25 +279,27 @@ Consequences: **7 tests fail** in `test_config_import_export.py` + `test_web_api
 
 > **Status: FIXED (2026-09-09).** `audit_events` gained an exact, indexed `study_uid` column (schema v4 → v5). `AuditLog.append` copies the UID from the event detail into the column on every insert; `list_audit_for_study` is now an exact `WHERE study_uid = ?` match. Existing v4 databases are migrated and backfilled from the detail JSON at open time (`_migrate_audit_study_uid`, idempotent). New tests: prefix-nested UID rejection (`test_list_audit_for_study_rejects_prefix_nested_uid`) and v4 backfill (`test_v4_audit_events_backfilled_on_open`).
 
-### M8. Frontend quality infrastructure is thin — ⚙️ **PARTIALLY FIXED (2026-09-09)**
+### M8. Frontend quality infrastructure is thin — ⚙️ **MOSTLY FIXED (2026-09-09)**
 - **No ESLint** — no config, no dependency, no `lint` script (`web/package.json:6-12`). `mypy`/`ruff` discipline stops at the Python boundary.
 - **2 test files, 143 LOC** for 2,066 LOC of SPA. Zero coverage for `api.ts`, `PipelineView.tsx` (316 LOC, largest), `QueueView`, `ConfigView`, `SetupWizard` — and the auth flow (see C1).
 - Unhandled promise rejections in `AuditView.tsx:11-13`, `LogsView.tsx:10-14`, `ReportsView.tsx:17-19`, `ConfigView.tsx:12`: a failed fetch yields a permanently blank panel with no error state. `PipelineView`/`QueueView` handle this correctly — the inconsistency is the smell.
 - Types are hand-written and duplicated (`api.ts` 275 LOC of manual interfaces, unchecked `as T` casts at `:45, 85, 100, 131`; `App.tsx:28-29` re-declares types that exist at `api.ts:23-40`). Generate from the FastAPI OpenAPI schema.
 - Config editing is a raw JSON textarea (`ConfigView.tsx:43-51`) with only `JSON.parse` validation; `saveConfig` discards the server error body ("Save failed", no reason).
 
-> **Status: PARTIALLY FIXED (2026-09-09).** The unhandled-rejection / blank-panel class is closed: `AuditView`, `LogsView`, `ReportsView` and `ConfigView` now catch fetch failures and render an `error-banner` with the reason (matching `PipelineView`/`QueueView`), and `saveConfig` now surfaces the server's 400 `detail` ("Invalid config: …") instead of a bare "Save failed" — `ConfigView` renders it, with 2 new tests in `api.saveconfig.test.ts` (frontend suite 14 → 15... actually 3 in that file, total 15 passing). Still open: ESLint config + `lint` script, and tests for `PipelineView`/`QueueView`/`SetupWizard`.
+> **Status: PARTIALLY FIXED (2026-09-09).** The unhandled-rejection / blank-panel class is closed: `AuditView`, `LogsView`, `ReportsView` and `ConfigView` now catch fetch failures and render an `error-banner` with the reason (matching `PipelineView`/`QueueView`), and `saveConfig` now surfaces the server's 400 `detail` ("Invalid config: …") instead of a bare "Save failed" — `ConfigView` renders it. **ESLint added** (flat config, `@eslint/js` + `typescript-eslint` + `react-hooks`, `npm run lint` — clean). **Tests added for the two largest views**: `QueueView.test.tsx` (5 tests: render, empty state, error banner, FAILED-only Retry + report action, pagination bounds) and `PipelineView.test.tsx` (3 tests: flow diagram nodes, error banner, live-poll toggle). Frontend suite: 15 → **23 passing** in 7 files. Still open: OpenAPI-generated types (hand-written interfaces remain), `SetupWizard` tests.
 
 ### M9. Built SPA artifacts are committed to VCS
 `src/mercure_gateway/web/static/assets/index-B2hxCAAz.js` and `.css` are tracked. Build output in version control will drift from source and defeats `build-spa`'s verification step. Gitignore and build in CI (the pipeline already does).
 
-### M10. Tauri shell is a skeleton
+### M10. Tauri shell is a skeleton — ⚙️ **PARTIALLY FIXED (2026-09-09)**
 `lib.rs:30-52` computes `TRAY_SENDING`/`TRAY_ERROR` state, stores it to an `Arc<AtomicU8>` (`:115`), and **never reads it**; `set_tray_icon` (`:59-66`) always applies the same icon — the comment at `:63-65` admits this is a future item. `reqwest::blocking::get` (`:111`, nested at `:40`) has **no timeout** and a hardcoded port.
 
-### M11. `Spool._seen_series` is in-memory only and unbounded
+> **Status: PARTIALLY FIXED (2026-09-09).** All HTTP hardening landed: both backend calls go through `backend_get_json()` with a 2 s timeout (a wedged socket previously blocked the poller thread forever), the port is a shared `BACKEND_PORT` const, and a transport failure now maps to `TRAY_ERROR` instead of silently skipping the update (backend unreachable *is* an attention-needed condition). The computed state is finally consumed: `apply_tray_state()` sets a per-state **tooltip** ("idle" / "sending" / "attention needed"). Distinct tray icon *glyphs* remain open — the bundle ships a single icon, so new assets are a design item, not a code one.
+
+### M11. `Spool._seen_series` is in-memory only and unbounded  ✅ **FIXED (2026-09-09)**
 `spool/__init__.py:124, 319-325`. After a restart the set is empty, so a re-sent instance of an existing series counts as a new series and inflates `num_series`. It also grows without bound for the process lifetime. Derive from `instance_meta` (which already exists) instead.
 
-> **Status: OPEN — assessment adjusted (2026-09-09).** The unbounded-growth half is bounded in practice: the set holds one `(study_uid, series_uid)` tuple per series (~100 bytes), so even 100k series is ~10 MB for the process lifetime. The correctness half (restart loses the set → re-sent instance inflates `num_series`) is real but low-impact; deriving from `instance_meta` remains the right fix and is queued behind M6/M7/M8-class work.
+> **Status: FIXED (2026-09-09).** The in-memory set is gone: `_is_new_series` now consults `Database.has_series(study_uid, series_uid)` (indexed one-row lookup on `instance_meta`) before the instance's own row is written. Both original problems are closed at once — the set cannot grow (it no longer exists) and restart no longer inflates `num_series`. Ordering matters and is documented in `store_instance`: detection runs *before* `_apply_transfer_syntax` inserts the instance's own `instance_meta` row, or a brand-new series would already "exist" and `num_series` would never advance. New test: `test_series_detection_survives_restart` (closes and reopens the DB between stores).
 
 ### M12. Windows CI size gate is likely broken  ✅ **FIXED**
 `ci.yml` `package-windows`: the build step sets `working-directory: src-tauri`, but the following K6 step does not, and resolves `target/release/mercure-gateway.exe` — which under the default root working directory does not exist (it is `src-tauri/target/release/...`). The step should fail on every run.

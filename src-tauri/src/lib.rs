@@ -14,6 +14,15 @@ const TRAY_IDLE: u8 = 0;
 const TRAY_SENDING: u8 = 1;
 const TRAY_ERROR: u8 = 2;
 
+/// The port the packaged Python sidecar binds (must match
+/// `config.web_ui.port` default and the SPA's `TAURI_API_BASE`).
+const BACKEND_PORT: u16 = 8080;
+
+/// Backend polls must never hang the tray thread: 2 s to connect + read.
+/// `reqwest::blocking` without a timeout can block the poll loop forever on
+/// a wedged socket (review M10).
+const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Decode an embedded PNG into a Tauri Image.
 fn load_icon(bytes: &'static [u8]) -> Result<tauri::image::Image<'static>, Box<dyn std::error::Error>> {
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -22,6 +31,21 @@ fn load_icon(bytes: &'static [u8]) -> Result<tauri::image::Image<'static>, Box<d
     let info = reader.next_frame(&mut buf)?;
     let (width, height) = (info.width, info.height);
     Ok(tauri::image::Image::new_owned(buf, width, height))
+}
+
+/// GET *path* on the backend with the shared timeout. `Ok(None)` = transport
+/// failure (offline / wedged backend) — callers treat it as an unknown value.
+fn backend_get_json(path: &str) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
+    let url = format!("http://127.0.0.1:{BACKEND_PORT}{path}");
+    let resp = reqwest::blocking::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()?
+        .get(&url)
+        .send()?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    Ok(resp.json::<serde_json::Value>().ok())
 }
 
 /// Poll the FastAPI status endpoint and map the result to a tray state.
@@ -36,32 +60,42 @@ fn derive_state(status: &serde_json::Value) -> u8 {
         return TRAY_ERROR;
     }
 
-    let queue = reqwest::blocking::get("http://127.0.0.1:8080/api/queue/stats");
-    if let Ok(r) = queue {
-        if let Ok(data) = r.json::<serde_json::Value>() {
-            let sending = data["sending"].as_u64().unwrap_or(0);
-            let queued = data["queued"].as_u64().unwrap_or(0);
-            let error = data["error"].as_u64().unwrap_or(0);
-            let failed = data["failed"].as_u64().unwrap_or(0);
-            if error > 0 || failed > 0 {
-                return TRAY_ERROR;
-            }
-            if sending > 0 || queued > 0 {
-                return TRAY_SENDING;
-            }
+    if let Ok(Some(data)) = backend_get_json("/api/queue/stats") {
+        let sending = data["sending"].as_u64().unwrap_or(0);
+        let queued = data["queued"].as_u64().unwrap_or(0);
+        let error = data["error"].as_u64().unwrap_or(0);
+        let failed = data["failed"].as_u64().unwrap_or(0);
+        if error > 0 || failed > 0 {
+            return TRAY_ERROR;
+        }
+        if sending > 0 || queued > 0 {
+            return TRAY_SENDING;
         }
     }
 
     TRAY_IDLE
 }
 
-/// Set the tray icon based on the numeric state (idle/sending/error share the
-/// bundled icon for now; distinct state glyphs are a S09 polish item).
-fn set_tray_icon(
+fn state_label(state: u8) -> &'static str {
+    match state {
+        TRAY_SENDING => "mercure-gateway — sending",
+        TRAY_ERROR => "mercure-gateway — attention needed",
+        _ => "mercure-gateway — idle",
+    }
+}
+
+/// Apply the tray visuals for a state. Distinct state glyphs are still a
+/// polish item (one bundled icon), but the tooltip now reflects the polled
+/// state — previously the computed `TRAY_*` value was stored and never read
+/// anywhere, so the operator could not see status without opening the window
+/// (review M10).
+fn apply_tray_state(
     tray: &tauri::tray::TrayIcon,
     icon: &tauri::image::Image<'static>,
+    state: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tray.set_icon(Some(icon.clone()))?;
+    tray.set_tooltip(Some(state_label(state)))?;
     Ok(())
 }
 
@@ -134,15 +168,15 @@ pub fn run() {
             std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(Duration::from_secs(5));
-                    if let Ok(resp) =
-                        reqwest::blocking::get("http://127.0.0.1:8080/api/system/status")
-                    {
-                        if let Ok(status) = resp.json::<serde_json::Value>() {
-                            let new_state = derive_state(&status);
-                            state_clone.store(new_state, Ordering::Relaxed);
-                            let _ = set_tray_icon(&tray_handle, &poll_icon);
-                        }
-                    }
+                    // Transport failure = backend unreachable: that is exactly
+                    // the "attention needed" condition, so map it to TRAY_ERROR
+                    // instead of silently skipping the update (review M10).
+                    let new_state = match backend_get_json("/api/system/status") {
+                        Ok(Some(status)) => derive_state(&status),
+                        Ok(None) | Err(_) => TRAY_ERROR,
+                    };
+                    state_clone.store(new_state, Ordering::Relaxed);
+                    let _ = apply_tray_state(&tray_handle, &poll_icon, new_state);
                 }
             });
 

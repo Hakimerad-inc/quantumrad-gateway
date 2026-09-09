@@ -19,7 +19,7 @@ from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, MRImageStorage
 
 from mercure_gateway.config import DICOMDestination, default_config
 from mercure_gateway.spool import Spool, StudyState
-from mercure_gateway.spool.db import mem_database
+from mercure_gateway.spool.db import mem_database, open_database
 
 
 def make_dataset(
@@ -72,6 +72,29 @@ class TestStudyIngestLifecycle:
         row = spool._db.get_study_by_uid(study_uid)
         assert row["num_series"] == 2
         assert row["num_instances"] == 2
+
+    def test_series_detection_survives_restart(self, tmp_path: Path) -> None:
+        """A re-sent instance of an existing series must not inflate num_series
+        after a restart (review M11): detection is derived from instance_meta,
+        not the process-lifetime in-memory set."""
+        study_uid = "1.2.3.4.16"
+        db_path = tmp_path / "spool.db"
+        cfg = default_config()
+        cfg.storage.spool_dir = str(tmp_path / "spool")
+
+        # First "process": store one instance, then close.
+        spool = Spool(open_database(db_path), cfg)
+        spool.store_instance(make_dataset(study_uid, f"{study_uid}.1", f"{study_uid}.1.1"))
+        spool._db.close()
+
+        # Second "process": fresh Spool (empty caches) re-sends an instance
+        # of the SAME series.
+        spool2 = Spool(open_database(db_path), cfg)
+        spool2.store_instance(make_dataset(study_uid, f"{study_uid}.1", f"{study_uid}.1.2"))
+        row = spool2._db.get_study_by_uid(study_uid)
+        assert row["num_series"] == 1, "known series re-counted after restart"
+        assert row["num_instances"] == 2
+        spool2._db.close()
 
     def test_instance_meta_provenance_recorded(self, spool: Spool) -> None:
         study_uid = "1.2.3.4.7"

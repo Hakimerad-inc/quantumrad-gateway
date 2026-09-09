@@ -46,6 +46,7 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ def redact_phi(detail: dict[str, Any], phi_scope: str = "minimal") -> dict[str, 
         copy.pop(field, None)
     return copy
 
-__all__ = ["AuditLog", "AuditEvent", "ChainError"]
+__all__ = ["AuditLog", "AuditEvent", "ChainError", "anchor_head_to_file"]
 
 
 # Detail keys holding a Study Instance UID. When present, the UID is copied
@@ -108,6 +109,27 @@ def _compute_hash(prev_hash: str, ts: str, event: str, detail_json: str, user: s
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def anchor_head_to_file(path: Path) -> Callable[[str], None]:
+    """Return a head-anchorer that appends each head hash to *path* (review M4).
+
+    The file is the external, append-only sink ``head_hash``'s docstring asks
+    for: the DB's chain can be verified against the anchored heads, and
+    rewriting the database alone cannot produce a chain that matches an
+    already-anchored head. Appending (never rewriting) means historical heads
+    survive even if an attacker edits the tail of the file. Best-effort by
+    design — the callback is invoked on the append path, so any error is the
+    caller's (``AuditLog._anchor_head``) to swallow and log.
+    """
+    path = Path(path)
+
+    def _anchor(head: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(head + "\n")
+
+    return _anchor
+
+
 class AuditLog:
     """Append-only chained-hash audit log backed by the SQLite database.
 
@@ -132,6 +154,7 @@ class AuditLog:
             self._conn = db.connection()
             self._transaction = db.transaction
         self._sink: Callable[[str, dict[str, Any], str | None], None] | None = None
+        self._head_anchorer: Callable[[str], None] | None = None
 
     def set_sink(self, sink: Callable[[str, dict[str, Any], str | None], None] | None) -> None:
         """Attach a callback invoked after every successful :meth:`append`.
@@ -143,6 +166,29 @@ class AuditLog:
         log (US-10 isolation invariant).
         """
         self._sink = sink
+
+    def set_head_anchorer(self, anchorer: Callable[[str], None] | None) -> None:
+        """Attach a callback that receives every new chain head hash.
+
+        The local hash chain detects tampering by an attacker who cannot also
+        rewrite the anchored copies; anchoring the head *outside* the database
+        closes the rewrite-history-and-recompute attack (review M4). The
+        anchorer runs after each append commits, alongside the event sink —
+        a failing anchorer is logged, never raised (US-10 isolation).
+
+        The composition root wires an append-only local file (last head wins);
+        hub reporting (when enabled) additionally streams every event.
+        """
+        self._head_anchorer = anchorer
+
+    def _anchor_head(self, event_id: int) -> None:
+        """Run the head anchorer for the event just appended, best-effort."""
+        if self._head_anchorer is None:
+            return
+        try:
+            self._head_anchorer(self._head_hash(self._conn))
+        except Exception:  # noqa: BLE001 — boundary: anchoring must not break audit
+            logger.exception("head anchorer failed after event %d", event_id)
 
     def append(
         self, event: str, detail: dict[str, Any] | None = None, user: str | None = None
@@ -186,6 +232,7 @@ class AuditLog:
             with _LEGACY_LOCK:
                 rowid = _do(self._conn)
         self._notify_sink(event, detail, user)
+        self._anchor_head(rowid)
         return rowid
 
     def _notify_sink(self, event: str, detail: dict[str, Any] | None, user: str | None) -> None:
@@ -336,12 +383,34 @@ class AuditLog:
         from the genesis hash (so :meth:`verify` still passes — deleting the
         oldest events would otherwise break the link they anchor), and the
         triggers are recreated.  The prune action itself is recorded as a
-        ``PRUNE_AUDIT`` event so operators can see retention ran (PRD §7).
+        ``PRUNE_AUDIT`` event whose detail carries the deleted id/ts range and
+        the chain head before and after, so the rewrite is visible and
+        verifiable against an externally anchored head (review M4).
         """
         from mercure_gateway.audit.events import PRUNE_AUDIT
         from mercure_gateway.spool.db import _AUDIT_NO_DELETE, _AUDIT_NO_UPDATE
 
-        def _do(conn: sqlite3.Connection) -> int:
+        def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+            head_before = self._head_hash(conn)
+            # Range of what is about to be deleted: oldest/newest id + ts.
+            range_row = conn.execute(
+                """
+                SELECT MIN(id) AS min_id, MAX(id) AS max_id, MIN(ts) AS min_ts, MAX(ts) AS max_ts
+                FROM audit_events
+                WHERE ts < datetime('now', ?)
+                """,
+                (f"-{older_than_days} days",),
+            ).fetchone()
+            pruned_range = (
+                {
+                    "min_id": int(range_row["min_id"]),
+                    "max_id": int(range_row["max_id"]),
+                    "min_ts": range_row["min_ts"],
+                    "max_ts": range_row["max_ts"],
+                }
+                if range_row is not None and range_row["min_id"] is not None
+                else {"min_id": None, "max_id": None, "min_ts": None, "max_ts": None}
+            )
             conn.execute("DROP TRIGGER IF EXISTS audit_events_no_update")
             conn.execute("DROP TRIGGER IF EXISTS audit_events_no_delete")
             cur = conn.execute(
@@ -364,16 +433,30 @@ class AuditLog:
                 expected = computed
             conn.execute(_AUDIT_NO_UPDATE)
             conn.execute(_AUDIT_NO_DELETE)
-            return pruned
+            head_after = self._head_hash(conn)
+            return {
+                "pruned": max(0, pruned),
+                "older_than_days": older_than_days,
+                "pruned_range": pruned_range,
+                "head_before": head_before,
+                "head_after": head_after,
+            }
 
         if self._transaction is not None:
             with self._transaction() as conn:
-                pruned = _do(conn)
+                detail = _do(conn)
         else:
             with _LEGACY_LOCK:
-                pruned = _do(self._conn)
-        self.append(PRUNE_AUDIT, {"pruned": pruned, "older_than_days": older_than_days})
-        return pruned
+                detail = _do(self._conn)
+        self.append(PRUNE_AUDIT, detail)
+        return int(detail["pruned"])
+
+    def _head_hash(self, conn: sqlite3.Connection) -> str:
+        """Chain head read on an explicit connection (prune's transaction)."""
+        prev = conn.execute(
+            "SELECT hash FROM audit_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return prev["hash"] if prev is not None else _GENESIS_HASH
 
 
 # Serializes appends when AuditLog was built around a raw connection.

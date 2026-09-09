@@ -952,6 +952,20 @@ class Database:
         with self._lock:
             return self._conn.execute(sql, params).fetchall()
 
+    def has_series(self, study_uid: str, series_uid: str) -> bool:
+        """True when *series_uid* already has a persisted instance row.
+
+        Single source of truth for new-series detection (review M11): the
+        previous in-memory set was lost on restart, so a re-sent instance of
+        an existing series inflated ``num_series``.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM instance_meta WHERE study_uid = ? AND series_uid = ? LIMIT 1",
+                (study_uid, series_uid),
+            ).fetchone()
+        return row is not None
+
     def spool_num_bytes(self) -> int:
         """Total bytes of persisted DICOM instances (spool-size cap, review M3).
 

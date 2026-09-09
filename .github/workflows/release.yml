@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Builds the desktop bundles for both OSes, signs them with the release
+# Ed25519 key (ADR-0006), assembles the Tauri updater manifest and attaches
+# everything to a GitHub release. Signing secrets:
+#   MERCURE_TAURI_PRIVATE_KEY / MERCURE_TAURI_PRIVATE_KEY_PASSWORD
+#   MERCURE_TAURI_PUBLIC_KEY (injected via tauri.release.conf.json overlay)
+# See docs/dev/packaging.md for the key-custody workflow (keys are generated
+# once on a maintainer machine — never in CI).
+
+jobs:
+  build:
+    name: ${{ matrix.os }} bundle
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x86_64
+          - os: ubuntu-latest
+            target: linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - name: Setup Rust (Tauri)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: Freeze backend (PyInstaller onedir sidecar)
+        run: uv run python scripts/package_backend.py
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+      - name: Write release config overlay (updater pubkey)
+        shell: bash
+        env:
+          MERCURE_TAURI_PUBLIC_KEY: ${{ secrets.MERCURE_TAURI_PUBLIC_KEY }}
+        run: |
+          cat > src-tauri/tauri.release.conf.json <<EOF
+          {
+            "plugins": { "updater": { "pubkey": "$MERCURE_TAURI_PUBLIC_KEY" } }
+          }
+          EOF
+      - name: Build + sign Tauri bundles
+        working-directory: src-tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.MERCURE_TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.MERCURE_TAURI_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --config tauri.release.conf.json
+      # Tauri emits .sig sidecars next to each artifact when the signing env
+      # is present. Assemble latest.json in the Tauri updater format
+      # (NOT the Python Updater's flat {version,url,signature,checksum_sha256}
+      # manifest — that stays an independent operator-configured advisory
+      # check for headless deployments).
+      - name: Assemble updater manifest
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, glob, os
+          version = os.environ.get("GITHUB_REF_NAME", "0.0.0").lstrip("v")
+          base = "https://github.com/mercure-imaging/mercure-gateway/releases/latest/download"
+          platforms = {}
+          for sig_path in glob.glob("src-tauri/target/release/bundle/**/*.sig", recursive=True):
+              artifact = sig_path[:-4]
+              name = os.path.basename(artifact)
+              key = "windows-x86_64" if name.endswith((".exe", ".msi")) else "linux-x86_64"
+              platforms[key] = {"signature": open(sig_path).read(), "url": f"{base}/{name}"}
+          manifest = {
+              "version": version,
+              "notes": f"mercure-gateway {version}",
+              "pub_date": os.environ.get("RELEASE_PUB_DATE", ""),
+              "platforms": platforms,
+          }
+          with open("latest.json", "w") as fh:
+              json.dump(manifest, fh, indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
+      - name: Upload artifacts to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            --clobber \
+            src-tauri/target/release/bundle/**/*.sig \
+            latest.json || echo "release $GITHUB_REF_NAME not found yet — create it first"

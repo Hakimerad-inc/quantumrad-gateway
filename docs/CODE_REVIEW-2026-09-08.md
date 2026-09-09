@@ -30,7 +30,7 @@ The quality bar in the *code* is RC-grade. The *integration* and *claims* are pr
 
 | Metric | Claimed | Measured |
 |---|---|---|
-| Tests passing | "470+" | **618 passed / 4 skipped** ✅ (601 at session start; +2 M7 exact-lookup, +4 M3 spool-cap, +4 update-wiring, +1 M7 trigger regression, +3 M4 anchor, +2 M11 series-restart & prune-range, +1 prune no-op; frontend 32 passing in 8 files after SetupWizard tests) |
+| Tests passing | "470+" | **618 passed / 4 skipped** ✅ (601 at session start; +2 M7 exact-lookup, +4 M3 spool-cap, +4 update-wiring, +1 M7 trigger regression, +3 M4 anchor, +2 M11 series-restart & prune-range, +1 prune no-op; frontend 42 passing in 10 files after SetupWizard/ServiceCard/UpdaterBanner tests; **RC-prep batch (SQLCipher decision, version sync, service mode, signed anchors, packaging): 646 passed / 4 skipped, coverage 85%**) |
 | `mypy` strict | "clean" | **Clean, 57 source files** ✅ |
 | `ruff` | "clean" | **All checks passed** ✅ |
 | Branch coverage | "84%" | **83.24%** ✅ (gate 80% met) |

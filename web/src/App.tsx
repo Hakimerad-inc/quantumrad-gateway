@@ -9,6 +9,7 @@ import SetupWizardPage from "./pages/SetupWizard";
 import PipelineView from "./pages/PipelineView";
 import LoginView from "./pages/LoginView";
 import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus, type SystemStatus } from "./api";
+import UpdaterBanner from "./ui/UpdaterBanner";
 import {
   IconBrand,
   IconPulse,
@@ -221,6 +222,7 @@ function AppContent() {
             Configuration changed — restart the gateway for the changes to take effect.
           </div>
         )}
+        <UpdaterBanner />
         {page === "dashboard" && <Dashboard />}
         {page === "pipeline" && <PipelineView />}
         {page === "queue" && <QueueView />}

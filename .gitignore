@@ -71,3 +71,6 @@ htmlcov/
 # _default_spool_dir bug) — runtime junk, never commit
 C:\\mercure-gateway\\
 .spool/
+
+# Frozen backend sidecar (PyInstaller onedir, built by scripts/package_backend.py)
+src-tauri/binaries/

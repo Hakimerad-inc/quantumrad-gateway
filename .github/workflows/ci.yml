@@ -120,17 +120,36 @@ jobs:
         working-directory: web
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
+      - name: Freeze backend (PyInstaller onedir sidecar)
+        run: uv run python scripts/package_backend.py
       - name: Build Tauri app (Windows)
         run: cargo tauri build --no-bundle
         working-directory: src-tauri
-      - name: K6 installer size gate
+      - name: K6 installer size gate (shell exe + backend bundle)
         shell: pwsh
         working-directory: src-tauri
         run: |
-          $size = (Get-Item "target/release/mercure-gateway.exe").Length / 1MB
-          Write-Host "Binary size: $([math]::Round($size,1)) MB"
-          if ($size -gt 250) { Write-Host "::error::K6 size gate exceeded: $([math]::Round($size,1)) MB > 250 MB"; exit 1 }
+          $shell = (Get-Item "target/release/mercure-gateway.exe").Length / 1MB
+          $backend = (Get-ChildItem -Recurse "binaries/mercure-gateway" -File | Measure-Object -Property Length -Sum).Sum / 1MB
+          $total = $shell + $backend
+          Write-Host "Shell: $([math]::Round($shell,1)) MB; backend bundle: $([math]::Round($backend,1)) MB; total: $([math]::Round($total,1)) MB"
+          if ($total -gt 250) { Write-Host "::error::K6 size gate exceeded: $([math]::Round($total,1)) MB > 250 MB"; exit 1 }
           Write-Host "K6 PASS"
+      - name: Smoke test frozen backend
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "src-tauri/binaries/mercure-gateway/mercure-gateway.exe" -ArgumentList "--web","--port","8099" -PassThru -NoNewWindow
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 1
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8099/api/system/health" -UseBasicParsing -TimeoutSec 2
+              if ($r.Content -match '"ok"') { $ok = $true; break }
+            } catch { }
+          }
+          if (-not $ok) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Write-Host "::error::frozen backend health check failed"; exit 1 }
+          Stop-Process -Id $proc.Id -Force
+          Write-Host "Frozen backend smoke PASS"
 
   package-linux:
     name: Linux packaging (AppImage + deb)

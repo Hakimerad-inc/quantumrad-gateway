@@ -41,6 +41,10 @@ dev = [
 service = [
     "pywin32>=306; sys_platform == 'win32'",
 ]
+# Backend freeze for the Tauri desktop bundle (scripts/package_backend.py).
+package = [
+    "pyinstaller>=6.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.30,<0.12.0"]

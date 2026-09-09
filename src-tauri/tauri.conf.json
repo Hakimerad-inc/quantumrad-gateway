@@ -36,7 +36,16 @@
       "icons/tray-sending.png",
       "icons/tray-error.png"
     ],
+    "resources": ["binaries/mercure-gateway/"],
     "category": "Utility",
     "shortDescription": "Lightweight desktop DICOM gateway"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/mercure-imaging/mercure-gateway/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_VIA_RELEASE_CONFIG"
+    }
   }
 }

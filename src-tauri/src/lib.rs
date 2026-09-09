@@ -33,6 +33,46 @@ fn load_icon(bytes: &'static [u8]) -> Result<tauri::image::Image<'static>, Box<d
     Ok(tauri::image::Image::new_owned(buf, width, height))
 }
 
+/// Candidate locations of the frozen Python backend (PyInstaller onedir,
+/// bundled via `bundle.resources`, see docs/dev/packaging.md). Tauri's
+/// `externalBin` only supports single files, so the onedir directory rides in
+/// resources and we spawn it by explicit path. First existing candidate wins;
+/// an empty result (or failed spawn) is non-fatal — the app launches without
+/// a backend, exactly like the previous `sidecar()` failure path.
+fn backend_candidates() -> Vec<std::path::PathBuf> {
+    let exe_name = if cfg!(windows) {
+        "mercure-gateway.exe"
+    } else {
+        "mercure-gateway"
+    };
+    let rel = std::path::Path::new("binaries").join("mercure-gateway").join(exe_name);
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // (a) resource dir == exe dir (Windows NSIS, deb/usr/bin)
+            candidates.push(dir.join(&rel));
+            // (b) deb layout: /usr/lib/<app>/binaries/... next to /usr/bin exe
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("lib").join(&rel));
+                // (c) AppImage / macOS layout: ../../Resources or ../.. mapping
+                candidates.push(parent.join(&rel));
+            }
+        }
+    }
+    // (d) dev fallback: run from src-tauri (cargo tauri dev) — resources stay
+    // in the manifest dir.
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        candidates.push(
+            std::path::PathBuf::from(manifest_dir).join(&rel),
+        );
+    }
+    candidates
+}
+
+fn find_backend() -> Option<std::path::PathBuf> {
+    backend_candidates().into_iter().find(|p| p.exists())
+}
+
 /// GET *path* on the backend with the shared timeout. `Ok(None)` = transport
 /// failure (offline / wedged backend) — callers treat it as an unknown value.
 fn backend_get_json(path: &str) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
@@ -118,6 +158,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // Auto-update plumbing (ADR-0006): the updater verifies Ed25519-signed
+        // artifacts against the pubkey in tauri.conf.json (overridden at
+        // release time via tauri.release.conf.json); the process plugin
+        // performs the relaunch after an update is installed.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(move |app| {
             // ── Tray icon ──────────────────────────────────────────
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -154,16 +200,16 @@ pub fn run() {
                 .build(app)?;
 
             // ── Backend sidecar (review C2) ──────────────────────
-            // Launch the Python backend so the web admin API is reachable on
-            // 127.0.0.1:8080 (the SPA, loaded from the tauri://localhost
-            // origin, calls it there). The binary is a packaging artifact: the
-            // build pipeline must freeze the backend (e.g. via PyInstaller) into
-            // `src-tauri/binaries/mercure-gateway-<target-triple>` and declare it
-            // in tauri.conf.json `bundle.externalBin`. Until then this spawn
-            // fails gracefully (logged below) and the app still launches — it
-            // just has no backend to talk to.
-            match app.shell().sidecar("mercure-gateway") {
-                Ok(cmd) => match cmd.args(["--web"]).spawn() {
+            // Launch the frozen Python backend so the web admin API is
+            // reachable on 127.0.0.1:8080 (the SPA, loaded from the
+            // tauri://localhost origin, calls it there). The backend is a
+            // PyInstaller onedir bundle produced by scripts/package_backend.py
+            // and shipped via `bundle.resources`; `externalBin` cannot carry a
+            // directory (tauri-apps/tauri#6676), hence the explicit-path
+            // spawn. A missing bundle or failed spawn is non-fatal (logged
+            // below) — the app launches, just without a backend.
+            match find_backend() {
+                Some(path) => match app.shell().command(path).args(["--web"]).spawn() {
                     Ok((mut rx, child)) => {
                         // Keep the child alive for the app's lifetime and drain
                         // its stdout/stderr so the OS pipes never fill and block
@@ -174,9 +220,11 @@ pub fn run() {
                             while let Some(_event) = rx.recv().await {}
                         });
                     }
-                    Err(e) => eprintln!("mercure-gateway sidecar failed to start: {e}"),
+                    Err(e) => eprintln!("mercure-gateway backend failed to start: {e}"),
                 },
-                Err(e) => eprintln!("mercure-gateway sidecar not configured: {e}"),
+                None => eprintln!(
+                    "mercure-gateway backend bundle not found (run scripts/package_backend.py)"
+                ),
             }
 
             // ── Background poller ──────────────────────────────────
@@ -210,4 +258,32 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_candidates_orders_exe_dir_first() {
+        let candidates = backend_candidates();
+        // The exe-dir candidate must always be first when we can resolve one.
+        if let Ok(exe) = std::env::current_exe() {
+            let dir = exe.parent().unwrap();
+            let expected = dir
+                .join("binaries")
+                .join("mercure-gateway")
+                .join(if cfg!(windows) { "mercure-gateway.exe" } else { "mercure-gateway" });
+            assert_eq!(candidates[0], expected);
+        }
+    }
+
+    #[test]
+    fn find_backend_returns_none_when_bundle_absent() {
+        // In the dev/test environment the frozen bundle may legitimately not
+        // exist — find_backend must return None rather than a bogus path.
+        let candidates = backend_candidates();
+        let any_real = candidates.iter().any(|p| p.exists());
+        assert_eq!(find_backend().is_some(), any_real);
+    }
 }

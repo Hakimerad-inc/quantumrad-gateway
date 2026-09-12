@@ -209,7 +209,7 @@ class SignedHeadAnchorer:
                     "head": head,
                     "ts": datetime.now(UTC).isoformat(),
                 },
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers={"Authorization": f"Token {self._api_key}"},  # TD-19
                 timeout=self._timeout,
             )
         except Exception:  # noqa: BLE001 — US-10: hub failure must not propagate

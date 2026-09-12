@@ -66,7 +66,7 @@ class HubClient:
                         "version": self._version,
                         "contact": self._contact,
                     },
-                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    headers={"Authorization": f"Token {self._api_key}"},  # TD-19
                     timeout=30,
                 )
                 if resp.ok:

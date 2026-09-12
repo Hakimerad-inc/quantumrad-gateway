@@ -285,13 +285,16 @@ def _register_hub_in_background(hub_status: dict[str, Any], client: Any) -> None
 
 
 def _start_hub_reporting(
-    config: GatewayConfig, audit: Any
+    config: GatewayConfig, audit: Any, *, database: Database | None = None
 ) -> tuple[dict[str, Any] | None, HubEventStreamer | None]:
     """Wire hub event streaming + registration when enabled; else ``(None, None)``.
 
     Returns a live hub-status dict (mutated by the background registration
     thread and read by the web admin panel) and the started streamer.  When hub
     reporting is disabled or under-configured, returns ``(None, None)``.
+
+    ``database`` (TD-06) makes the event stream durable: each audit event is
+    persisted to the ``hub_outbox`` table and resumed across restarts.
     """
     hub = config.audit.hub_reporting
     if not hub.enabled or not hub.bookkeeper_url:
@@ -299,7 +302,12 @@ def _start_hub_reporting(
     if not hub.api_key:
         logger.warning("audit.hub_reporting enabled but api_key is empty — hub reporting stays off")
         return None, None
-    streamer = HubEventStreamer(hub.bookkeeper_url, hub.api_key, config.general.appliance_name)
+    streamer = HubEventStreamer(
+        hub.bookkeeper_url,
+        hub.api_key,
+        config.general.appliance_name,
+        database=database,
+    )
     streamer.start()
     audit.set_sink(lambda event, detail, _user: streamer.feed(event, detail))
     hub_status: dict[str, Any] = {
@@ -427,7 +435,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Hub reporting (S08): streams every audit event to the bookkeeper and
     # registers the gateway in the background — boot never blocks on the hub.
-    hub_status, hub_streamer = _start_hub_reporting(config, audit)
+    # TD-06: the event stream rides the spool database (durable outbox).
+    hub_status, hub_streamer = _start_hub_reporting(config, audit, database=database)
 
     # Operations text log alongside the SQLite audit chain (S04-T3).
     text_log = TextLog(

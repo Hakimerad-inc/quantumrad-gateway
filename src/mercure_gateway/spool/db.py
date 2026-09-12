@@ -28,12 +28,18 @@ import hmac
 import os
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
 SCHEMA_VERSION = 5
+
+# Default safety-net cap for the durable hub outbox (TD-06). The streamer
+# passes its own explicit bound (queue + in-flight batch); this default only
+# guards direct callers. It must stay above the default 1000-event memory
+# queue so the prune never deletes rows that are still queued undelivered.
+_OUTBOX_MAX_ROWS = 2000
 
 
 class DatabaseEncryptionError(Exception):
@@ -143,6 +149,20 @@ CREATE TABLE IF NOT EXISTS instance_meta (
 );
 
 CREATE INDEX IF NOT EXISTS idx_instance_meta_study ON instance_meta(study_uid);
+
+-- Durable hub-event outbox (TD-06): audit events destined for the hub/band
+-- bookkeeper survive restarts by riding the same spool database.  Rows are
+-- deleted on confirmed delivery; a crashed gateway therefore resumes from the
+-- oldest undelivered event (at-least-once).  `payload` is the JSON-serialized
+-- streamer event (event, detail, ts).
+CREATE TABLE IF NOT EXISTS hub_outbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    payload     TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
     + _AUDIT_NO_UPDATE
     + _AUDIT_NO_DELETE
@@ -1093,6 +1113,84 @@ class Database:
                 "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
             ).fetchall()
         yield from rows
+
+    # -- Durable hub-event outbox (TD-06) ------------------------------------
+
+    def enqueue_hub_event(
+        self,
+        payload: str,
+        *,
+        drop_oldest_id: int | None = None,
+        max_rows: int = _OUTBOX_MAX_ROWS,
+    ) -> int:
+        """Persist one pending hub event and return its row id.
+
+        ``payload`` is the JSON-serialized streamer event.  When
+        ``drop_oldest_id`` is given (the oldest row evicted from the in-memory
+        queue) it is deleted in the *same* transaction as the insert, keeping
+        the table bounded atomically.  A second safety net trims any rows beyond
+        ``max_rows`` so the outbox can never grow unbounded even if the caller
+        forgets to evict.
+
+        ``max_rows`` must stay >= the streamer's memory queue bound plus its
+        max in-flight batch: pruning the oldest undelivered row while it is
+        still queued in RAM would silently drop it on the next restart
+        (TD-06 follow-up — the old 512 cap was below the 1000-event queue).
+        """
+        with self.transaction() as conn:
+            if drop_oldest_id is not None:
+                conn.execute("DELETE FROM hub_outbox WHERE id = ?", (drop_oldest_id,))
+            cur = conn.execute(
+                "INSERT INTO hub_outbox (payload) VALUES (?)", (payload,)
+            )
+            conn.execute(
+                "DELETE FROM hub_outbox WHERE id IN ("
+                " SELECT id FROM hub_outbox ORDER BY id DESC LIMIT -1 OFFSET ?)",
+                (max_rows,),
+            )
+        return _rowid(cur)
+
+    def delete_hub_events(self, event_ids: Iterable[int]) -> None:
+        """Remove delivered (or evicted) hub-outbox rows."""
+        ids = list(event_ids)
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        with self._lock:
+            self._conn.execute(
+                f"DELETE FROM hub_outbox WHERE id IN ({placeholders})", ids
+            )
+
+    def mark_hub_events_failed(self, event_ids: Iterable[int], error: str) -> None:
+        """Bump attempt counters for events that failed to deliver."""
+        ids = list(event_ids)
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        with self._lock:
+            self._conn.execute(
+                "UPDATE hub_outbox SET attempts = attempts + 1, "
+                "last_error = ?1, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE id IN ({placeholders})",
+                [error[:500], *ids],
+            )
+
+    def load_pending_hub_events(self, *, limit: int = _OUTBOX_MAX_ROWS) -> list[sqlite3.Row]:
+        """Return undelivered hub events in insertion order (oldest first)."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT id, payload, attempts, last_error FROM hub_outbox "
+                "ORDER BY id ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+    def count_pending_hub_events(self) -> int:
+        """Number of undelivered hub events still in the outbox."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM hub_outbox"
+            ).fetchone()
+        return int(row["n"]) if row and row["n"] is not None else 0
 
 
 def open_database(path: str | Path | None, *, encrypt_key: str | None = None) -> Database:

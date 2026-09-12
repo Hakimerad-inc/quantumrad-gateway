@@ -1,0 +1,67 @@
+# mercure-gateway.service — systemd USER unit for the headless gateway (TD-09)
+#
+# Runs the store-and-forward gateway as a supervised user service: auto-restart,
+# a post-start health check, hardening, and per-site values injected through an
+# EnvironmentFile (config path / port / secrets) instead of the unit itself.
+#
+# Install (see systemd/README.md):
+#   # copy files
+#   mkdir -p ~/.config/mercure-gateway ~/.config/systemd/user
+#   cp systemd/mercure-gateway.service ~/.config/systemd/user/
+#   cp systemd/gateway.env.example ~/.config/mercure-gateway/gateway.env
+#   # edit ~/.config/mercure-gateway/gateway.env, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mercure-gateway
+
+[Unit]
+Description=QuantumRAD / mercure DICOM gateway (headless storage-forward node)
+Documentation=file:%h/mercure-gateway/systemd/README.md
+After=default.target
+Wants=default.target
+
+[Service]
+Type=simple
+
+# ── deployment variables ─────────────────────────────────────────────────────
+# Port, config path and secrets live in gateway.env (see gateway.env.example),
+# so per-site configuration never requires editing the unit file.
+EnvironmentFile=%h/.config/mercure-gateway/gateway.env
+WorkingDirectory=%h/mercure-gateway
+
+# Entry point (documented command line):
+#   uv run mercure-gateway --config <path> --web --port 8081
+# Requires `uv` at %h/.local/bin (standalone installer) or %h/.cargo/bin — see
+# systemd/README.md §Install.  If the gateway is installed with `uv tool install .`
+# instead, point ExecStart at %h/.local/bin/mercure-gateway.
+ExecStart=%h/.local/bin/uv run mercure-gateway --config ${MERCURE_GATEWAY_CONFIG} --web --port ${MERCURE_GATEWAY_PORT}
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+# Health check: the admin REST API is loopback-only.  With the default
+# web_ui.auth_enabled=false, GET /api/system/health returns 200.
+# If authentication is enabled, /api/system/health answers 401 — swap the
+# probe target to the auth-free SPA root (http://127.0.0.1:${MERCURE_GATEWAY_PORT}/)
+# as documented in systemd/README.md §Health check.
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do curl -fs http://127.0.0.1:${MERCURE_GATEWAY_PORT}/api/system/health >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+
+# ── hardening (TD-09) ────────────────────────────────────────────────────────
+# Deliberately NOT set — the gateway needs them and tightening would break it:
+#   ProtectHome / ProtectSystem=strict :
+#       spool, hub outbox, audit-head anchor file and the keyring fallback
+#       cache all live under $HOME (default data dir ~/.local/share/mercure-gateway).
+#   PrivateDevices :
+#       USB-dongle mode must reach real /dev block devices (S10).
+NoNewPrivileges=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+# DICOM + hub traffic on AF_INET/AF_INET6; keyring access via session D-Bus
+# (AF_UNIX).  No AF_PACKET/AF_NETLINK needed by the gateway itself.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=default.target

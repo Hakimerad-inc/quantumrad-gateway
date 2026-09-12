@@ -47,7 +47,7 @@ def test_registration_payload(mock_post, hub: HubClient) -> None:
     assert payload["name"] == "Gateway-A"
     assert payload["version"] == "0.1.0"
     assert payload["contact"] == "admin@example.com"
-    assert mock_post.call_args[1]["headers"]["Authorization"] == "Bearer test-key"
+    assert mock_post.call_args[1]["headers"]["Authorization"] == "Token test-key"  # TD-19
 
 
 # ══════════════════════════════════════════════════════════════════════

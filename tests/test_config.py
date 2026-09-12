@@ -201,6 +201,71 @@ def test_env_boolean_value_false() -> None:
     assert cfg.web_ui.auth_enabled is False
 
 
+# ── TD-08: secret inventory & env-var secret injection ───────────────────
+
+
+def test_env_secret_injection_for_web_ui_auth_password_hash() -> None:
+    """The web-UI password hash can be supplied by env, never touching disk."""
+    cfg = apply_env_overrides(
+        default_config(),
+        environ={
+            "MERCURE_GATEWAY_WEB_UI_AUTH_ENABLED": "true",
+            "MERCURE_GATEWAY_WEB_UI_AUTH_PASSWORD_HASH": "sha256$salt$hash",
+        },
+    )
+    assert cfg.web_ui.auth_enabled is True
+    assert cfg.web_ui.auth_password_hash == "sha256$salt$hash"
+
+
+def test_env_secrets_override_config_file_values() -> None:
+    """Env vars win over values already on disk (ops injects at deploy time)."""
+    cfg = GatewayConfig.model_validate(
+        {
+            "web_ui": {
+                "auth_enabled": True,
+                "auth_password_hash": "sha256$old$onDisk",
+            },
+            "audit": {
+                "hub_reporting": {
+                    "enabled": True,
+                    "bookkeeper_url": "https://hub.example.com",
+                    "api_key": "on-disk-key",
+                }
+            },
+        }
+    )
+    cfg = apply_env_overrides(
+        cfg,
+        environ={
+            "MERCURE_GATEWAY_AUDIT_HUB_REPORTING_API_KEY": "env-injected-key",
+            "MERCURE_GATEWAY_WEB_UI_AUTH_PASSWORD_HASH": "sha256$new$fromEnv",
+        },
+    )
+    assert cfg.audit.hub_reporting.api_key == "env-injected-key"
+    assert cfg.web_ui.auth_password_hash == "sha256$new$fromEnv"
+
+
+def test_env_overrides_leave_other_secrets_intact() -> None:
+    """Overriding one secret never clobbers the unrelated credential stores."""
+    cfg = GatewayConfig.model_validate(
+        {
+            "web_ui": {"auth_enabled": True, "auth_password_hash": "sha256$keep$me"},
+            "audit": {
+                "hub_reporting": {
+                    "enabled": True,
+                    "bookkeeper_url": "https://hub.example.com",
+                    "api_key": "keep-key",
+                }
+            },
+        }
+    )
+    cfg = apply_env_overrides(
+        cfg, environ={"MERCURE_GATEWAY_AUDIT_HUB_REPORTING_API_KEY": "new-key"}
+    )
+    assert cfg.audit.hub_reporting.api_key == "new-key"
+    assert cfg.web_ui.auth_password_hash == "sha256$keep$me"
+
+
 # ── USB variant: config defaults + auto-detection (S10-T5) ───────────────
 
 

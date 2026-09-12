@@ -14,8 +14,8 @@ services:
     container_name: mercure-gateway-orthanc
     restart: unless-stopped
     ports:
-      - "4242:4242"   # DICOM C-STORE / C-FIND / C-MOVE
-      - "8042:8042"   # REST API (http://localhost:8042, user/pass demo/demo)
+      - "127.0.0.1:4242:4242"   # DICOM C-STORE / C-FIND / C-MOVE (loopback-only, RSK-19)
+      - "127.0.0.1:8042:8042"   # REST API (loopback-only, RSK-19)
     volumes:
       - ./orthanc.json:/etc/orthanc/orthanc.json:ro
       - orthanc-data:/var/lib/orthanc/db

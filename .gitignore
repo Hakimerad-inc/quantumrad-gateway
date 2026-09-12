@@ -84,3 +84,6 @@ src-tauri/binaries/
 # Playwright E2E artifacts (traces, screenshots, reports)
 test-results/
 playwright-report/
+
+# Config backups written by apply-mercure-config.py before live edits.
+*.bak-*

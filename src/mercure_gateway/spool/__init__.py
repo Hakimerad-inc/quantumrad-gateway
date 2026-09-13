@@ -118,11 +118,16 @@ class Spool:
         config: GatewayConfig | None = None,
         *,
         audit: AuditLog | None = None,
+        spool_dir: Path | str | None = None,
     ) -> None:
         self._db = database
         self._config = config
         self._audit = audit
-        if config is not None:
+        if spool_dir is not None:
+            # Public test/embedder override; takes precedence over the
+            # config-derived path so drills never poke _spool_dir directly.
+            self._spool_dir = Path(spool_dir)
+        elif config is not None:
             self._spool_dir = Path(config.storage.spool_dir)
         else:
             self._spool_dir = Path("spool")

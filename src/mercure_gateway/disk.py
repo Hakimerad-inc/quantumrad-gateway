@@ -45,12 +45,19 @@ class DiskMonitor:
         warning_pct: int,
         purge_on_full: bool,
         max_spool_gb: int | None = None,
+        max_spool_bytes: int | None = None,
         poll_sec: float = _DEFAULT_POLL_SEC,
     ) -> None:
         self._spool = spool
         self._warning_pct = warning_pct
         self._purge_on_full = purge_on_full
-        self._max_spool_bytes = None if max_spool_gb is None else max_spool_gb * self._GB
+        if max_spool_bytes is not None:
+            # Exact-byte knob for tests/drills; the GiB config field is too
+            # coarse to express a sub-GiB cap (review: drills reached through
+            # _max_spool_bytes, which silently no-ops if the attr is renamed).
+            self._max_spool_bytes = max_spool_bytes
+        else:
+            self._max_spool_bytes = None if max_spool_gb is None else max_spool_gb * self._GB
         self._poll_sec = max(1.0, poll_sec)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None

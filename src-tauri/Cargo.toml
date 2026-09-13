@@ -1,6 +1,6 @@
 [package]
 name = "mercure-gateway"
-version = "0.1.0"
+version = "1.1.0-rc1"
 description = "Lightweight desktop DICOM gateway (store-and-forward) — Tauri shell"
 authors = ["mercure-gateway"]
 edition = "2021"

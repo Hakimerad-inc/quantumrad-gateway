@@ -55,7 +55,7 @@ class DiskMonitor:
             # Exact-byte knob for tests/drills; the GiB config field is too
             # coarse to express a sub-GiB cap (review: drills reached through
             # _max_spool_bytes, which silently no-ops if the attr is renamed).
-            self._max_spool_bytes = max_spool_bytes
+            self._max_spool_bytes: int | None = max_spool_bytes
         else:
             self._max_spool_bytes = None if max_spool_gb is None else max_spool_gb * self._GB
         self._poll_sec = max(1.0, poll_sec)

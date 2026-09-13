@@ -193,6 +193,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Simulate a delivery failure then manual re-forward (RETRY_MANUAL audit)",
     )
+    parser.add_argument(
+        "--timeout-sec",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for a study to reach a terminal state (default 30)",
+    )
     return parser
 
 
@@ -242,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
             receiver=receiver,
             forwarder=forwarder,
             study_uid=args.study_uid,
+            timeout_sec=args.timeout_sec,
         )
 
         if args.retry_mode:
@@ -284,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         forwarder.stop()
         receiver.stop()
+        spool.stop()  # cancel any pending auto-enqueue timer before the DB goes away
         db.close()
 
 

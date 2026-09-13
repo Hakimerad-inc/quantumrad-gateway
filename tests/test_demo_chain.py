@@ -322,6 +322,11 @@ def test_demo_chain_retry_mode(capsys, tmp_path: Path) -> None:
                 "--receiver-port",
                 str(gateway_port),
                 "--retry-mode",
+                # The default 30s is tight when the whole suite runs concurrently
+                # (send + 5s auto-enqueue debounce + retry dispatch under CPU
+                # contention). Stay under the global pytest timeout (120s).
+                "--timeout-sec",
+                "90",
             ]
         )
         assert rc == 0

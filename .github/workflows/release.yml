@@ -5,13 +5,15 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# Builds the desktop bundles for both OSes, signs them with the release
-# Ed25519 key (ADR-0006), assembles the Tauri updater manifest and attaches
-# everything to a GitHub release. Signing secrets:
+# Stage 1 (build): the desktop bundles for both OSes, signed with the release
+# Ed25519 key (ADR-0006). Stage 2 (release): merges the per-platform updater
+# manifests and attaches installers + .sig sidecars + latest.json to a GitHub
+# release. Signing secrets:
 #   MERCURE_TAURI_PRIVATE_KEY / MERCURE_TAURI_PRIVATE_KEY_PASSWORD
 #   MERCURE_TAURI_PUBLIC_KEY (injected via tauri.release.conf.json overlay)
 # See docs/dev/packaging.md for the key-custody workflow (keys are generated
-# once on a maintainer machine — never in CI).
+# once on a maintainer machine — never in CI) and docs/dev/release-runbook.md
+# for the tag-day sequence.
 
 jobs:
   build:
@@ -48,14 +50,15 @@ jobs:
         run: uv run python scripts/package_backend.py
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
-      - name: Write release config overlay (updater pubkey)
+      - name: Write release config overlay (updater pubkey + signed artifacts)
         shell: bash
         env:
           MERCURE_TAURI_PUBLIC_KEY: ${{ secrets.MERCURE_TAURI_PUBLIC_KEY }}
         run: |
           cat > src-tauri/tauri.release.conf.json <<EOF
           {
-            "plugins": { "updater": { "pubkey": "$MERCURE_TAURI_PUBLIC_KEY" } }
+            "plugins": { "updater": { "pubkey": "$MERCURE_TAURI_PUBLIC_KEY" } },
+            "bundle": { "createUpdaterArtifacts": true }
           }
           EOF
       - name: Build + sign Tauri bundles
@@ -64,40 +67,85 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.MERCURE_TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.MERCURE_TAURI_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --config tauri.release.conf.json
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ matrix.target }}
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.sig
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release + updater manifest
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: bundles-windows-x86_64
+          path: dist
+      - name: Download linux bundles
+        uses: actions/download-artifact@v4
+        with:
+          name: bundles-linux-x86_64
+          path: dist
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
       # Tauri emits .sig sidecars next to each artifact when the signing env
-      # is present. Assemble latest.json in the Tauri updater format
-      # (NOT the Python Updater's flat {version,url,signature,checksum_sha256}
-      # manifest — that stays an independent operator-configured advisory
-      # check for headless deployments).
+      # is present. latest.json is assembled ONCE here from BOTH platforms'
+      # artifacts (a per-matrix assembly would clobber the other platform on
+      # upload) in the Tauri updater format — NOT the Python Updater's flat
+      # {version,url,signature,checksum_sha256} manifest, which stays an
+      # independent operator-configured advisory check for headless deployments.
       - name: Assemble updater manifest
         shell: bash
         run: |
           python3 - <<'PY'
           import json, glob, os
+          from datetime import datetime, timezone
           version = os.environ.get("GITHUB_REF_NAME", "0.0.0").lstrip("v")
           base = "https://github.com/mercure-imaging/mercure-gateway/releases/latest/download"
           platforms = {}
-          for sig_path in glob.glob("src-tauri/target/release/bundle/**/*.sig", recursive=True):
+          for sig_path in glob.glob("dist/**/*.sig", recursive=True):
               artifact = sig_path[:-4]
               name = os.path.basename(artifact)
               key = "windows-x86_64" if name.endswith((".exe", ".msi")) else "linux-x86_64"
               platforms[key] = {"signature": open(sig_path).read(), "url": f"{base}/{name}"}
+          if not platforms:
+              raise SystemExit("no .sig sidecars found under dist/ — check createUpdaterArtifacts")
+          # The Tauri updater client rejects manifests with an empty pub_date;
+          # default to "now" unless the tag-day runbook pins one explicitly.
+          pub_date = os.environ.get("RELEASE_PUB_DATE") or datetime.now(timezone.utc).strftime(
+              "%Y-%m-%dT%H:%M:%SZ")
           manifest = {
               "version": version,
               "notes": f"QuantumRAD Gateway {version}",
-              "pub_date": os.environ.get("RELEASE_PUB_DATE", ""),
+              "pub_date": pub_date,
               "platforms": platforms,
           }
           with open("latest.json", "w") as fh:
               json.dump(manifest, fh, indent=2)
           print(json.dumps(manifest, indent=2))
           PY
-      - name: Upload artifacts to release
+      - name: Create or reuse release, upload everything
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" \
-            --clobber \
-            src-tauri/target/release/bundle/**/*.sig \
-            latest.json || echo "release $GITHUB_REF_NAME not found yet — create it first"
+          gh release create "$GITHUB_REF_NAME" --generate-notes \
+            || echo "release $GITHUB_REF_NAME already exists — reusing"
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            $(find dist -type f ! -name '*.sig') \
+            $(find dist -type f -name '*.sig') \
+            latest.json

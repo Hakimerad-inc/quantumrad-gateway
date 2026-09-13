@@ -3,5 +3,8 @@
     "updater": {
       "pubkey": "RELEASE_PUBKEY_FROM_MERCURE_TAURI_PUBLIC_KEY_SECRET"
     }
+  },
+  "bundle": {
+    "createUpdaterArtifacts": true
   }
 }

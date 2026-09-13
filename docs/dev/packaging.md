@@ -73,9 +73,9 @@ Windows job sums shell exe + bundle before comparing against the gate.
 # One time, on a maintainer machine:
 cargo tauri signer generate -w ~/.tauri/mercure-gateway.key
 # GitHub secrets:
-#   MERCURE_TAURI_PRIVATE_KEY      contents of mercure-gateway.key
-#   MERCURE_TAURI_KEY_PASSWORD     (if set at generation)
-#   MERCURE_TAURI_PUBLIC_KEY       contents of mercure-gateway.key.pub
+#   MERCURE_TAURI_PRIVATE_KEY          contents of mercure-gateway.key
+#   MERCURE_TAURI_PRIVATE_KEY_PASSWORD (if set at generation)
+#   MERCURE_TAURI_PUBLIC_KEY           contents of mercure-gateway.key.pub
 ```
 
 `cargo tauri build` with `TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]` in the

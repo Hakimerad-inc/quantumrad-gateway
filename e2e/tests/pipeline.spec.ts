@@ -27,10 +27,15 @@ test.describe("Pipeline", () => {
   });
 
   test("reports view reflects the queue-requested reports (US-06)", async ({ page }) => {
-    // The queue spec clicked "Report" on a seeded study (workers:1 keeps spec
-    // order). With no report query source configured, the retriever
-    // eventually marks them failed — the visible end-state of requesting a
-    // report on a gateway that cannot reach a report PACS.
+    // Self-contained (review 2026-09-14): specs run in file order — pipeline
+    // before queue — so requesting the report here instead of relying on a
+    // prior queue-spec click. With no report query source configured the
+    // retriever accepts the request and the row stays PENDING — the visible
+    // end-state of requesting a report on a gateway with no report PACS.
+    await page.getByRole("link", { name: "Queue" }).click();
+    await expect(page.getByRole("heading", { name: "Study Queue" })).toBeVisible();
+    const row = page.locator("tr", { hasText: "E2E-ACC-1" });
+    await row.getByRole("button", { name: "Report" }).click();
     await page.getByRole("link", { name: "Reports" }).click();
     await expect(page.getByRole("heading", { name: "Reports" })).toBeVisible();
     await expect(page.locator("tbody tr")).not.toHaveCount(0, { timeout: 10_000 });

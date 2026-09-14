@@ -43,6 +43,12 @@ Variable naming: `MERCURE_GATEWAY_` + dotted config path in `SCREAMING_SNAKE`.
 Every scalar string/int/bool field is eligible; `destinations[]`/lists are
 skipped (the config file owns them).
 
+One standalone flag does **not** map to a config field:
+`MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1` downgrades the startup refusal to bind
+the unauthenticated web panel to a non-loopback address into a warning
+(escape hatch for dev rigs / TLS-terminating proxies only — see the admin
+guide §Authentication).
+
 ### Secret fields you should supply from the environment
 
 ```sh

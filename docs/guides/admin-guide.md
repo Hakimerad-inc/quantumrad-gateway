@@ -57,7 +57,11 @@ on shared machines:
 
 1. Enable `web_ui.auth_enabled` and set a password hash via the **Setup**
    wizard. The gateway refuses to bind to a non-loopback address with auth
-   disabled.
+   disabled (startup fails with an explanatory error; loopback = `127.0.0.1`,
+   `localhost`, `::1`). A deliberate exception — dev rigs or a TLS-terminating
+   reverse proxy on the network — is `MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1`,
+   which downgrades the refusal to a startup warning. Do not set it on
+   production boxes that serve PHI.
 2. The panel issues a signed, `HttpOnly`, `SameSite=Lax` session cookie with a
    12-hour lifetime. Log out to invalidate it.
 

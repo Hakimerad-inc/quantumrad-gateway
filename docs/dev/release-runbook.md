@@ -68,6 +68,14 @@ git push origin main --follow-tags         # push fires release.yml
 gh run watch                               # watch build → release jobs
 ```
 
+Local rehearsal (run before the tag): `scripts/rehearse_signed_build.sh`
+prompts for the signer password, builds + signs the deb with the real overlay,
+and rehearses `latest.json` assembly. Proven green 2026-09-14: deb 69.6 MB
+(K6 gate 500 MB) with its `.sig` sidecar. Requires the Tauri Linux system
+deps, notably `libayatana-appindicator3-dev` (the bundler panics without its
+pkg-config file even when the runtime library is present) — same set CI's
+`package-linux` installs.
+
 `release.yml` (two stages): per-OS **build** jobs freeze the PyInstaller
 sidecar, build + sign the Tauri bundles (real pubkey +
 `createUpdaterArtifacts` injected via the `tauri.release.conf.json` overlay

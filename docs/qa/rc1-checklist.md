@@ -21,7 +21,7 @@ K-gates in §1/refinement §10.
 | pip-audit | no critical vulns | CI `dependency-audit` job (now also `npm audit --omit=dev` — **0 prod vulns** locally 2026-09-14 — and rustsec) | ☐ CI |
 | perf gates (K3/K8, §5.6) | within budget | **forwarding begin 226 ms / 2000 ms; throughput 380.5 items/s / ≥5** (`check_perf_gates.py`, 2026-09-14) | ☒ |
 | K6 size (shell + backend bundle) | ≤ 250 MB | _needs package-windows run (Windows blocked — see §6)_ | ☐ |
-| deb size | ≤ 500 MB | _fill from local signed deb rehearsal (in progress)_ | 🔄 |
+| deb size | ≤ 500 MB | **69.6 MB** locally signed build 2026-09-14 (`scripts/rehearse_signed_build.sh`) | ☒ |
 | frozen-backend smoke | health 200 | **Linux ✅ 2026-09-14**: PyInstaller onedir sidecar serves `{"status":"ok","version":"1.1.0-rc1"}`; Windows leg = CI | ☒ local |
 | chaos suite (K1/K2) | green | `tests/chaos/` green within the 668 | ☒ |
 | security gates | green | `tests/test_security_gates.py`, `tests/test_web_security.py` green within the 668 | ☒ |
@@ -29,9 +29,9 @@ K-gates in §1/refinement §10.
 ## 2. Version & artifacts
 
 - [x] `uv run python scripts/sync_version.py --check` passes (all five sources at `1.1.0-rc1`) — 2026-09-14
-- [ ] Release commit tagged `v1.1.0-rc1`; `.github/workflows/release.yml` produces artifacts — **pipeline defects fixed** (`eb3f793`: createUpdaterArtifacts, gh-release-create, merged latest.json, pub_date); execution needs a GitHub remote (see `docs/dev/release-runbook.md` §0.2)
-- [ ] Installer + `.sig` sidecars + `latest.json` attached to the GH release — blocked on remote; `.sig` emission being proven locally in the deb rehearsal
-- [ ] Updater pubkey (`MERCURE_TAURI_PUBLIC_KEY`) is the real release key, not the dev placeholder — keypair generated locally (custody record in `docs/dev/release-runbook.md` §0.1); secret upload pending
+- [ ] Release commit tagged `v1.1.0-rc1`; `.github/workflows/release.yml` produces artifacts — **pipeline defects fixed** (`eb3f793`: createUpdaterArtifacts, gh-release-create, merged latest.json, pub_date) and **proven locally**: signed deb + `.sig` + `latest.json` assembly pass (`scripts/rehearse_signed_build.sh`, 2026-09-14); execution needs a GitHub remote (see `docs/dev/release-runbook.md` §0.2)
+- [x] `.sig` sidecar emission works with the real release key — `QuantumRAD-Gateway_1.1.0-rc1_amd64.deb.sig` produced locally (minisign, tauri-cli 2.11.4)
+- [ ] Updater pubkey (`MERCURE_TAURI_PUBLIC_KEY`) is the real release key, not the dev placeholder — keypair generated locally (custody record in `docs/dev/release-runbook.md` §0.1); rehearsal injected the real pubkey via overlay exactly as CI will; secret upload pending
 
 ## 3. Clean-VM UAT (the human step — PRD §9 Phase 1 exit criterion)
 

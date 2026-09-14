@@ -30,6 +30,7 @@ from typing import Any, Protocol
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.responses import Response
 
 from mercure_gateway import __version__
 from mercure_gateway.audit import AuditLog
@@ -206,6 +207,110 @@ def system_disk(request: Request) -> DiskStatus:
         over_threshold=usage_pct >= storage.disk_full_warning_pct,
         purge_on_disk_full=storage.purge_on_disk_full,
     )
+
+
+@router.get("/system/metrics")
+def system_metrics(request: Request) -> Response:
+    """Prometheus text-exposition scrape target (D1 — headless monitoring).
+
+    A single flat gauge set composed from state the dashboard endpoints already
+    compute (health, disk, queue/stats, status) — no new data access. PHI-free
+    by construction: numbers and fixed labels only, no paths, identifiers, or
+    study metadata (reviewers of the scrape feed may include non-admins).
+
+    When ``web_ui.auth_enabled`` is on the router-level ``require_auth``
+    dependency applies here too — the Prometheus job needs the Bearer session
+    token (see Monitoring section of the admin guide).
+
+    The audit chain is deliberately NOT verified here: ``AuditLog.verify()``
+    replays every row on each call — fine for the operator-triggered
+    ``/api/audit/verify``, a scraper-picked DoS vector at 15 s intervals.
+    """
+    sp = _spool(request)
+    cfg = _config(request)
+
+    lines: list[str] = []
+
+    def gauge(name: str, help_text: str, value: str | float | int, *, kind: str = "gauge") -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {kind}")
+        lines.append(f"{name} {value}")
+
+    def labeled(
+        name: str, help_text: str, samples: list[tuple[str, float | int]], *, kind: str = "gauge"
+    ) -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {kind}")
+        for labels, value in samples:
+            lines.append(f"{name}{{{labels}}} {value}")
+
+    # Process liveness + clock (mirrors /system/health + status uptime).
+    gauge("mercure_gateway_up", "Always 1 when the web panel answers.", 1)
+    gauge(
+        "mercure_gateway_uptime_seconds",
+        "Seconds since process start.",
+        round(time.time() - _start_time, 2),
+    )
+    labeled(
+        "mercure_gateway_build_info",
+        "Gateway version as a label; value is always 1.",
+        [(f'version="{__version__}"', 1)],
+        kind="info",
+    )
+
+    # Component running flags (mirrors /system/status).
+    receiver = _get_state(request, "receiver")
+    forwarder = _get_state(request, "forwarder")
+    retriever = _get_state(request, "report_retriever")
+    gauge("mercure_gateway_receiver_running", "1 while the DICOM SCP accepts associations.",
+          1 if receiver and receiver.is_running else 0)
+    gauge("mercure_gateway_forwarder_running", "1 while the forwarding workers run.",
+          1 if forwarder and forwarder.is_running else 0)
+    gauge("mercure_gateway_report_retriever_running", "1 while report polling is active.",
+          1 if retriever and retriever.is_running else 0)
+
+    # Hub streaming (mirrors /system/status hub fields; absent hub -> 0).
+    hub_status: object = getattr(request.app.state, "hub_status", None)
+    hub_registered = hub_streaming = 0
+    if isinstance(hub_status, dict):
+        hub_registered = int(bool(hub_status.get("registered")))
+        hub_streaming = int(bool(hub_status.get("streaming")))
+    gauge(
+        "mercure_gateway_hub_registered",
+        "1 when registered with the hub bookkeeper.",
+        hub_registered,
+    )
+    gauge("mercure_gateway_hub_streaming", "1 while audit events stream to the hub.", hub_streaming)
+
+    # Queue depth by lifecycle state (mirrors /queue/stats via Spool.count_states).
+    counts = sp.count_states()
+    labeled(
+        "mercure_gateway_queue_depth",
+        "Studies in each spool lifecycle state.",
+        [(f'state="{state}"', counts.get(state, 0)) for state in
+         ("RECEIVED", "QUEUED", "SENDING", "SENT", "ERROR", "FAILED")],
+    )
+
+    # Spool filesystem capacity (mirrors /system/disk; unmeasurable fs -> skip
+    # the series rather than fail the whole scrape — health/partial > nothing).
+    storage = cfg.storage
+    with contextlib.suppress(OSError):
+        disk = shutil.disk_usage(sp.spool_dir)
+        usage_pct = disk.used * 100.0 / max(1, disk.total)
+        gauge(
+            "mercure_gateway_disk_usage_percent",
+            "Spool filesystem usage percent.",
+            round(usage_pct, 2),
+        )
+        gauge("mercure_gateway_disk_total_bytes", "Spool filesystem total bytes.", disk.total)
+        gauge("mercure_gateway_disk_free_bytes", "Spool filesystem free bytes.", disk.free)
+        gauge(
+            "mercure_gateway_disk_over_threshold",
+            "1 once usage >= the configured warning threshold.",
+            1 if usage_pct >= storage.disk_full_warning_pct else 0,
+        )
+
+    return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
 @router.post("/system/start")

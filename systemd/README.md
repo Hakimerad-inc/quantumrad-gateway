@@ -77,6 +77,20 @@ the unit's `ExecStartPost` line to:
 
 and `systemctl --user daemon-reload && systemctl --user restart mercure-gateway`.
 
+## 4b. Ongoing monitoring
+
+For continuous monitoring (a headless box has no operator watching the SPA):
+
+- **Scrape** `GET /api/system/metrics` (Prometheus text format) with a local
+  Prometheus job — worked scrape config + alert rules (disk near full,
+  receiver down, backlog growth, scrape dead) live in the admin guide
+  §Monitoring. PHI-free series only, safe to expose to a monitoring VLAN.
+- **Probe periodically** (or let the alerts do it): `/api/system/health` for
+  liveness, `/api/system/disk` for capacity.
+- **Audit integrity** is a low-frequency external check, not a scrape metric:
+  `curl -fs http://127.0.0.1:${MERCURE_GATEWAY_PORT}/api/audit/verify | jq -e .valid`
+  (a cron'd one-liner; the endpoint replays the chain per call by design).
+
 ## 5. Hardening — what is on, what is off, and why
 
 | Directive | Setting | Why |

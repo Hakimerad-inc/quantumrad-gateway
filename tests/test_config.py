@@ -381,3 +381,28 @@ def test_block_base_maps_partitions_to_media_device() -> None:
     assert _block_base("/dev/sr0") == "sr0"
     assert _block_base("/dev/mapper/luks-root") is None
     assert _block_base("/tmp/not-a-device") is None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Web UI TLS configuration (D3a — ADR-0007 transport posture)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_webui_tls_fields_default_empty() -> None:
+    """TLS off by default: no cert/key set means plain HTTP (loopback default)."""
+    cfg = default_config()
+    assert cfg.web_ui.tls_cert_file == ""
+    assert cfg.web_ui.tls_key_file == ""
+
+
+def test_webui_tls_requires_both_files() -> None:
+    """Cert without key (or vice versa) is a config error, not a silent downgrade."""
+    from pydantic import ValidationError
+
+    from mercure_gateway.config import WebUIConfig
+
+    with pytest.raises(ValidationError):
+        WebUIConfig(tls_cert_file="/tmp/c.pem")
+    with pytest.raises(ValidationError):
+        WebUIConfig(tls_key_file="/tmp/k.pem")
+    ok = WebUIConfig(tls_cert_file="/tmp/c.pem", tls_key_file="/tmp/k.pem")
+    assert ok.tls_cert_file == "/tmp/c.pem"

@@ -27,14 +27,30 @@ def client() -> TestClient:
 # ══════════════════════════════════════════════════════════════════════
 
 def test_security_headers_present(client: TestClient) -> None:
-    """Every API response includes security headers (CSP, HSTS, XFO, XCTO)."""
+    """Every API response includes security headers (CSP, XFO, XCTO).
+
+    HSTS is deliberately NOT on plain-HTTP responses — browsers ignore it
+    there, and emitting it unconditionally was the documented-control gap
+    ADR-0007 closes (test_hsts_only_over_tls covers the positive half).
+    """
     r = client.get("/api/system/health")
     assert r.status_code == 200
     headers = dict(r.headers)
     assert "x-content-type-options" in headers
     assert "x-frame-options" in headers
-    assert "strict-transport-security" in headers
+    assert "strict-transport-security" not in headers  # http:// TestClient default
     assert "content-security-policy" in headers
+
+
+def test_hsts_only_over_tls() -> None:
+    """HSTS appears when the request arrives over https (ADR-0007)."""
+    cfg = default_config()
+    spool = Spool(mem_database())
+    app = create_app(cfg, spool)
+    https_client = TestClient(app, base_url="https://gateway.test")
+    r = https_client.get("/api/system/health")
+    assert r.status_code == 200
+    assert "strict-transport-security" in dict(r.headers)
 
 
 # ══════════════════════════════════════════════════════════════════════

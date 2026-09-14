@@ -659,3 +659,59 @@ def test_metrics_disk_gauge_has_no_phi(client: TestClient) -> None:
     # The gauge must not leak the spool path (default is under the home dir).
     assert "/home/" not in body
     assert "spool_dir" not in body
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Web UI TLS wiring (D3a — ADR-0007)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_run_web_admin_passes_tls_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When web_ui TLS is configured, uvicorn.run gets ssl_certfile/ssl_keyfile."""
+    import uvicorn as uvicorn_module
+
+    from mercure_gateway.main import _run_web_admin
+
+    captured: dict[str, object] = {}
+
+    def fake_run(app: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(uvicorn_module, "run", fake_run)
+    cfg = default_config()
+    cfg.web_ui.tls_cert_file = "/tmp/cert.pem"
+    cfg.web_ui.tls_key_file = "/tmp/key.pem"
+    _run_web_admin(
+        cfg,
+        Spool(mem_database(), spool_dir="/tmp/spool-test-tls"),
+        receiver=None,  # type: ignore[arg-type]
+        forwarder=None,  # type: ignore[arg-type]
+        report_retriever=None,
+        port=18099,
+    )
+    assert captured["ssl_certfile"] == "/tmp/cert.pem"
+    assert captured["ssl_keyfile"] == "/tmp/key.pem"
+
+
+def test_run_web_admin_plain_http_without_tls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No TLS configured -> no ssl kwargs -> plain HTTP (loopback default)."""
+    import uvicorn as uvicorn_module
+
+    from mercure_gateway.main import _run_web_admin
+
+    captured: dict[str, object] = {}
+
+    def fake_run(app: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(uvicorn_module, "run", fake_run)
+    cfg = default_config()
+    _run_web_admin(
+        cfg,
+        Spool(mem_database(), spool_dir="/tmp/spool-test-tls2"),
+        receiver=None,  # type: ignore[arg-type]
+        forwarder=None,  # type: ignore[arg-type]
+        report_retriever=None,
+        port=18099,
+    )
+    assert "ssl_certfile" not in captured
+    assert "ssl_keyfile" not in captured

@@ -215,5 +215,40 @@ environments (see ADR-0006).
 
 Use **Config → Diagnostics** (or `GET /api/diagnostics/export`) to generate a
 one-click support bundle: redacted configuration, PHI-scoped audit events,
-spool summary, and version. Send this file with any support request — it
-contains **no** credentials.
+spool summary, and version. Send this file with any support request.
+
+**PHI posture of support artifacts (PRD §6.4):**
+
+- The diagnostics bundle strips credential material — send it with confidence
+  over normal support channels. It is **not** PHI-free by default: with
+  `audit.phi_scope="minimal"` (the default) patient identifiers are reduced,
+  but study UIDs and accession numbers remain for reproducibility. If a site
+  requires fully de-identified bundles, set `phi_scope` accordingly before
+  export.
+- The operations log honors the same `phi_scope`: `patient_name`, `mrn`, and
+  `patient_id` are stripped from structured fields under `minimal`.
+- The raw audit database is never in the bundle; only the PHI-scoped event
+  export is.
+
+### Logs: locations, rotation, and shipping
+
+Two independent log surfaces — don't confuse them during triage:
+
+| Source | Where | Rotation / retention |
+|--------|-------|----------------------|
+| Operations log (`TextLog`) | `<spool_dir>/operations.log` (+ `.1`…`.5`) | Self-rotating at 10 MB × 5 backups. Tail it for operator-readable history; browse via the SPA or `GET /api/logs`. |
+| Process stdout/stderr | systemd: `journalctl --user -u mercure-gateway` | journald defaults (volatile size-capped). Persist by setting `Storage=persistent` in `journald.conf` if the box must survive reboots. |
+
+Shipping: the gateway has no built-in log forwarder (a deliberate v1 choice —
+one fewer network egress on a clinical VLAN). Use the standard host plumbing:
+
+- **journald-native shippers** (e.g. `systemd-journald` → `journal-upload`, or
+  vector/fluentbit with a journald input) collect the process log.
+- For the operations log, ship `<spool_dir>/operations.log*` with any file
+  shipper; the `.1`…`.5` rotation naming is plain numeric suffixes.
+- If the target log system is multi-tenant, route gateway logs to a
+  PHI-adjacent access tier: the ops log is `minimal`-scoped but still
+  clinical-context data.
+- Fastest answer for most support tickets: attach a fresh diagnostics bundle
+  (`GET /api/diagnostics/export`) rather than raw logs — it already combines
+  the redacted config, recent audit events, and spool state.

@@ -15,9 +15,9 @@ K-gates in §1/refinement §10.
 | pytest | all green | 668 passed / 4 skipped, 0 failed — clean single run 2026-09-14 (dev box, `901c390`); CI matrix pending | ☒ local |
 | coverage | ≥ 80% | **85%** (`coverage report`, src/mercure_gateway, 2026-09-14) | ☒ |
 | ruff / mypy strict | clean | ruff: all checks passed · mypy strict: 0 issues / 52 files | ☒ |
-| frontend (tsc / eslint / vitest) | clean, all pass | tsc 0 · eslint 0 · vitest **13 tests / 4 files** (jsdom suite replaced by Playwright e2e in `15ade80`) | ☒ |
+| frontend (tsc / eslint / vitest) | clean, all pass | tsc 0 · eslint 0 · vitest **14 tests / 4 files** (jsdom suite replaced by Playwright e2e in `15ade80`) | ☒ |
 | e2e (Playwright, real gateway) | green | **25/25 passed locally 2026-09-14** (seeded source-run gateway, ports 18299/18113); fixed a cross-spec order dependency in `pipeline.spec.ts` reports test | ☒ |
-| Rust (cargo check / clippy / test) | clean | check ✅ · clippy -D warnings ✅ · test ✅ (0 tests run — Rust unit tests were dropped from the shell; the checklist's earlier "2 unit tests" is stale) — 2026-09-14, Rust 1.98 | ☒ |
+| Rust (cargo check / clippy / test) | clean | check ✅ · clippy -D warnings ✅ · test ✅ **4 unit tests** (`backend_port` override/fallback + candidate ordering + deb-layout regression — re-added with the tray fixes, 2026-09-14); earlier "0 tests" row was stale | ☒ |
 | pip-audit | no critical vulns | CI `dependency-audit` job (now also `npm audit --omit=dev` — **0 prod vulns** locally 2026-09-14 — and rustsec) | ☐ CI |
 | perf gates (K3/K8, §5.6) | within budget | **forwarding begin 226 ms / 2000 ms; throughput 380.5 items/s / ≥5** (`check_perf_gates.py`, 2026-09-14) | ☒ |
 | K6 size (shell + backend bundle) | ≤ 250 MB | _needs package-windows run (Windows blocked — see §6)_ | ☐ |
@@ -38,7 +38,7 @@ K-gates in §1/refinement §10.
 - [ ] Windows 10 x64: install → wizard → first study forwarded (K4 ≤ 10 min) — `docs/qa/uat-06.md`
 - [ ] Windows 11 x64: same walkthrough
 - [ ] Ubuntu (supported LTS): deb + AppImage boot and forward — **dpkg-level ✅ 2026-09-14**: deb installs clean in a `ubuntu:24.04` Docker container (all deps resolve, `quantum-rad-gateway 1.1.0-rc1` reaches `ii` state, `/usr/bin/mercure-gateway` + bundled sidecar resolve, sidecar prints 1.1.0-rc1); GUI boot + tray forward leg still needs a desktop session
-- [ ] Packaged sidecar spawn verified (tray state transitions idle→sending→error; the one gap CI cannot drive headless)
+- [x] Packaged sidecar spawn verified (tray state transitions idle→sending→error; the one gap CI cannot drive headless) — **2026-09-14 on this box's GNOME session**, deb extracted and run as a normal user with `MERCURE_BACKEND_PORT=18080` (8080 held by another service): sidecar spawned from the fixed deb-layout candidate path, health `1.1.0-rc1`, tray glyph live idle→sending→idle→error (backend killed → poller mapped transport failure), C-STORE of 3 synthetic studies accepted on 11112 and all routed `complete` to Orthanc on first attempt. Found and fixed two product bugs: sidecar path candidate used the binary name instead of productName, and CSP/window plumbing for a non-default port. Visual glyph confirmation (tray icon rendering distinct per state on the real panel) pending user's eyes — appindicator was live in the session.
 - [ ] Windows service mode: install/start/stop/uninstall from the admin panel (S07-T9)
 - [ ] Auto-update: point a test install at a staging `latest.json`, verify signature enforcement rejects a tampered artifact — local rehearseal recipe: runbook §3 (updater `update_url` is config-overridable)
 

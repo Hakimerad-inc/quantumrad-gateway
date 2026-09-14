@@ -26,6 +26,14 @@ describe("api base URL resolution (C2)", () => {
     expect(api.apiUrl("/api/status")).toBe("http://127.0.0.1:8080/api/status");
   });
 
+  it("prefers the shell-injected __MERCURE_PORT__ inside Tauri (MERCURE_BACKEND_PORT)", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    (window as unknown as { __MERCURE_PORT__?: number }).__MERCURE_PORT__ = 18080;
+    const api = await import("./api");
+    expect(api.API_BASE).toBe("http://127.0.0.1:18080");
+    expect(api.apiUrl("/api/status")).toBe("http://127.0.0.1:18080/api/status");
+  });
+
   it("honors a VITE_API_BASE_URL build-time override", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "http://gw.example:9999");
     const api = await import("./api");

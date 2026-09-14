@@ -68,6 +68,12 @@ function resolveApiBase(): string {
     typeof (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !==
       "undefined"
   ) {
+    // The Rust shell injects __MERCURE_PORT__ (init script) so a packaged
+    // install can bind a non-default backend port via MERCURE_BACKEND_PORT.
+    const injected = (window as { __MERCURE_PORT__?: unknown }).__MERCURE_PORT__;
+    if (typeof injected === "number" && injected > 0) {
+      return `http://127.0.0.1:${injected}`;
+    }
     return TAURI_API_BASE;
   }
   return "";

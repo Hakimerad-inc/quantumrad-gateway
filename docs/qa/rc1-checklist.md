@@ -22,7 +22,7 @@ K-gates in §1/refinement §10.
 | perf gates (K3/K8, §5.6) | within budget | **forwarding begin 226 ms / 2000 ms; throughput 380.5 items/s / ≥5** (`check_perf_gates.py`, 2026-09-14) | ☒ |
 | K6 size (shell + backend bundle) | ≤ 250 MB | _needs package-windows run (Windows blocked — see §6)_ | ☐ |
 | deb size | ≤ 500 MB | _fill from local signed deb rehearsal (in progress)_ | 🔄 |
-| frozen-backend smoke | health 200 | CI smoke steps (both OS); Linux leg in local rehearsal | 🔄 |
+| frozen-backend smoke | health 200 | **Linux ✅ 2026-09-14**: PyInstaller onedir sidecar serves `{"status":"ok","version":"1.1.0-rc1"}`; Windows leg = CI | ☒ local |
 | chaos suite (K1/K2) | green | `tests/chaos/` green within the 668 | ☒ |
 | security gates | green | `tests/test_security_gates.py`, `tests/test_web_security.py` green within the 668 | ☒ |
 

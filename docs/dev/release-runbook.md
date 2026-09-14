@@ -19,10 +19,10 @@ cargo tauri signer generate -w ~/.tauri/mercure-gateway.key   # password-protect
 |---|---|
 | Key file | `~/.tauri/mercure-gateway.key` (private, **never committed, never in CI logs**) |
 | Public key file | `~/.tauri/mercure-gateway.key.pub` |
-| Public key (base64) | _fill after keygen: `cat ~/.tauri/mercure-gateway.key.pub`_ |
-| Key-file SHA-256 fingerprint | _fill: `sha256sum ~/.tauri/mercure-gateway.key`_ |
-| Password custody | maintainer password manager (entry: "mercure-gateway tauri signer") |
-| Generated | 2026-09-14, machine `dev@linux workstation` |
+| Public key (minisign) | `dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM1QjBENjJDNjhGQzU4QUYKUldTdldQeG9MTmF3TlpDTUJlQkE4ZUJCeU9PWnNJbHpsYXpleEU4eEM4dnJadHJ5d0lKdW0xbjcK` |
+| Key-file SHA-256 fingerprint | `e4aac23b3651017b7779b25579a3971605ae8ccc3d7a0094ece009fe4ec9e5ab` |
+| Password custody | shown once at generation (2026-09-14) — **store in maintainer password manager now** (entry: "mercure-gateway tauri signer"); not in the repo, not in shell history files |
+| Generated | 2026-09-14, machine `dev@linux workstation`, tauri-cli 2.11.4 |
 | Backup | copy key + pub + password into the org password manager; the ONLY copies |
 
 **Rotation:** if the box is lost, generate a new keypair, publish a full

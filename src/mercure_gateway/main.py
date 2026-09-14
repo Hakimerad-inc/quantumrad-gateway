@@ -17,9 +17,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import os
 import signal
 import sys
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -88,16 +90,43 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _warn_insecure(config: GatewayConfig) -> None:
-    """Warn about insecure web-panel settings at startup."""
+# Bind hosts that are single-user by definition (web/auth.py + admin guide §Authentication
+# treat loopback as the trusted default; everything else needs auth or the escape hatch).
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _enforce_bind_security(config: GatewayConfig, environ: Mapping[str, str] | None = None) -> None:
+    """Refuse to boot an unauthenticated admin panel on a non-loopback address.
+
+    Security control (admin guide §Authentication, web/auth.py's no-op-when-auth-
+    off argument rests on this): with ``web_ui.auth_enabled`` false the admin API
+    — PHI, credentials, receiver/forwarder start/stop — is open to whoever can
+    reach the bind address. The documented behavior is refusal; pre-D3b this only
+    logged a warning and bound anyway. Loopback (127.0.0.1, localhost, ::1) is
+    single-user by definition. Deliberate deployments (dev rigs, sidecar
+    frontends) opt out explicitly via ``MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1``,
+    which downgrades the refusal to a loud startup warning.
+    """
     ui = config.web_ui
-    if not ui.auth_enabled and ui.host not in ("127.0.0.1", "localhost"):
+    env = os.environ if environ is None else environ
+    if ui.auth_enabled or ui.host in _LOOPBACK_HOSTS:
+        return
+    if env.get("MERCURE_GATEWAY_ALLOW_INSECURE_BIND", "") == "1":
         logger.warning(
             "web_ui.auth_enabled is false while binding to %s — the admin API "
             "(PHI, credentials, start/stop) is unauthenticated on the network. "
-            "Enable auth or bind to 127.0.0.1.",
+            "Proceeding because MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1 is set; "
+            "enable auth or bind to 127.0.0.1 for anything else.",
             ui.host,
         )
+        return
+    raise SystemExit(
+        f"refusing to bind the web admin panel to {ui.host!r} while "
+        "web_ui.auth_enabled is false: the API (PHI, credentials, start/stop) "
+        "would be unauthenticated on the network. Enable web_ui auth (wizard → "
+        "Setup) or set web_ui.host to 127.0.0.1. Escape hatch for deliberate "
+        "deployments: MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1."
+    )
 
 
 def _install_shutdown_signal_handlers(shutdown_done: threading.Event) -> None:
@@ -408,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
             config.usb_mode.retention_delivered_hours,
         )
 
-    _warn_insecure(config)
+    _enforce_bind_security(config)
     # Signed-update check (ADR-0006): fail-closed, log-only, never blocks boot.
     _check_for_updates(config)
 

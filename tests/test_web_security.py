@@ -94,3 +94,63 @@ def test_csrf_accepts_tauri_origin(client: TestClient) -> None:
         headers={"Origin": "tauri://localhost"},
     )
     assert r.status_code == 200
+
+# ══════════════════════════════════════════════════════════════════════
+# Non-loopback bind with auth disabled — refuse, don't just warn (D3b)
+#
+# The admin guide, web/auth.py, and web/__init__.py all promise the
+# gateway REFUSES to bind the panel to a non-loopback address while
+# web_ui.auth_enabled is false. Before D3b, main._enforce_bind_security only
+# logged a warning and booted anyway — an unauthenticated PHI/credential/
+# start-stop API on the clinical LAN. These tests pin the refusal and the
+# documented escape hatch.
+# ══════════════════════════════════════════════════════════════════════
+
+from mercure_gateway.config import GatewayConfig  # noqa: E402
+from mercure_gateway.main import _enforce_bind_security  # noqa: E402
+
+
+def _cfg_with_bind(host: str, auth_enabled: bool) -> GatewayConfig:
+    cfg = default_config()
+    cfg.web_ui.host = host
+    cfg.web_ui.auth_enabled = auth_enabled
+    return cfg
+
+
+def test_insecure_bind_refused_non_loopback_no_auth() -> None:
+    """host=0.0.0.0 with auth disabled must raise SystemExit (the docs' claim)."""
+    with pytest.raises(SystemExit):
+        _enforce_bind_security(_cfg_with_bind("0.0.0.0", False), environ={})
+
+
+def test_insecure_bind_refused_ipv6_non_loopback() -> None:
+    """A routable IPv6 bind is just as unauthenticated — refused too."""
+    with pytest.raises(SystemExit):
+        _enforce_bind_security(_cfg_with_bind("::", False), environ={})
+
+
+def test_loopback_no_auth_allowed() -> None:
+    """The default posture (127.0.0.1, auth off) boots without raising."""
+    for host in ("127.0.0.1", "localhost", "::1"):
+        _enforce_bind_security(_cfg_with_bind(host, False), environ={})
+
+
+def test_non_loopback_with_auth_allowed() -> None:
+    """auth_enabled=true is the documented way to serve on the network."""
+    _enforce_bind_security(_cfg_with_bind("0.0.0.0", True), environ={})
+
+
+def test_insecure_bind_escape_hatch(monkeypatch: pytest.MonkeyPatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    """MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1 downgrades refusal to a warning."""
+    with caplog.at_level("WARNING"):
+        _enforce_bind_security(
+            _cfg_with_bind("0.0.0.0", False),
+            environ={"MERCURE_GATEWAY_ALLOW_INSECURE_BIND": "1"},
+        )
+    assert "insecure" in caplog.text.lower()
+
+
+def test_escape_hatch_only_bypasses_when_unset_still_refuses() -> None:
+    """The hatch is opt-in per value — an empty env dict must still refuse."""
+    with pytest.raises(SystemExit):
+        _enforce_bind_security(_cfg_with_bind("0.0.0.0", False), environ={})

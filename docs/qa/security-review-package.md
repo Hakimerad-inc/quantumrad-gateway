@@ -22,7 +22,7 @@ A store-and-forward DICOM gateway handling PHI in clinical environments:
   via GitHub releases (ADR-0006).
 
 **Code base for the review:** tag at review start (see §6 logistics).
-Repo: `mercure-imaging/mercure-gateway` (private).
+Repo: `Hakimerad-inc/quantumrad-gateway` (private).
 
 ## 2. Declared security posture (read this first)
 

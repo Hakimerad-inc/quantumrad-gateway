@@ -35,7 +35,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/mercure-imaging/mercure-gateway/releases/latest/download/latest.json"
+        "https://github.com/Hakimerad-inc/quantumrad-gateway/releases/latest/download/latest.json"
       ],
       "pubkey": "REPLACE_VIA_RELEASE_CONFIG"
     }

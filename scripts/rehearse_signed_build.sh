@@ -42,7 +42,9 @@ python3 - "$root" <<'PY'
 import glob, json, os, sys
 from datetime import datetime, timezone
 root = sys.argv[1]
-base = "https://github.com/mercure-imaging/mercure-gateway/releases/latest/download"
+base = ("https://github.com/"
+        + os.environ.get("REHEARSAL_REPO_SLUG", "Hakimerad-inc/quantumrad-gateway")
+        + "/releases/latest/download")
 platforms = {}
 for sig in glob.glob(os.path.join(root, "src-tauri/target/release/bundle/**/*.sig"), recursive=True):
     name = os.path.basename(sig[:-4])

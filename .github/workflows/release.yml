@@ -115,7 +115,12 @@ jobs:
           import json, glob, os
           from datetime import datetime, timezone
           version = os.environ.get("GITHUB_REF_NAME", "0.0.0").lstrip("v")
-          base = "https://github.com/mercure-imaging/mercure-gateway/releases/latest/download"
+          base = (
+              os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+              + "/"
+              + os.environ["GITHUB_REPOSITORY"]
+              + "/releases/latest/download"
+          )
           platforms = {}
           for sig_path in glob.glob("dist/**/*.sig", recursive=True):
               artifact = sig_path[:-4]

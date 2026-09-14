@@ -35,8 +35,8 @@ the updater only trusts the compiled-in pubkey.
 The repo currently has **no remote**. On release day:
 
 ```bash
-git remote add origin git@github.com:mercure-imaging/mercure-gateway.git
-gh repo create mercure-imaging/mercure-gateway --private --source=. --push  # or existing repo
+git remote add origin https://github.com/Hakimerad-inc/quantumrad-gateway.git
+gh repo create Hakimerad-inc/quantumrad-gateway --private --source=. --push  # or existing repo
 gh secret set MERCURE_TAURI_PRIVATE_KEY          < ~/.tauri/mercure-gateway.key
 gh secret set MERCURE_TAURI_PRIVATE_KEY_PASSWORD   # prompt, value = signer password
 gh secret set MERCURE_TAURI_PUBLIC_KEY           < ~/.tauri/mercure-gateway.key.pub
@@ -45,7 +45,7 @@ gh secret set MERCURE_TAURI_PUBLIC_KEY           < ~/.tauri/mercure-gateway.key.
 Secret names must match `release.yml` exactly (`MERCURE_TAURI_PRIVATE_KEY`,
 `MERCURE_TAURI_PRIVATE_KEY_PASSWORD`, `MERCURE_TAURI_PUBLIC_KEY`). The
 `tauri.conf.json` updater endpoint already points at
-`github.com/mercure-imaging/mercure-gateway` — if the org/repo name differs,
+`github.com/Hakimerad-inc/quantumrad-gateway` — if the org/repo name differs,
 update `plugins.updater.endpoint` there first.
 
 ## 1. Pre-tag checks (local, every release)
@@ -90,7 +90,7 @@ uploads installers + `.sig` sidecars + `latest.json`.
 ```bash
 gh release view v1.1.0-rc1 --json assets -q '.assets[].name'
 # expect: installer(s) per OS, matching .sig files, latest.json
-curl -fsSL https://github.com/mercure-imaging/mercure-gateway/releases/download/v1.1.0-rc1/latest.json | jq .platforms
+curl -fsSL https://github.com/Hakimerad-inc/quantumrad-gateway/releases/download/v1.1.0-rc1/latest.json | jq .platforms
 # expect: BOTH windows-x86_64 and linux-x86_64 keys, non-empty signatures, valid pub_date
 ```
 

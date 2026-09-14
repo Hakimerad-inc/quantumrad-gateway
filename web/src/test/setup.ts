@@ -7,5 +7,7 @@ Object.defineProperty(window, 'location', {
   writable: true,
 });
 
-// Mock fetch globally
-global.fetch = vi.fn();
+// Mock fetch globally. vi.stubGlobal over bare `global`: the tsc build
+// type-checks this file under the DOM lib only (no @types/node), where the
+// bare Node `global` identifier does not exist (first CI run, build-SPA job).
+vi.stubGlobal("fetch", vi.fn());

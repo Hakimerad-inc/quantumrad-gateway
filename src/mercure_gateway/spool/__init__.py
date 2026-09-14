@@ -394,8 +394,13 @@ class Spool:
 
         Directory fsync is best-effort: Windows cannot open a directory handle
         at all, so there is no equivalent operation there.
+
+        The file handle is opened read-write, not read-only: on Windows
+        ``os.fsync`` → ``FlushFileBuffers`` fails on a handle without write
+        access, while POSIX fsync only needs the descriptor (first real CI run,
+        windows matrix — all store-before-ack paths died with EBADF).
         """
-        with open(path, "rb") as f:
+        with open(path, "r+b") as f:
             os.fsync(f.fileno())
         for directory in dirs:
             try:

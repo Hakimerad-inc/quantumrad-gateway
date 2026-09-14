@@ -189,7 +189,11 @@ def test_falls_back_to_file_only_when_hub_down(tmp_path: Path, caplog) -> None: 
 
 
 def test_queue_is_bounded_drop_oldest(tmp_path: Path) -> None:
-    hub = FakeHub()
+    # delay=0.05: each sign round-trip costs 50 ms, so the worker cannot
+    # drain faster than the 20-head burst enqueues — without it, fast CI
+    # runners let the worker keep up and no head is ever dropped
+    # (the <20 assertion then flakes with len == 20).
+    hub = FakeHub(delay=0.05)
     anchorer = _make_anchorer(tmp_path, hub, max_queue_size=4)
     anchorer.start()
     for i in range(20):

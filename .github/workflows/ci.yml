@@ -23,6 +23,12 @@ jobs:
   dependency-audit:
     name: dependency audit (pip-audit + npm + cargo)
     runs-on: ubuntu-latest
+    # rustsec/audit-check publishes a check-run; without this the
+    # GITHUB_TOKEN is read-only and publishing fails the step even when
+    # the scan itself passes.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -37,7 +43,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Scan SPA production dependencies (high+ only)
@@ -49,6 +55,7 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: src-tauri
 
   test:
     strategy:
@@ -72,7 +79,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
@@ -110,16 +117,19 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
       - run: npm run build
         working-directory: web
-      # Playwright comes from the runner machine install (root node_modules is
-      # a dev-box convention) — install it explicitly in CI.
-      - run: npm install --no-save playwright
+      # The repo has no root package.json (the SPA lives in web/); dev boxes
+      # resolve @playwright/test from a parent-dir install, CI must not.
+      # @playwright/test is what playwright.config.ts + e2e specs import —
+      # the bare `playwright` package leaves them dangling (CI run
+      # 34893336322: "Cannot find module '@playwright/test'").
+      - run: npm install --no-save @playwright/test
       - run: npx playwright install --with-deps chromium
       # Seed the isolated gateway (temp spool, ports 18299/18113) and export
       # the KEY=value lines for the Playwright global setup.
@@ -167,7 +177,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
@@ -219,18 +229,20 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Install Linux system deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libwebkit2gtk-4.1-dev \
-            libappindicator3-dev librsvg2-dev patchelf libssl-dev
+            libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev
       - run: npm ci
         working-directory: web
       - run: npm run build
         working-directory: web
+      - name: Freeze backend (PyInstaller onedir sidecar)
+        run: uv run python scripts/package_backend.py
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
       - name: Build Tauri app (Linux AppImage + deb)

@@ -1,0 +1,8 @@
+# Shell scripts must keep LF endings on every platform: the Windows test
+# matrix checks flash_usb.sh safety paths under bash, and CRLF (the
+# windows-latest default of core.autocrlf) breaks argument parsing there.
+# Windows batch/powershell helpers intentionally keep CRLF.
+*.sh text eol=lf
+*.bats text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf

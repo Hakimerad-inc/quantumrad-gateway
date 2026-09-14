@@ -21,7 +21,7 @@ jobs:
       - run: uv run mypy .
 
   dependency-audit:
-    name: dependency audit (pip-audit)
+    name: dependency audit (pip-audit + npm + cargo)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,10 +30,25 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --all-extras
-      - name: Scan dependencies for known vulnerabilities
+      - name: Scan Python dependencies for known vulnerabilities
         run: |
           uv pip compile pyproject.toml -o requirements-audit.txt
           uvx pip-audit --strict -r requirements-audit.txt
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Scan SPA production dependencies (high+ only)
+        working-directory: web
+        # --omit=dev: the vite/vitest advisories are dev-server/UI paths that
+        # never ship in the built SPA; production deps must be clean.
+        run: npm audit --omit=dev --audit-level=high
+      - name: Scan Rust dependencies (RUSTSEC advisories)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   test:
     strategy:
@@ -167,15 +182,11 @@ jobs:
         run: cargo tauri build --no-bundle
         working-directory: src-tauri
       - name: K6 installer size gate (shell exe + backend bundle)
-        shell: pwsh
         working-directory: src-tauri
-        run: |
-          $shell = (Get-Item "target/release/mercure-gateway.exe").Length / 1MB
-          $backend = (Get-ChildItem -Recurse "binaries/mercure-gateway" -File | Measure-Object -Property Length -Sum).Sum / 1MB
-          $total = $shell + $backend
-          Write-Host "Shell: $([math]::Round($shell,1)) MB; backend bundle: $([math]::Round($backend,1)) MB; total: $([math]::Round($total,1)) MB"
-          if ($total -gt 250) { Write-Host "::error::K6 size gate exceeded: $([math]::Round($total,1)) MB > 250 MB"; exit 1 }
-          Write-Host "K6 PASS"
+        run: >-
+          uv run python ../scripts/check_installer_size.py
+          target/release/mercure-gateway.exe binaries/mercure-gateway
+          --limit-mb 250
       - name: Smoke test frozen backend
         shell: pwsh
         run: |
@@ -227,7 +238,5 @@ jobs:
         working-directory: src-tauri
       - name: K6 size gate
         run: |
-          size=$(du -sm "src-tauri/target/release/bundle/deb/"*.deb 2>/dev/null | cut -f1)
-          echo "deb size: $size MB"
-          if [ -n "$size" ] && [ "$size" -gt 500 ]; then echo "::error::K6 size gate exceeded: $size MB > 500 MB"; exit 1; fi
-          echo "K6 PASS"
+          uv run python scripts/check_installer_size.py \
+            src-tauri/target/release/bundle/deb/*.deb --limit-mb 500

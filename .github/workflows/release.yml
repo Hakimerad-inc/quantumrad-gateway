@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.12"
       - run: uv sync --all-extras
@@ -98,7 +98,7 @@ jobs:
           name: bundles-linux-x86_64
           path: dist
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.12"
       - run: uv sync --all-extras

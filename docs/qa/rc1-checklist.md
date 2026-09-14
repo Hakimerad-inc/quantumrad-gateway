@@ -16,7 +16,7 @@ K-gates in §1/refinement §10.
 | coverage | ≥ 80% | **85%** (`coverage report`, src/mercure_gateway, 2026-09-14) | ☒ |
 | ruff / mypy strict | clean | ruff: all checks passed · mypy strict: 0 issues / 52 files | ☒ |
 | frontend (tsc / eslint / vitest) | clean, all pass | tsc 0 · eslint 0 · vitest **13 tests / 4 files** (jsdom suite replaced by Playwright e2e in `15ade80`) | ☒ |
-| e2e (Playwright, real gateway) | green | 7 specs; CI `e2e` job — local run pending | ☐ |
+| e2e (Playwright, real gateway) | green | **25/25 passed locally 2026-09-14** (seeded source-run gateway, ports 18299/18113); fixed a cross-spec order dependency in `pipeline.spec.ts` reports test | ☒ |
 | Rust (cargo check / clippy / test) | clean | check ✅ · clippy -D warnings ✅ · test ✅ (0 tests run — Rust unit tests were dropped from the shell; the checklist's earlier "2 unit tests" is stale) — 2026-09-14, Rust 1.98 | ☒ |
 | pip-audit | no critical vulns | CI `dependency-audit` job (now also `npm audit --omit=dev` — **0 prod vulns** locally 2026-09-14 — and rustsec) | ☐ CI |
 | perf gates (K3/K8, §5.6) | within budget | **forwarding begin 226 ms / 2000 ms; throughput 380.5 items/s / ≥5** (`check_perf_gates.py`, 2026-09-14) | ☒ |

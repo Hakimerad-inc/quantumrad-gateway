@@ -14,6 +14,7 @@ Behaviors (PRD §3.4-1, §5.2-2, refinement §2.1):
 from __future__ import annotations
 
 import struct
+import sys
 from pathlib import Path
 
 import pydicom
@@ -279,8 +280,14 @@ class TestStoreBeforeAcknowledgeDurability:
 
         spool._fsync_instance(path, dirs=[path.parent])
 
-        # One fsync for the file, one for the directory entry naming it.
-        assert len(fsynced) == 2
+        # One fsync for the file, one for the directory entry naming it —
+        # but on Windows the directory fsync is best-effort by design
+        # (os.open on a directory is unsupported → skipped), so only the
+        # file barrier is guaranteed cross-platform.
+        if sys.platform == "win32":
+            assert len(fsynced) == 1
+        else:
+            assert len(fsynced) == 2
 
     def test_newly_created_ancestors_are_synced_too(self, tmp_path: Path) -> None:
         out_dir = tmp_path / "spool" / "1.2.3.4.5" / "1.2.3.4.5.1"

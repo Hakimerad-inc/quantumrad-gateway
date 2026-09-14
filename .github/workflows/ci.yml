@@ -23,6 +23,12 @@ jobs:
   dependency-audit:
     name: dependency audit (pip-audit + npm + cargo)
     runs-on: ubuntu-latest
+    # rustsec/audit-check publishes a check-run; without this the
+    # GITHUB_TOKEN is read-only and publishing fails the step even when
+    # the scan itself passes.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - name: Install uv

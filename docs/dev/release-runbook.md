@@ -32,7 +32,7 @@ the updater only trusts the compiled-in pubkey.
 
 ### 0.2 GitHub repository + secrets
 
-The repo currently has **no remote**. On release day:
+The remote is live: `https://github.com/Hakimerad-inc/quantumrad-gateway.git` (pushed 2026-09-14). Remaining on release day:
 
 ```bash
 git remote add origin https://github.com/Hakimerad-inc/quantumrad-gateway.git

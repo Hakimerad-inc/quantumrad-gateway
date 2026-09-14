@@ -199,7 +199,7 @@ check (e.g. cron + `curl … /api/audit/verify | jq -e .valid`).
 | Studies stuck queued | Forwarder stopped? Destination disabled? Check `forwarding.concurrency`. |
 | Repeated "Error" then "Failed" | Destination unreachable or credentials invalid; fix and **Retry**. |
 | Disk filling up | Raise `max_spool_gb`, lower `retention_delivered_days`, or enable `purge_on_disk_full`. |
-| Audit verify reports breaks | Someone modified the database — restore from backup; do **not** hand-edit rows. |
+| Audit verify reports breaks | Someone modified the database — restore from backup ([Backup & Restore](backup-restore.md)); do **not** hand-edit rows. |
 | Web panel slow with many studies | Queue view is paginated (10k rows render within budget); reduce page size. |
 | Updates not appearing | Auto-update checks the signed manifest (see below); ensure outbound HTTPS to the update URL. |
 

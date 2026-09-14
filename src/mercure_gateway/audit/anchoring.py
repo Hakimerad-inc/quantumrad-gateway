@@ -63,7 +63,7 @@ class SignedHeadAnchorer:
     ``anchor(head)`` appends the head to *file_anchor_path* synchronously
     (preserving the review-M4 file-anchor behaviour exactly) and enqueues a
     sign request for the background worker.  The worker POSTs to
-    ``{bookkeeper_url}/anchor`` with Bearer auth; a 2xx reply carrying
+    ``{bookkeeper_url}/anchor`` with Token auth (TD-19); a 2xx reply carrying
     ``{"signature": "<base64 raw Ed25519 over the head hex string>"}`` is
     appended to *signed_anchor_path* as one JSON object per line.  Failures
     requeue at the head with exponential backoff; once retries are exhausted

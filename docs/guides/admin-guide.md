@@ -88,7 +88,8 @@ on shared machines:
   **Leave it empty only when every sending modality is trusted.** The receiver
   warns at startup if it is accepting associations from any AE title.
 - Hub reporting (`audit.hub_reporting`) streams audit events to the hub
-  bookkeeper using a Bearer API key. It is **off by default**.
+  bookkeeper using a `Token`-scheme API key (HTTP header
+  `Authorization: Token …`, per TD-19). It is **off by default**.
 
 ## Retention
 

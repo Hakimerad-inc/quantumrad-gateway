@@ -9,7 +9,7 @@ the periodic integrity proofs over the audit hash chain.
 
 ```
 POST {bookkeeper_url}/anchor
-Authorization: Bearer {audit.hub_reporting.api_key}
+Authorization: Token {audit.hub_reporting.api_key}
 Content-Type: application/json
 
 {

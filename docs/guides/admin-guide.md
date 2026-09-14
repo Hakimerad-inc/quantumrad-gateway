@@ -132,6 +132,56 @@ When `audit.hub_reporting.enabled` is set, the gateway:
 queue backs off and events are retried; the receive/forward pipeline is
 unaffected. Hub status is visible on the web Dashboard.
 
+## Monitoring (headless deployments)
+
+The gateway exposes a Prometheus text-exposition scrape target:
+
+    GET /api/system/metrics   →  text/plain; version=0.0.4
+
+All series are numeric gauges with fixed labels — no paths, identifiers, or
+study metadata (PHI-free by construction). Key series:
+`mercure_gateway_up`, `mercure_gateway_uptime_seconds`,
+`mercure_gateway_receiver_running` / `_forwarder_running` /
+`_report_retriever_running`, `mercure_gateway_hub_registered` /
+`_hub_streaming`, `mercure_gateway_queue_depth{state="…"}`,
+`mercure_gateway_disk_usage_percent` / `_disk_total_bytes` /
+`_disk_free_bytes` / `_disk_over_threshold`.
+
+Scrape config (loopback default; with `web_ui.auth_enabled` the job needs the
+session Bearer token from the Setup wizard credentials):
+
+```yaml
+scrape_configs:
+  - job_name: mercure-gateway
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+    metrics_path: /api/system/metrics
+```
+
+Recommended alerts (Prometheus rule syntax):
+
+```yaml
+groups:
+  - name: mercure-gateway
+    rules:
+      - alert: GatewayDiskNearFull
+        expr: mercure_gateway_disk_over_threshold == 1
+        for: 5m
+      - alert: GatewayReceiverDown
+        expr: mercure_gateway_receiver_running == 0
+        for: 10m
+      - alert: GatewayBacklogGrowing
+        expr: increase(mercure_gateway_queue_depth{state="QUEUED"}[30m]) > 50
+      - alert: GatewayScrapeDead
+        expr: up{job="mercure-gateway"} == 0
+        for: 5m
+```
+
+The audit-chain integrity gauge is deliberately **not** on the scrape path —
+`/api/audit/verify` replays the whole chain per call (fine operator-triggered,
+a self-DoS at 15 s scrape intervals). Schedule it as a low-frequency external
+check (e.g. cron + `curl … /api/audit/verify | jq -e .valid`).
+
 ## Troubleshooting
 
 | Problem | Likely cause / fix |

@@ -587,3 +587,75 @@ def test_console_dashboard(client: TestClient, spool: Spool) -> None:
     assert "recent_errors" in data
     assert len(data["head_hash"]) == 64
     assert "text_log_tail" in data
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Metrics endpoint (D1 — Prometheus text format for headless monitoring)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_metrics_endpoint_prometheus_format(client: TestClient) -> None:
+    """GET /api/system/metrics returns Prometheus text exposition."""
+    r = client.get("/api/system/metrics")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    body = r.text
+    # Every metric carries HELP/TYPE metadata (exposition format convention).
+    for name in (
+        "mercure_gateway_up",
+        "mercure_gateway_uptime_seconds",
+        "mercure_gateway_receiver_running",
+        "mercure_gateway_forwarder_running",
+        "mercure_gateway_queue_depth",
+        "mercure_gateway_disk_usage_percent",
+    ):
+        assert f"# HELP {name} " in body, f"missing HELP for {name}"
+        assert f"# TYPE {name} " in body, f"missing TYPE for {name}"
+
+
+def test_metrics_queue_gauges_reflect_state(
+    client: TestClient, spool: Spool, target_hub: DICOMDestination
+) -> None:
+    """queue_depth{state=...} series match /queue/stats after real transitions."""
+    s1 = spool.receive("1.1.1")
+    spool.enqueue(s1, [target_hub])  # QUEUED
+    counts = spool.count_states()
+    body = client.get("/api/system/metrics").text
+    assert f'mercure_gateway_queue_depth{{state="QUEUED"}} {counts["QUEUED"]}' in body
+
+
+def test_metrics_component_gauges(client: TestClient, app) -> None:
+    """receiver_running/forwarder_running mirror the components' is_running."""
+    app.state.receiver.start()
+    body = client.get("/api/system/metrics").text
+    assert "mercure_gateway_receiver_running 1" in body
+    assert "mercure_gateway_forwarder_running 0" in body
+
+
+def test_metrics_hub_series_present_when_state_missing(client: TestClient) -> None:
+    """No hub configured -> hub gauges report 0/unknown, still valid exposition."""
+    body = client.get("/api/system/metrics").text
+    assert "mercure_gateway_hub_streaming 0" in body
+    assert "mercure_gateway_hub_registered 0" in body
+
+
+def test_metrics_uptime_increases(client: TestClient) -> None:
+    """uptime_seconds is a positive gauge (process clock, not wall)."""
+    import time as _t
+
+    body1 = client.get("/api/system/metrics").text
+    line = [ln for ln in body1.splitlines() if ln.startswith("mercure_gateway_uptime_seconds ")][0]
+    up1 = float(line.split()[-1])
+    assert up1 > 0
+    _t.sleep(0.02)
+    body2 = client.get("/api/system/metrics").text
+    line2 = [ln for ln in body2.splitlines() if ln.startswith("mercure_gateway_uptime_seconds ")][0]
+    assert float(line2.split()[-1]) >= up1
+
+
+def test_metrics_disk_gauge_has_no_phi(client: TestClient) -> None:
+    """Disk gauge is numeric bytes/percent only — filesystem paths never appear."""
+    body = client.get("/api/system/metrics").text
+    assert "mercure_gateway_disk_total_bytes " in body
+    # The gauge must not leak the spool path (default is under the home dir).
+    assert "/home/" not in body
+    assert "spool_dir" not in body

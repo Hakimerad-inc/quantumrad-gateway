@@ -11,6 +11,7 @@ what the on-hardware run must produce.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -119,6 +120,14 @@ def test_cli_partition_paths() -> None:
 
 
 # ── flash_usb.sh: safety paths that never touch a device ───────────────────
+#
+# The script is a bash POSIX utility (sfdisk/mkfs/lsblk live only on Linux);
+# the Windows CI runner's Git-Bash shim reaches neither the error paths nor
+# the device model these tests assert (first CI run: empty stderr). Skip the
+# whole block off POSIX — the loop-device e2e below is already root-gated.
+_FLASH_TESTS = pytest.mark.skipif(
+    os.name != "posix", reason="flash_usb.sh is a POSIX bash tool (CI-Windows skips)"
+)
 
 
 def _flash(*args: str) -> subprocess.CompletedProcess[str]:
@@ -127,24 +136,28 @@ def _flash(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@_FLASH_TESTS
 def test_flash_requires_device() -> None:
     out = _flash()
     assert out.returncode != 0
     assert "--device is required" in out.stderr
 
 
+@_FLASH_TESTS
 def test_flash_rejects_missing_device() -> None:
     out = _flash("--device", "/dev/definitely-not-here-99")
     assert out.returncode != 0
     assert "does not exist" in out.stderr
 
 
+@_FLASH_TESTS
 def test_flash_rejects_unknown_arg() -> None:
     out = _flash("--frobnicate")
     assert out.returncode != 0
     assert "unknown argument" in out.stderr
 
 
+@_FLASH_TESTS
 def test_flash_dry_run_is_nonprivileged_and_complete() -> None:
     """--dry-run on a non-existent path must still exit 0 with the full plan.
 
@@ -162,6 +175,7 @@ def test_flash_dry_run_is_nonprivileged_and_complete() -> None:
     assert "dry-run complete" in out.stderr
 
 
+@_FLASH_TESTS
 def test_flash_bash_syntax() -> None:
     out = subprocess.run(["bash", "-n", str(FLASH)], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr

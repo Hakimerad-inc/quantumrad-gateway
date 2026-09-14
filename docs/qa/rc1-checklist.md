@@ -37,7 +37,7 @@ K-gates in §1/refinement §10.
 
 - [ ] Windows 10 x64: install → wizard → first study forwarded (K4 ≤ 10 min) — `docs/qa/uat-06.md`
 - [ ] Windows 11 x64: same walkthrough
-- [ ] Ubuntu (supported LTS): deb + AppImage boot and forward — _deb built + sidecar-smoked locally in rehearsal (see §1); full-boot UAT pending_
+- [ ] Ubuntu (supported LTS): deb + AppImage boot and forward — **dpkg-level ✅ 2026-09-14**: deb installs clean in a `ubuntu:24.04` Docker container (all deps resolve, `quantum-rad-gateway 1.1.0-rc1` reaches `ii` state, `/usr/bin/mercure-gateway` + bundled sidecar resolve, sidecar prints 1.1.0-rc1); GUI boot + tray forward leg still needs a desktop session
 - [ ] Packaged sidecar spawn verified (tray state transitions idle→sending→error; the one gap CI cannot drive headless)
 - [ ] Windows service mode: install/start/stop/uninstall from the admin panel (S07-T9)
 - [ ] Auto-update: point a test install at a staging `latest.json`, verify signature enforcement rejects a tampered artifact — local rehearseal recipe: runbook §3 (updater `update_url` is config-overridable)

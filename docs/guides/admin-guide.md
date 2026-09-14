@@ -8,6 +8,16 @@ DICOM appliance: modalities push studies to a local receiver; the gateway holds
 them in a spool; a forwarder delivers them to configured destinations with
 retry and exponential backoff.
 
+## Supported platforms (PRD §13 Q8)
+
+Tested and QA-matrixed (rc1-checklist §3): **Windows 10 x64**, **Windows 11
+x64**, and **Ubuntu (current supported LTS)** — desktop installer and headless
+systemd service. **Windows Server is documented-only**: the gateway has no
+Server-specific validation, no service-mode testing on Server SKUs, and the
+OS-keyring credential store is exercised only via Windows Credential Manager.
+It is expected to work (same Win32 subsystem, same installer) but is not a
+supported configuration for incident response purposes.
+
 ## Configuration
 
 Configuration lives in `mercure-gateway.json` (next to the executable). The

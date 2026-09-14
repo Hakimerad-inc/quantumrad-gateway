@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_origin
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 
 __all__ = [
     "AuditConfig",
@@ -399,6 +399,27 @@ class WebUIConfig(BaseModel):
         default="",
         description="Bcrypt hash of the web UI password. Set via the setup wizard.",
     )
+    tls_cert_file: str = Field(
+        default="",
+        description=(
+            "PEM certificate for the web admin panel (ADR-0007). Empty = plain HTTP. "
+            "Must be paired with tls_key_file; intended for non-loopback binds, "
+            "where the unauthenticated panel would otherwise leak PHI."
+        ),
+    )
+    tls_key_file: str = Field(
+        default="",
+        description="PEM private key matching tls_cert_file. Empty = plain HTTP.",
+    )
+
+    @model_validator(mode="after")
+    def _tls_needs_both_files(self) -> WebUIConfig:
+        """Half a TLS pair is a config error — never a silent HTTP downgrade."""
+        if bool(self.tls_cert_file) != bool(self.tls_key_file):
+            raise ValueError(
+                "web_ui.tls_cert_file and web_ui.tls_key_file must be set together"
+            )
+        return self
 
 
 class CredentialEntry(BaseModel):

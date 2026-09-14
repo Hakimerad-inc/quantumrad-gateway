@@ -396,9 +396,18 @@ def _run_web_admin(
     if text_log is not None:
         app.state.text_log_path = str(text_log._path)
     host = config.web_ui.host
-    print(f"  web admin : http://{host}:{port}")
+    tls_kwargs: dict[str, Any] = {}
+    if config.web_ui.tls_cert_file and config.web_ui.tls_key_file:
+        # ADR-0007: TLS is opt-in via config; the panel serves plain HTTP by
+        # default because it binds loopback (single-user) unless configured.
+        tls_kwargs = {
+            "ssl_certfile": config.web_ui.tls_cert_file,
+            "ssl_keyfile": config.web_ui.tls_key_file,
+        }
+    scheme = "https" if tls_kwargs else "http"
+    print(f"  web admin : {scheme}://{host}:{port}")
     try:
-        uvicorn.run(app, host=host, port=port, log_level="info")
+        uvicorn.run(app, host=host, port=port, log_level="info", **tls_kwargs)
     finally:
         health_monitor.stop()
 

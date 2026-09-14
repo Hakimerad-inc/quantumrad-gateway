@@ -72,9 +72,18 @@ on shared machines:
 - **S3** destinations default to HTTPS (`use_https=true`).
 - **DICOMweb** report/forward transports use HTTPS with configurable TLS
   verification.
-- The web admin panel sets security headers on every response: CSP, HSTS,
-  `X-Content-Type-Options`, `X-Frame-Options`, and enforces an origin check
-  for state-changing API calls (CSRF protection).
+- **Web admin panel** (ADR-0007): binds loopback over plain HTTP by default
+  (single-user; the OS user boundary is the auth boundary). For remote
+  administration prefer an SSH tunnel — `ssh -L 8443:127.0.0.1:8080
+  <gateway-host>` then browse to `http://localhost:8443` — so SSH provides
+  transport + authentication. To serve the panel on the network directly, set
+  `web_ui.tls_cert_file` + `web_ui.tls_key_file` (a matched pair — hospital
+  PKI or any operator-managed PEM; half a pair is a config error) *and* enable
+  `web_ui.auth_enabled`.
+- Security headers: CSP, `X-Content-Type-Options: nosniff`, and
+  `X-Frame-Options: DENY` on every response, plus an origin check for
+  state-changing API calls (CSRF). `Strict-Transport-Security` is sent only
+  over TLS (browsers ignore it on plain HTTP — see ADR-0007).
 
 ### Secrets handling
 

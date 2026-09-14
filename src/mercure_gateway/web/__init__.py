@@ -54,10 +54,13 @@ _ALLOWED_ORIGIN_HOSTS = {"127.0.0.1", "localhost"}
 # this); loopback is single-user by definition, so the CSRF origin check is a
 # defense-in-depth layer, not the primary boundary.
 
+# Headers sent on every response regardless of transport. HSTS is NOT here:
+# it is emitted conditionally, only when the request arrived over TLS —
+# browsers ignore it on http://, and claiming it unconditionally over plain
+# HTTP is a documented-control-not-implemented finding (ADR-0007).
 _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
     # The SPA loads its JS/CSS from the same origin only.  React inline
     # ``style`` attributes need 'unsafe-inline' for styles; scripts stay
     # 'self' (no inline scripts, no eval — the Vite build emits external
@@ -73,6 +76,8 @@ _SECURITY_HEADERS = {
         "frame-ancestors 'none'"
     ),
 }
+
+_HSTS_VALUE = "max-age=31536000; includeSubDomains"
 
 
 class _SecurityMiddleware:
@@ -127,6 +132,13 @@ class _SecurityMiddleware:
                 headers = list(message.get("headers", []))
                 for name, value in _SECURITY_HEADERS.items():
                     headers.append((name.lower().encode(), value.encode()))
+                # HSTS only over TLS — browsers ignore it on http://, and
+                # claiming it unconditionally over plain HTTP is the
+                # documented-control-not-implemented finding (ADR-0007).
+                if scope.get("scheme") == "https":
+                    headers.append(
+                        (b"strict-transport-security", _HSTS_VALUE.encode())
+                    )
                 message["headers"] = headers
             await send(message)
 

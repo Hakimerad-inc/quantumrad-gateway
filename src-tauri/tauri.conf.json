@@ -10,17 +10,9 @@
     "frontendDist": "../src/mercure_gateway/web/static"
   },
   "app": {
-    "windows": [
-      {
-        "title": "QuantumRAD Gateway",
-        "width": 1280,
-        "height": 800,
-        "resizable": true,
-        "fullscreen": false
-      }
-    ],
+    "windows": [],
     "security": {
-      "csp": "default-src 'self' http://127.0.0.1:8080; connect-src 'self' http://127.0.0.1:8080; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self' http://127.0.0.1; connect-src 'self' http://127.0.0.1; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

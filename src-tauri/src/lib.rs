@@ -16,7 +16,23 @@ const TRAY_ERROR: u8 = 2;
 
 /// The port the packaged Python sidecar binds (must match
 /// `config.web_ui.port` default and the SPA's `TAURI_API_BASE`).
+/// Overridable via `MERCURE_BACKEND_PORT` so a packaged install can coexist
+/// with a dev instance or another service on 8080 (release-day rehearsal
+/// 2026-09-14 hit exactly this: openpacs holding 8080 blocked the tray demo).
 const BACKEND_PORT: u16 = 8080;
+
+/// Effective backend port: `MERCURE_BACKEND_PORT` when it parses, else 8080.
+fn backend_port() -> u16 {
+    backend_port_from(std::env::var("MERCURE_BACKEND_PORT").ok())
+}
+
+/// Pure half of [`backend_port`] — a bad value (garbage, out of range) falls
+/// back to the default rather than killing the tray.
+fn backend_port_from(raw: Option<String>) -> u16 {
+    raw.and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p > 0)
+        .unwrap_or(BACKEND_PORT)
+}
 
 /// Backend polls must never hang the tray thread: 2 s to connect + read.
 /// `reqwest::blocking` without a timeout can block the poll loop forever on
@@ -24,7 +40,9 @@ const BACKEND_PORT: u16 = 8080;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Decode an embedded PNG into a Tauri Image.
-fn load_icon(bytes: &'static [u8]) -> Result<tauri::image::Image<'static>, Box<dyn std::error::Error>> {
+fn load_icon(
+    bytes: &'static [u8],
+) -> Result<tauri::image::Image<'static>, Box<dyn std::error::Error>> {
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info()?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
@@ -39,21 +57,26 @@ fn load_icon(bytes: &'static [u8]) -> Result<tauri::image::Image<'static>, Box<d
 /// resources and we spawn it by explicit path. First existing candidate wins;
 /// an empty result (or failed spawn) is non-fatal — the app launches without
 /// a backend, exactly like the previous `sidecar()` failure path.
-fn backend_candidates() -> Vec<std::path::PathBuf> {
+fn backend_candidates(product: &str) -> Vec<std::path::PathBuf> {
     let exe_name = if cfg!(windows) {
         "mercure-gateway.exe"
     } else {
         "mercure-gateway"
     };
-    let rel = std::path::Path::new("binaries").join("mercure-gateway").join(exe_name);
+    let rel = std::path::Path::new("binaries")
+        .join("mercure-gateway")
+        .join(exe_name);
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // (a) resource dir == exe dir (Windows NSIS, deb/usr/bin)
+            // (a) resource dir == exe dir (Windows NSIS, dev cargo run)
             candidates.push(dir.join(&rel));
-            // (b) deb layout: /usr/lib/<app>/binaries/... next to /usr/bin exe
+            // (b) deb layout: /usr/lib/<productName>/binaries/... with the
+            // shell at /usr/bin/<name>. The dir under /usr/lib is the
+            // productName, not the binary name — resolved candidates from the
+            // 2026-09-14 tray rehearsal (sidecar was never found without it).
             if let Some(parent) = dir.parent() {
-                candidates.push(parent.join("lib").join(&rel));
+                candidates.push(parent.join("lib").join(product).join(&rel));
                 // (c) AppImage / macOS layout: ../../Resources or ../.. mapping
                 candidates.push(parent.join(&rel));
             }
@@ -62,21 +85,19 @@ fn backend_candidates() -> Vec<std::path::PathBuf> {
     // (d) dev fallback: run from src-tauri (cargo tauri dev) — resources stay
     // in the manifest dir.
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        candidates.push(
-            std::path::PathBuf::from(manifest_dir).join(&rel),
-        );
+        candidates.push(std::path::PathBuf::from(manifest_dir).join(&rel));
     }
     candidates
 }
 
-fn find_backend() -> Option<std::path::PathBuf> {
-    backend_candidates().into_iter().find(|p| p.exists())
+fn find_backend(product: &str) -> Option<std::path::PathBuf> {
+    backend_candidates(product).into_iter().find(|p| p.exists())
 }
 
 /// GET *path* on the backend with the shared timeout. `Ok(None)` = transport
 /// failure (offline / wedged backend) — callers treat it as an unknown value.
 fn backend_get_json(path: &str) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
-    let url = format!("http://127.0.0.1:{BACKEND_PORT}{path}");
+    let url = format!("http://127.0.0.1:{}{path}", backend_port());
     let resp = reqwest::blocking::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .build()?
@@ -155,6 +176,10 @@ struct TrayIcons {
 pub fn run() {
     let state = Arc::new(AtomicU8::new(TRAY_IDLE));
     let state_clone = state.clone();
+    // Injected before the SPA loads so apiUrl() targets the same port the
+    // sidecar was told to bind (MERCURE_BACKEND_PORT override, e.g. to
+    // coexist with another service on 8080).
+    let boot_port = backend_port();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -165,6 +190,25 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(move |app| {
+            // ── Main window ────────────────────────────────────────
+            // Built here (not from tauri.conf.json) so the init script that
+            // publishes __MERCURE_PORT__ to the SPA can be attached — the
+            // builder API exposes initialization_script, the config schema
+            // does not. Mirrors the former config window (1280x800, titled);
+            // hidden here and shown at the end of setup as before.
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("QuantumRAD Gateway")
+            .inner_size(1280.0, 800.0)
+            .resizable(true)
+            .fullscreen(false)
+            .visible(false)
+            .initialization_script(format!("window.__MERCURE_PORT__ = {boot_port};"))
+            .build()?;
+
             // ── Tray icon ──────────────────────────────────────────
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit])?;
@@ -208,20 +252,33 @@ pub fn run() {
             // directory (tauri-apps/tauri#6676), hence the explicit-path
             // spawn. A missing bundle or failed spawn is non-fatal (logged
             // below) — the app launches, just without a backend.
-            match find_backend() {
-                Some(path) => match app.shell().command(path).args(["--web"]).spawn() {
-                    Ok((mut rx, child)) => {
-                        // Keep the child alive for the app's lifetime and drain
-                        // its stdout/stderr so the OS pipes never fill and block
-                        // it. The async task ends when the child exits and the
-                        // channel closes.
-                        tauri::async_runtime::spawn(async move {
-                            let _child = child;
-                            while let Some(_event) = rx.recv().await {}
-                        });
+            let product = app
+                .config()
+                .product_name
+                .clone()
+                .unwrap_or_else(|| "QuantumRAD-Gateway".into());
+            match find_backend(&product) {
+                Some(path) => {
+                    let port_arg = boot_port.to_string();
+                    match app
+                        .shell()
+                        .command(path)
+                        .args(["--web", "--port", &port_arg])
+                        .spawn()
+                    {
+                        Ok((mut rx, child)) => {
+                            // Keep the child alive for the app's lifetime and drain
+                            // its stdout/stderr so the OS pipes never fill and block
+                            // it. The async task ends when the child exits and the
+                            // channel closes.
+                            tauri::async_runtime::spawn(async move {
+                                let _child = child;
+                                while let Some(_event) = rx.recv().await {}
+                            });
+                        }
+                        Err(e) => eprintln!("mercure-gateway backend failed to start: {e}"),
                     }
-                    Err(e) => eprintln!("mercure-gateway backend failed to start: {e}"),
-                },
+                }
                 None => eprintln!(
                     "mercure-gateway backend bundle not found (run scripts/package_backend.py)"
                 ),
@@ -266,15 +323,43 @@ mod tests {
 
     #[test]
     fn backend_candidates_orders_exe_dir_first() {
-        let candidates = backend_candidates();
+        let candidates = backend_candidates("QuantumRAD-Gateway");
         // The exe-dir candidate must always be first when we can resolve one.
         if let Ok(exe) = std::env::current_exe() {
             let dir = exe.parent().unwrap();
             let expected = dir
                 .join("binaries")
                 .join("mercure-gateway")
-                .join(if cfg!(windows) { "mercure-gateway.exe" } else { "mercure-gateway" });
+                .join(if cfg!(windows) {
+                    "mercure-gateway.exe"
+                } else {
+                    "mercure-gateway"
+                });
             assert_eq!(candidates[0], expected);
+        }
+    }
+
+    #[test]
+    fn backend_candidates_deb_layout_uses_product_name() {
+        // Regression proven by the 2026-09-14 tray rehearsal: the deb installs
+        // the shell at /usr/bin/mercure-gateway and the sidecar at
+        // /usr/lib/<productName>/binaries/... — candidate (b) must carry the
+        // productName, not the exe dir name.
+        let candidates = backend_candidates("QuantumRAD-Gateway");
+        let deb = candidates.iter().find(|p| {
+            p.components()
+                .any(|c| c.as_os_str() == "QuantumRAD-Gateway")
+        });
+        assert!(
+            deb.is_some(),
+            "deb-layout candidate missing productName dir"
+        );
+        if let Some(p) = deb {
+            let s = p.display().to_string();
+            assert!(
+                s.contains("lib/QuantumRAD-Gateway/binaries/mercure-gateway"),
+                "{s}"
+            );
         }
     }
 
@@ -282,8 +367,20 @@ mod tests {
     fn find_backend_returns_none_when_bundle_absent() {
         // In the dev/test environment the frozen bundle may legitimately not
         // exist — find_backend must return None rather than a bogus path.
-        let candidates = backend_candidates();
+        let candidates = backend_candidates("QuantumRAD-Gateway");
         let any_real = candidates.iter().any(|p| p.exists());
-        assert_eq!(find_backend().is_some(), any_real);
+        assert_eq!(find_backend("QuantumRAD-Gateway").is_some(), any_real);
+    }
+
+    #[test]
+    fn backend_port_override_parses_and_falls_back() {
+        assert_eq!(backend_port_from(Some("18080".into())), 18080);
+        assert_eq!(backend_port_from(Some(" 8090 ".into())), 8090);
+        // Garbage / out-of-range / zero all fall back to the 8080 default
+        // rather than panicking or binding a dead port.
+        assert_eq!(backend_port_from(Some("http://x".into())), BACKEND_PORT);
+        assert_eq!(backend_port_from(Some("70000".into())), BACKEND_PORT);
+        assert_eq!(backend_port_from(Some("0".into())), BACKEND_PORT);
+        assert_eq!(backend_port_from(None), BACKEND_PORT);
     }
 }

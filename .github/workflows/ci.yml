@@ -124,9 +124,12 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      # Playwright comes from the runner machine install (root node_modules is
-      # a dev-box convention) — install it explicitly in CI.
-      - run: npm install --no-save playwright
+      # The repo has no root package.json (the SPA lives in web/); dev boxes
+      # resolve @playwright/test from a parent-dir install, CI must not.
+      # @playwright/test is what playwright.config.ts + e2e specs import —
+      # the bare `playwright` package leaves them dangling (CI run
+      # 34893336322: "Cannot find module '@playwright/test'").
+      - run: npm install --no-save @playwright/test
       - run: npx playwright install --with-deps chromium
       # Seed the isolated gateway (temp spool, ports 18299/18113) and export
       # the KEY=value lines for the Playwright global setup.
@@ -233,11 +236,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libwebkit2gtk-4.1-dev \
-            libappindicator3-dev librsvg2-dev patchelf libssl-dev
+            libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev
       - run: npm ci
         working-directory: web
       - run: npm run build
         working-directory: web
+      - name: Freeze backend (PyInstaller onedir sidecar)
+        run: uv run python scripts/package_backend.py
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
       - name: Build Tauri app (Linux AppImage + deb)

@@ -60,7 +60,10 @@ K-gates in §1/refinement §10.
 - S10 boot-mode legs (S01-T8, S09-T9 boot rows, S10-T2/T3/T10/T11) — physical USB hardware
 - Hub `/anchor` signing endpoint is documented (`docs/dev/hub-anchor-api.md`) but not implemented hub-side — **gateway side now proven end-to-end against a contract stub** (`test-rig/bookkeeper/`, `tests/test_hub_bookkeeper_interop.py`); live hub interop remains with the hub team (S01-T5/Q7)
 - Packaged-sidecar resource-path validation happens only in clean-VM UAT (§3)
-- PRD §11 external security review — not yet booked (v1.0 blocker; all T3 prep gates green)
+- PRD §11 external security review — **booking package prepared 2026-09-14**
+  (`docs/qa/security-review-package.md` — scope, control/evidence table, declared
+  gaps, reviewer quick-start); booking itself = open human step, suggested to
+  start after Phase A (remote + CI green). Findings triage gates GA (E2).
 
 ## 6. Blocked-by-environment register (what a Windows-VM + GitHub-enabled box must finish)
 

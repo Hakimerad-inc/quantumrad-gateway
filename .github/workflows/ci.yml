@@ -49,7 +49,7 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          crate-path: src-tauri
+          working-directory: src-tauri
 
   test:
     strategy:

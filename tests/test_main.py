@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from mercure_gateway.config import (
     DICOMDestination,
     DICOMTLSDestination,
@@ -63,6 +65,10 @@ def write_config(path: Path, cfg: GatewayConfig) -> None:
     save_config(cfg, path)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="send_signal(SIGINT) is POSIX; Windows shutdown covered by the clean-VM UAT",
+)
 def test_main_receives_study_graceful_shutdown(tmp_path: Path) -> None:
     """main() starts the receiver, accepts a study, and exits 0 on SIGINT."""
     receiver_port = free_port()
@@ -125,6 +131,10 @@ def test_main_receives_study_graceful_shutdown(tmp_path: Path) -> None:
 # ── Integration: end-to-end boot with two destinations (review suggested work) ──
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="send_signal(SIGINT) is POSIX; Windows shutdown covered by the clean-VM UAT",
+)
 def test_main_end_to_end_two_destinations(tmp_path: Path) -> None:
     """main() boots with two destinations; a received study gets routes for both."""
     receiver_port = free_port()

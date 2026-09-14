@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 from pydantic import ValidationError
 
@@ -328,6 +330,7 @@ def test_detect_usb_mode_delegates(monkeypatch) -> None:
     assert detect_usb_mode("/home/local/spool") is False
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux _linux_mounts dispatch path")
 def test_is_removable_volume_linux_removable_device(monkeypatch) -> None:
     """A path on a removable block device resolves to True."""
     monkeypatch.setattr(
@@ -338,6 +341,7 @@ def test_is_removable_volume_linux_removable_device(monkeypatch) -> None:
     assert is_removable_volume("/mnt/usb/spool") is True
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux _linux_mounts dispatch path")
 def test_is_removable_volume_linux_uses_deepest_mount(monkeypatch) -> None:
     """A nested USB mount under a non-removable parent is found by longest
     mount-point matching."""

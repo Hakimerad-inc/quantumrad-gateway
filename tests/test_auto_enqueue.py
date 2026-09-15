@@ -116,6 +116,38 @@ def test_multi_instance_enqueued_after_last_instance(
     assert row["num_series"] == 1
 
 
+# ── 2b. distinct studies arriving within one delay window all enqueue ──
+#
+# E1 dry-run found the shipped behavior: one Spool-wide timer that each store
+# replaced, so study N's arrival cancelled study N-1's pending auto-enqueue —
+# a burst of small studies (stat batch from a modality) left all but the last
+# stranded in RECEIVED forever, routes and all. Debounce must be per-study:
+# re-arming study X replaces *X's* timer only, never a different study's.
+
+
+def test_burst_of_distinct_studies_all_auto_enqueue(tmp_path: Path, hub: DICOMDestination) -> None:
+    spool = auto_spool(tmp_path, [hub], delay=1.0)
+    ids = [
+        spool.store_instance(make_dataset(f"1.2.3.2{i[-1]}", f"1.2.3.2{i}.1", f"1.2.3.2{i}.1.1"))
+        for i in ("11", "12", "13")
+    ]  # 3 stores, comfortably inside one 1 s delay window
+
+    assert wait_until(lambda: all(spool.state(i) == StudyState.QUEUED for i in ids), timeout=6.0)
+    for study_id in ids:
+        assert [r["target_name"] for r in spool._db.get_routes(study_id)] == ["hub"]
+
+
+def test_stop_cancels_all_pending_timers(tmp_path: Path, hub: DICOMDestination) -> None:
+    spool = auto_spool(tmp_path, [hub], delay=1.0)
+    ids = [
+        spool.store_instance(make_dataset(f"1.2.3.9{x}", f"1.2.3.9{x}.1", f"1.2.3.9{x}.1.1"))
+        for x in (11, 12)
+    ]
+    spool.stop()
+    time.sleep(1.4)  # past the delay: cancelled timers must not fire
+    assert all(spool.state(i) == StudyState.RECEIVED for i in ids)
+
+
 # ── 3. no destinations configured → stays RECEIVED ────────────────────
 
 

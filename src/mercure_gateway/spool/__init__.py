@@ -131,9 +131,12 @@ class Spool:
             self._spool_dir = Path(config.storage.spool_dir)
         else:
             self._spool_dir = Path("spool")
-        # Auto-enqueue scheduler (US-03): one pending timer per study, armed
+        # Auto-enqueue scheduler (US-03): one pending timer *per study*, armed
         # on each store_instance and fired after the configured idle delay.
-        self._enqueue_timer: threading.Timer | None = None
+        # NB: this was a single Spool-wide timer slot — a second study's
+        # arrival cancelled the first study's pending enqueue, stranding all
+        # but the last study of a burst in RECEIVED (E1 dry-run, 2026-09-15).
+        self._enqueue_timers: dict[int, threading.Timer] = {}
         self._timer_lock = threading.Lock()
 
     @property
@@ -239,11 +242,12 @@ class Spool:
         return self._db
 
     def stop(self) -> None:
-        """Cancel any pending auto-enqueue timer (composition-root shutdown)."""
+        """Cancel all pending auto-enqueue timers (composition-root shutdown)."""
         with self._timer_lock:
-            if self._enqueue_timer is not None:
-                self._enqueue_timer.cancel()
-                self._enqueue_timer = None
+            timers = list(self._enqueue_timers.values())
+            self._enqueue_timers.clear()
+        for timer in timers:
+            timer.cancel()
 
     # --- storage layout ---------------------------------------------------
 
@@ -440,12 +444,13 @@ class Spool:
     def _arm_auto_enqueue(self, study_id: int) -> None:
         """(Re)arm the auto-enqueue timer for the study just stored.
 
-        One timer per Spool: each arriving instance *replaces* the pending
-        timer, so a multi-instance study is only enqueued once the receiver
-        has been idle for ``receiver.auto_enqueue_delay_sec`` — modalities
-        never signal end-of-study, so idle-time is the completion heuristic
-        (S02-T5 note). A single-threaded receiver means at most one study is
-        mid-receive at a time, which is what this debounce covers.
+        One timer *per study*: each arriving instance replaces only that
+        study's pending timer, so a multi-instance study is enqueued once
+        the receiver has been idle on *it* for
+        ``receiver.auto_enqueue_delay_sec`` — modalities never signal
+        end-of-study, so per-study idle-time is the completion heuristic
+        (S02-T5 note). Studies arriving interleaved each get their own
+        countdown; one never cancels another (E1 dry-run regression).
         """
         if self._config is None:
             return
@@ -455,16 +460,18 @@ class Spool:
             self._auto_enqueue(study_id)
             return
         with self._timer_lock:
-            if self._enqueue_timer is not None:
-                self._enqueue_timer.cancel()
-            self._enqueue_timer = threading.Timer(delay, self._auto_enqueue, (study_id,))
-            self._enqueue_timer.daemon = True
-            self._enqueue_timer.start()
+            stale = self._enqueue_timers.pop(study_id, None)
+            if stale is not None:
+                stale.cancel()
+            timer = threading.Timer(delay, self._auto_enqueue, (study_id,))
+            timer.daemon = True
+            self._enqueue_timers[study_id] = timer
+            timer.start()
 
     def _auto_enqueue(self, study_id: int) -> None:
         """Timer callback: enqueue the study unless it is past RECEIVED."""
         with self._timer_lock:
-            self._enqueue_timer = None
+            self._enqueue_timers.pop(study_id, None)
         try:
             row = self._db.get_study(study_id)
             if row is None or row["state"] != StudyState.RECEIVED.value:

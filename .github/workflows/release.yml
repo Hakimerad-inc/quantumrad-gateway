@@ -23,10 +23,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Windows: NSIS only. `targets: "all"` would also emit MSI, and the
+          # MSI version field rejects semver pre-release identifiers
+          # ("1.1.0-rc1" → bundle error, first release run 34902860370). NSIS
+          # is what the Tauri updater installs on Windows anyway.
+          # Linux: deb + AppImage, mirroring ci.yml package-linux (rpm is not
+          # a supported target and would need extra tooling).
           - os: windows-latest
             target: windows-x86_64
+            bundles: nsis
           - os: ubuntu-latest
             target: linux-x86_64
+            bundles: deb,appimage
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -46,6 +54,12 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+      - name: Install Linux system deps
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev
       - name: Freeze backend (PyInstaller onedir sidecar)
         run: uv run python scripts/package_backend.py
       - name: Install Tauri CLI
@@ -66,7 +80,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.MERCURE_TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.MERCURE_TAURI_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri build --config tauri.release.conf.json
+        run: cargo tauri build --bundles ${{ matrix.bundles }} --config tauri.release.conf.json
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -122,11 +136,23 @@ jobs:
               + "/releases/latest/download"
           )
           platforms = {}
+          candidates = {"windows-x86_64": None, "linux-x86_64": None}
           for sig_path in glob.glob("dist/**/*.sig", recursive=True):
               artifact = sig_path[:-4]
               name = os.path.basename(artifact)
-              key = "windows-x86_64" if name.endswith((".exe", ".msi")) else "linux-x86_64"
-              platforms[key] = {"signature": open(sig_path).read(), "url": f"{base}/{name}"}
+              if name.endswith((".exe", ".msi")):
+                  key, prio = "windows-x86_64", 0 if name.endswith(".exe") else 1
+              else:
+                  # Updater manifests hold ONE artifact per platform: prefer
+                  # the AppImage (what the Tauri updater swaps on Linux) over
+                  # the deb; the deb is still uploaded as an installer asset.
+                  key, prio = "linux-x86_64", 0 if name.endswith(".AppImage") else 1
+              if candidates[key] is None or prio < candidates[key][0]:
+                  candidates[key] = (prio, name, sig_path)
+          for key, cand in candidates.items():
+              if cand:
+                  _, name, sig_path = cand
+                  platforms[key] = {"signature": open(sig_path).read(), "url": f"{base}/{name}"}
           if not platforms:
               raise SystemExit("no .sig sidecars found under dist/ — check createUpdaterArtifacts")
           # The Tauri updater client rejects manifests with an empty pub_date;

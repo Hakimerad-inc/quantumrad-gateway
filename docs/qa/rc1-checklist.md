@@ -73,5 +73,5 @@ K-gates in §1/refinement §10.
 | GH release + `.sig` + merged `latest.json` execution | ~~repo has no remote yet~~ **remote live**; first run 34902860370 failed → fixed `e785adc`, re-dispatched | runbook §0.2–§2 |
 | §3 Windows 10/11 UAT legs, tray/spawn, service mode | Windows hardware | clean VM, `uat-06.md` |
 | K9 boot timings + USB flash e2e | physical stick + PC boot matrix | S10 rig, `usb-uat-10.md` |
-| loop-device partition e2e (root-only test written) | no root/loop perms (non-root `losetup` EPERM) | any root Linux box — `test_usb_partition.py::test_layout_on_real_loop_device` |
+| loop-device partition e2e (root-only test written) | ~~no root/loop perms~~ **DONE 2026-09-15** (root loop run): uncovered and fixed three shipped-bug classes — sfdisk GPT script syntax (comma-triplet rejected; now key=value + GUIDs + `G` suffix), exFAT label length (>11 chars hard-failed `mkfs.exfat`), and the root-detection gate (`hasattr(Path, "access")` was always False → test could never run anywhere). `test_layout_on_real_loop_device` green under sudo: flash completes, ext4+NTFS+exFAT verified via blkid, data skeleton written | any root Linux box — `test_usb_partition.py::test_layout_on_real_loop_device` |
 | CI matrix green record (pip-audit/npm/rustsec via Actions) | ~~no Actions without remote~~ **DONE**: main run 34901586844 all-jobs green 2026-09-14 | — |

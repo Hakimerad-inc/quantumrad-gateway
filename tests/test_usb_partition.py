@@ -65,9 +65,13 @@ def test_sfdisk_script_shape() -> None:
     script = usb_layout.sfdisk_script(plan)
     lines = script.splitlines()
     assert lines[0] == "label: gpt"
-    assert lines[1] == ",4G,8300,LinuxBoot"
-    assert lines[2] == ",8G,0700,WindowsLaunch"
-    assert lines[3] == ",20G,0700,SharedData"
+    # GPT needs the sfdisk key=value form with full type GUIDs and an explicit
+    # unit suffix — the old comma-triplet form (",4G,8300,LinuxBoot") is
+    # rejected as "unsupported command", and bare numbers mean sectors, not
+    # bytes (root loop-device e2e, 2026-09-15).
+    assert lines[1] == "size=4G, type=0FC63DAF-8483-477B-8E3F-431B0C1E2B01, name=LinuxBoot"
+    assert lines[2] == "size=8G, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=WindowsLaunch"
+    assert lines[3] == "size=20G, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=SharedData"
 
 
 # ── partition device-node naming (kernel convention) ───────────────────────
@@ -96,7 +100,9 @@ def test_cli_sfdisk_script() -> None:
         text=True,
         check=True,
     )
-    assert out.stdout.startswith("label: gpt\n,4G,8300,LinuxBoot")
+    assert out.stdout.startswith(
+        "label: gpt\nsize=4G, type=0FC63DAF-8483-477B-8E3F-431B0C1E2B01, name=LinuxBoot"
+    )
 
 
 def test_cli_rejects_small_disk() -> None:
@@ -182,16 +188,25 @@ def test_flash_bash_syntax() -> None:
 
 
 # ── optional: privileged end-to-end on a loop device (root rigs only) ──────
-
-_HAS_ROOT = hasattr(Path("/dev/loop-control"), "access") and subprocess.run(
-    ["bash", "-c", "losetup -f >/dev/null 2>&1"], capture_output=True
-).returncode == 0
+#
+# The gate must actually open on a root box — the original probe tested
+# ``hasattr(Path(...), "access")``, but ``Path`` has no ``access`` attribute in
+# any Python, so it was permanently False and this test skipped *everywhere*
+# (caught running §6's "any root Linux box" leg with sudo: still skipped).
+# Real capability check: POSIX + euid 0 + losetup usable.
+_HAS_ROOT = os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0 and (
+    subprocess.run(
+        ["bash", "-c", "losetup -f >/dev/null 2>&1"], capture_output=True
+    ).returncode
+    == 0
+)
 
 
 @pytest.mark.skipif(not _HAS_ROOT, reason="loop-device validation requires root")
 def test_layout_on_real_loop_device(tmp_path: Path) -> None:  # pragma: no cover
     img = tmp_path / "stick.img"
-    img.truncate(34 * GB)  # >32GB to clear the size gate with partition-table slack
+    with img.open("wb") as fh:  # sparse: no blocks written until the layout lands
+        fh.truncate(34 * GB)  # >32GB to clear the size gate with partition-table slack
     loop = subprocess.run(
         ["losetup", "-f", "--show", str(img)], capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -202,13 +217,24 @@ def test_layout_on_real_loop_device(tmp_path: Path) -> None:  # pragma: no cover
         for part in parts:
             assert Path(part).exists(), f"{part} not created by flash_usb.sh"
         # Filesystem types as planned (blkid authoritative).
+        # NB: `blkid -o json` with several devices emits *concatenated*
+        # pretty-printed objects (one per device, lowercase keys) — not a
+        # JSON array and not one-line NDJSON (util-linux 2.41, root loop run).
         probes = subprocess.run(
             ["blkid", "-o", "json"] + parts, capture_output=True, text=True, check=True
         ).stdout
-        data = json.loads(probes)
-        entries = data["blockdevices"] if isinstance(data, dict) else data
-        types = sorted(e.get("TYPE") or "" for e in entries)
-        assert types == ["ext4", "exfat", "ntfs"]
+        dec = json.JSONDecoder()
+        entries: list[dict[str, str]] = []
+        idx = 0
+        while idx < len(probes):
+            while idx < len(probes) and probes[idx].isspace():
+                idx += 1
+            if idx >= len(probes):
+                break
+            obj, idx = dec.raw_decode(probes, idx)
+            entries.append(obj)
+        types = sorted((e.get("type") or "").lower() for e in entries)
+        assert types == ["exfat", "ext4", "ntfs"]  # alphabetical: exfat < ext4
     finally:
         subprocess.run(["losetup", "-d", loop], check=False)
         img.unlink(missing_ok=True)

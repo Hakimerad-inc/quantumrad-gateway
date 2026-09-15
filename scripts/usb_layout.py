@@ -32,11 +32,14 @@ P1_BYTES = 4 * GB
 P2_BYTES = 8 * GB
 MIN_P3_BYTES = 1 * GB  # anything smaller is a mis-sized stick, not a layout
 
-# GPT type codes: Linux filesystem (generic — boot loader installs separately)
+# GPT type UUIDs: Linux filesystem (generic — boot loader installs separately)
 # and basic data (used for both the NTFS and exFAT partitions; the codes are
-# hints, mkfs is authoritative).
-_TYPE_LINUX = "8300"
-_TYPE_DATA = "0700"
+# hints, mkfs is authoritative). sfdisk(8) with a GPT label only accepts the
+# key=value script form with full GUIDs — the MBR-style comma triplets
+# (",4G,8300,Name") are rejected ("line 2: unsupported command"; caught by
+# the root loop-device e2e, tests/test_usb_partition.py).
+_TYPE_LINUX = "0FC63DAF-8483-477B-8E3F-431B0C1E2B01"  # Linux filesystem
+_TYPE_DATA = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"  # Microsoft basic data
 
 
 class LayoutError(ValueError):
@@ -79,13 +82,18 @@ def plan_layout(size_bytes: int) -> PartitionPlan:
 
 
 def sfdisk_script(plan: PartitionPlan) -> str:
-    """sfdisk(8) script form (one partition per line; empty start = auto)."""
-    p3_gb = plan.p3_bytes // GB
+    """sfdisk(8) GPT script (one partition per line; empty start = auto).
+
+    Key=value form with full type GUIDs — the only thing sfdisk accepts for
+    GPT labels (see ``_TYPE_LINUX`` note). Sizes carry an explicit ``G``
+    suffix: a bare number means *sectors* (root loop e2e, 2026-09-15), and
+    sfdisk's binary G equals this module's ``GB`` (1024³).
+    """
     return (
         "label: gpt\n"
-        f",{plan.p1_bytes // GB}G,{_TYPE_LINUX},LinuxBoot\n"
-        f",{plan.p2_bytes // GB}G,{_TYPE_DATA},WindowsLaunch\n"
-        f",{p3_gb}G,{_TYPE_DATA},SharedData\n"
+        f"size={plan.p1_bytes // GB}G, type={_TYPE_LINUX}, name=LinuxBoot\n"
+        f"size={plan.p2_bytes // GB}G, type={_TYPE_DATA}, name=WindowsLaunch\n"
+        f"size={plan.p3_bytes // GB}G, type={_TYPE_DATA}, name=SharedData\n"
     )
 
 

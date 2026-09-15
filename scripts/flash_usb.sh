@@ -113,7 +113,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 else
   run wipefs -a "$DEVICE"
   log "partitioning $DEVICE"
-  python3 "$LAYOUT_PY" --sfdisk-script "$SIZE_BYTES" | sfdisk -q "$DEVICE"
+  python3 "$LAYOUT_PY" --sfdisk-script "$PLAN_BYTES" | sfdisk -q "$DEVICE"
   partprobe "$DEVICE" 2>/dev/null || true
   udevadm settle 2>/dev/null || true
 fi
@@ -123,9 +123,11 @@ fi
 mapfile -t PARTS < <(python3 "$LAYOUT_PY" --partition-paths "$DEVICE")
 P1="${PARTS[0]}"; P2="${PARTS[1]}"; P3="${PARTS[2]}"
 
-run mkfs.ext4 -q -L MERCURE_BOOT "$P1"
-run mkfs.ntfs -f -L MERCURE_WIN  "$P2"   # -f: fast format (full-zero on 8G is slow)
-run mkfs.exfat -n MERCURE_DATA   "$P3"
+# Labels ≤11 chars: the exFAT spec caps volume labels there, and exfatprogs
+# hard-fails beyond it ("input string is too long" — root loop e2e 2026-09-15).
+run mkfs.ext4 -q -L MERCUREBOOT "$P1"
+run mkfs.ntfs -f -L MERCUREWIN  "$P2"   # -f: fast format (full-zero on 8G is slow)
+run mkfs.exfat -n MERCUREDATA   "$P3"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   log "dry-run complete — no device was written"

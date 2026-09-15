@@ -12,26 +12,26 @@ K-gates in §1/refinement §10.
 
 | Gate | Target | Measured | ☐ |
 |------|--------|----------|---|
-| pytest | all green | 668 passed / 4 skipped, 0 failed — clean single run 2026-09-14 (dev box, `901c390`); CI matrix pending | ☒ local |
+| pytest | all green | 712 passed, 0 failed — CI matrix green on main (run 34901586844, ubuntu + windows) | ☒ CI |
 | coverage | ≥ 80% | **85%** (`coverage report`, src/mercure_gateway, 2026-09-14) | ☒ |
 | ruff / mypy strict | clean | ruff: all checks passed · mypy strict: 0 issues / 52 files | ☒ |
 | frontend (tsc / eslint / vitest) | clean, all pass | tsc 0 · eslint 0 · vitest **14 tests / 4 files** (jsdom suite replaced by Playwright e2e in `15ade80`) | ☒ |
 | e2e (Playwright, real gateway) | green | **25/25 passed locally 2026-09-14** (seeded source-run gateway, ports 18299/18113); fixed a cross-spec order dependency in `pipeline.spec.ts` reports test | ☒ |
 | Rust (cargo check / clippy / test) | clean | check ✅ · clippy -D warnings ✅ · test ✅ **4 unit tests** (`backend_port` override/fallback + candidate ordering + deb-layout regression — re-added with the tray fixes, 2026-09-14); earlier "0 tests" row was stale | ☒ |
-| pip-audit | no critical vulns | CI `dependency-audit` job (now also `npm audit --omit=dev` — **0 prod vulns** locally 2026-09-14 — and rustsec) | ☐ CI |
-| perf gates (K3/K8, §5.6) | within budget | **forwarding begin 226 ms / 2000 ms; throughput 380.5 items/s / ≥5** (`check_perf_gates.py`, 2026-09-14) | ☒ |
-| K6 size (shell + backend bundle) | ≤ 250 MB | _needs package-windows run (Windows blocked — see §6)_ | ☐ |
-| deb size | ≤ 500 MB | **69.6 MB** locally signed build 2026-09-14 (`scripts/rehearse_signed_build.sh`) | ☒ |
-| frozen-backend smoke | health 200 | **Linux ✅ 2026-09-14**: PyInstaller onedir sidecar serves `{"status":"ok","version":"1.1.0-rc1"}`; Windows leg = CI | ☒ local |
+| pip-audit | no critical vulns | CI `dependency-audit` job **green on main** (run 34901586844, 2026-09-14): pip-audit + `npm audit --omit=dev` + rustsec (`cargo audit`, src-tauri) | ☒ CI |
+| perf gates (K3/K8, §5.6) | within budget | **forwarding begin 226 ms / 2000 ms; throughput 380.5 items/s / ≥5** (`check_perf_gates.py`, 2026-09-14); CI `performance gates` job green | ☒ |
+| K6 size (shell + backend bundle) | ≤ 250 MB | **CI `package-windows` job: `check_installer_size.py` exe + onedir bundle under 250 MB** (run 34901586844) | ☒ CI |
+| deb size | ≤ 500 MB | **69.6 MB** locally signed build 2026-09-14 (`scripts/rehearse_signed_build.sh`); CI `package-linux` gate green | ☒ |
+| frozen-backend smoke | health 200 | **Linux ✅ 2026-09-14**: PyInstaller onedir sidecar serves `{"status":"ok","version":"1.1.0-rc1"}`; **Windows ✅ CI**: `package-windows` pwsh health check green (run 34901586844) | ☒ |
 | chaos suite (K1/K2) | green | `tests/chaos/` green within the 668 | ☒ |
 | security gates | green | `tests/test_security_gates.py`, `tests/test_web_security.py` green within the 668 | ☒ |
 
 ## 2. Version & artifacts
 
 - [x] `uv run python scripts/sync_version.py --check` passes (all five sources at `1.1.0-rc1`) — 2026-09-14
-- [ ] Release commit tagged `v1.1.0-rc1`; `.github/workflows/release.yml` produces artifacts — **pipeline defects fixed** (`eb3f793`: createUpdaterArtifacts, gh-release-create, merged latest.json, pub_date) and **proven locally**: signed deb + `.sig` + `latest.json` assembly pass (`scripts/rehearse_signed_build.sh`, 2026-09-14); execution needs a GitHub remote (see `docs/dev/release-runbook.md` §0.2)
+- [ ] Release commit tagged `v1.1.0-rc1`; `.github/workflows/release.yml` produces artifacts — tag pushed & GPG-signed 2026-09-14; **first release run 34902860370 failed in the sign step** (Linux missing apt deps; Windows MSI rejecting the `-rc1` prerelease id; manifest could clobber `linux-x86_64`) — all fixed in `e785adc`, re-dispatched after merge; pipeline defects fixed (`eb3f793`: createUpdaterArtifacts, gh-release-create, merged latest.json, pub_date) and proven locally (`scripts/rehearse_signed_build.sh`)
 - [x] `.sig` sidecar emission works with the real release key — `QuantumRAD-Gateway_1.1.0-rc1_amd64.deb.sig` produced locally (minisign, tauri-cli 2.11.4)
-- [ ] Updater pubkey (`MERCURE_TAURI_PUBLIC_KEY`) is the real release key, not the dev placeholder — keypair generated locally (custody record in `docs/dev/release-runbook.md` §0.1); rehearsal injected the real pubkey via overlay exactly as CI will; secret upload pending
+- [ ] Updater pubkey (`MERCURE_TAURI_PUBLIC_KEY`) is the real release key, not the dev placeholder — secrets `MERCURE_TAURI_PRIVATE_KEY` / `..._PASSWORD` / `..._PUBLIC_KEY` set in the org repo 2026-09-14; private key file SHA-256 matches the runbook §0.1 custody record; the pubkey embedded in the overlay *and* the private key + password are all exercised for the first time by the re-dispatched release run — final check = produced `.sig`s verify against the §0.1 public key (runbook §3)
 
 ## 3. Clean-VM UAT (the human step — PRD §9 Phase 1 exit criterion)
 
@@ -40,7 +40,7 @@ K-gates in §1/refinement §10.
 - [ ] Ubuntu (supported LTS): deb + AppImage boot and forward — **dpkg-level ✅ 2026-09-14**: deb installs clean in a `ubuntu:24.04` Docker container (all deps resolve, `quantum-rad-gateway 1.1.0-rc1` reaches `ii` state, `/usr/bin/mercure-gateway` + bundled sidecar resolve, sidecar prints 1.1.0-rc1); GUI boot + tray forward leg still needs a desktop session
 - [x] Packaged sidecar spawn verified (tray state transitions idle→sending→error; the one gap CI cannot drive headless) — **2026-09-14 on this box's GNOME session**, deb extracted and run as a normal user with `MERCURE_BACKEND_PORT=18080` (8080 held by another service): sidecar spawned from the fixed deb-layout candidate path, health `1.1.0-rc1`, tray glyph live idle→sending→idle→error (backend killed → poller mapped transport failure), C-STORE of 3 synthetic studies accepted on 11112 and all routed `complete` to Orthanc on first attempt. Found and fixed two product bugs: sidecar path candidate used the binary name instead of productName, and CSP/window plumbing for a non-default port. Visual glyph confirmation (tray icon rendering distinct per state on the real panel) pending user's eyes — appindicator was live in the session.
 - [ ] Windows service mode: install/start/stop/uninstall from the admin panel (S07-T9)
-- [ ] Auto-update: point a test install at a staging `latest.json`, verify signature enforcement rejects a tampered artifact — local rehearseal recipe: runbook §3 (updater `update_url` is config-overridable)
+- [ ] Auto-update: point a test install at a staging `latest.json`, verify signature enforcement rejects a tampered artifact — **headless/Python half ✅ 2026-09-14** (`scripts/rehearse_updater_tamper.py`: real signed deb served over loopback HTTP; genuine signature staged, bit-flipped signature refused with nothing staged). Tauri in-app half needs the desktop shell on a real install (§3)
 
 ## 4. K-gate evidence table
 
@@ -69,9 +69,9 @@ K-gates in §1/refinement §10.
 
 | Item | Why blocked here | Where to do it |
 |---|---|---|
-| Windows installer artifact + K6 size row | no Windows OS here | GH Actions `package-windows` / clean VM |
-| GH release + `.sig` + merged `latest.json` execution | repo has no remote yet | runbook §0.2–§2 |
+| Windows installer artifact + K6 size row | ~~no Windows OS here~~ **unblocked**: CI K6 gate green (run 34901586844); release artifact awaits re-dispatched run | GH Actions `release.yml` (in progress) / clean VM |
+| GH release + `.sig` + merged `latest.json` execution | ~~repo has no remote yet~~ **remote live**; first run 34902860370 failed → fixed `e785adc`, re-dispatched | runbook §0.2–§2 |
 | §3 Windows 10/11 UAT legs, tray/spawn, service mode | Windows hardware | clean VM, `uat-06.md` |
 | K9 boot timings + USB flash e2e | physical stick + PC boot matrix | S10 rig, `usb-uat-10.md` |
 | loop-device partition e2e (root-only test written) | no root/loop perms (non-root `losetup` EPERM) | any root Linux box — `test_usb_partition.py::test_layout_on_real_loop_device` |
-| CI matrix green record (pip-audit/npm/rustsec via Actions) | no Actions without remote | first CI run after push |
+| CI matrix green record (pip-audit/npm/rustsec via Actions) | ~~no Actions without remote~~ **DONE**: main run 34901586844 all-jobs green 2026-09-14 | — |

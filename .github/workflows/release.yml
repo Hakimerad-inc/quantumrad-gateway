@@ -4,6 +4,14 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Release tag to publish (e.g. v1.1.0-rc1). Dispatch from main to run
+          the CURRENT pipeline against an already-pushed tag — tags stay
+          immutable; this is how a failed release leg is re-dispatched.
+        required: false
+        default: ""
 
 # Stage 1 (build): the desktop bundles for both OSes, signed with the release
 # Ed25519 key (ADR-0006). Stage 2 (release): merges the per-platform updater
@@ -37,6 +45,11 @@ jobs:
             bundles: deb,appimage
     steps:
       - uses: actions/checkout@v4
+        with:
+          # tag-push: GITHUB_REF_NAME is the tag. workflow_dispatch with the
+          # tag input: check the (immutable) tag's commit so built sources match
+          # the published version — the *pipeline* is this (fixed) branch.
+          ref: ${{ inputs.tag || github.ref_name }}
       - name: Install uv
         uses: astral-sh/setup-uv@v10.1.0
         with:
@@ -124,11 +137,13 @@ jobs:
       # independent operator-configured advisory check for headless deployments.
       - name: Assemble updater manifest
         shell: bash
+        env:
+          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
         run: |
           python3 - <<'PY'
           import json, glob, os
           from datetime import datetime, timezone
-          version = os.environ.get("GITHUB_REF_NAME", "0.0.0").lstrip("v")
+          version = os.environ["RELEASE_REF"].lstrip("v")
           base = (
               os.environ.get("GITHUB_SERVER_URL", "https://github.com")
               + "/"
@@ -173,10 +188,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --generate-notes \
-            || echo "release $GITHUB_REF_NAME already exists — reusing"
-          gh release upload "$GITHUB_REF_NAME" --clobber \
+          gh release create "$RELEASE_REF" --generate-notes \
+            || echo "release $RELEASE_REF already exists — reusing"
+          gh release upload "$RELEASE_REF" --clobber \
             $(find dist -type f ! -name '*.sig') \
             $(find dist -type f -name '*.sig') \
             latest.json

@@ -16,6 +16,8 @@ Endpoints tested (§7):
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 # Shared fakes from conftest.py
@@ -30,6 +32,7 @@ from mercure_gateway.web import create_app
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def spool() -> Spool:
@@ -71,6 +74,7 @@ def client(app) -> TestClient:
 # ══════════════════════════════════════════════════════════════════════
 # System endpoints  (§7.5)
 # ══════════════════════════════════════════════════════════════════════
+
 
 def test_system_status(client: TestClient) -> None:
     r = client.get("/api/system/status")
@@ -121,6 +125,7 @@ def test_system_start_stop(client: TestClient, app) -> None:
 # ══════════════════════════════════════════════════════════════════════
 # Queue / Studies endpoints  (§7.2)
 # ══════════════════════════════════════════════════════════════════════
+
 
 def test_queue_stats_empty(client: TestClient) -> None:
     r = client.get("/api/queue/stats")
@@ -308,6 +313,7 @@ def test_enqueue_not_found(client: TestClient) -> None:
 # Config endpoints  (§7.1)
 # ══════════════════════════════════════════════════════════════════════
 
+
 def test_get_config(client: TestClient) -> None:
     r = client.get("/api/config")
     assert r.status_code == 200
@@ -480,6 +486,7 @@ def test_login_missing_password_rejected(client: TestClient) -> None:
 # Reports endpoints  (§7.3)
 # ══════════════════════════════════════════════════════════════════════
 
+
 def test_list_reports_empty(client: TestClient) -> None:
     r = client.get("/api/reports")
     assert r.status_code == 200
@@ -526,6 +533,7 @@ def test_refresh_report(client: TestClient, spool: Spool) -> None:
     r = client.post(f"/api/reports/{report_id}/refresh")
     assert r.status_code == 503  # no retriever wired in this fixture
 
+
 def test_refresh_report_with_retriever(app_with_retriever, spool: Spool) -> None:
     client = TestClient(app_with_retriever)
     study_id = spool.receive("1.1.1")
@@ -559,6 +567,7 @@ def test_get_report_content_not_found(client: TestClient) -> None:
 # Audit endpoints  (§7.4)
 # ══════════════════════════════════════════════════════════════════════
 
+
 def test_list_audit_empty(client: TestClient) -> None:
     r = client.get("/api/audit")
     assert r.status_code == 200
@@ -567,6 +576,7 @@ def test_list_audit_empty(client: TestClient) -> None:
 
 def test_list_audit_with_events(client: TestClient, spool: Spool) -> None:
     from mercure_gateway.audit import AuditLog
+
     audit = AuditLog(spool._db)
     audit.append("TEST_EVENT", {"key": "value"})
     audit.append("ANOTHER_EVENT")
@@ -579,6 +589,7 @@ def test_list_audit_with_events(client: TestClient, spool: Spool) -> None:
 
 def test_list_audit_filter_by_event(client: TestClient, spool: Spool) -> None:
     from mercure_gateway.audit import AuditLog
+
     audit = AuditLog(spool._db)
     audit.append("EVENT_A")
     audit.append("EVENT_B")
@@ -590,6 +601,7 @@ def test_list_audit_filter_by_event(client: TestClient, spool: Spool) -> None:
 
 def test_verify_audit(client: TestClient, spool: Spool) -> None:
     from mercure_gateway.audit import AuditLog
+
     audit = AuditLog(spool._db)
     audit.append("TEST")
     r = client.get("/api/audit/verify")
@@ -601,6 +613,7 @@ def test_verify_audit(client: TestClient, spool: Spool) -> None:
 
 def test_export_audit(client: TestClient, spool: Spool) -> None:
     from mercure_gateway.audit import AuditLog
+
     audit = AuditLog(spool._db)
     audit.append("TEST")
     r = client.get("/api/audit/export")
@@ -615,6 +628,7 @@ def test_export_audit_includes_hash(client: TestClient, spool: Spool) -> None:
     """Exports must include the chain hash so they can be cross-checked
     offline against head_hash (offline tamper verification)."""
     from mercure_gateway.audit import AuditLog
+
     audit = AuditLog(spool._db)
     audit.append("TEST")
     r = client.get("/api/audit/export")
@@ -623,9 +637,7 @@ def test_export_audit_includes_hash(client: TestClient, spool: Spool) -> None:
         assert event.get("hash"), "audit export missing chain hash"
 
 
-def test_export_audit_redacts_phi_under_minimal_scope(
-    client: TestClient, spool: Spool
-) -> None:
+def test_export_audit_redacts_phi_under_minimal_scope(client: TestClient, spool: Spool) -> None:
     """PHI fields are stripped from audit export when phi_scope=minimal (M5)."""
     from mercure_gateway.audit import AuditLog
 
@@ -646,6 +658,7 @@ def test_export_audit_redacts_phi_under_minimal_scope(
 def test_console_dashboard(client: TestClient, spool: Spool) -> None:
     """Operator console v0 aggregates queue + audit into one dashboard response."""
     from mercure_gateway.audit import AuditLog
+
     audit = AuditLog(spool._db)
     audit.append("STUDY_RECEIVED", {"study_uid": "1.2.3"})
     r = client.get("/api/console/dashboard")
@@ -661,6 +674,7 @@ def test_console_dashboard(client: TestClient, spool: Spool) -> None:
 # ══════════════════════════════════════════════════════════════════════
 # Metrics endpoint (D1 — Prometheus text format for headless monitoring)
 # ══════════════════════════════════════════════════════════════════════
+
 
 def test_metrics_endpoint_prometheus_format(client: TestClient) -> None:
     """GET /api/system/metrics returns Prometheus text exposition."""
@@ -730,9 +744,42 @@ def test_metrics_disk_gauge_has_no_phi(client: TestClient) -> None:
     assert "spool_dir" not in body
 
 
+def test_metrics_disk_gauges_present_when_spool_dir_missing(
+    app, fake_receiver: FakeReceiver, fake_forwarder: FakeForwarder, tmp_path: Path
+) -> None:
+    """A not-yet-created spool dir must not silently drop the disk series.
+
+    CI caught this (first run on a fresh ubuntu runner): the dir is created
+    lazily on first receipt, so a boot with zero studies had
+    shutil.disk_usage raise FileNotFoundError, and the suppress() ate the
+    whole disk block — the disk-full alert's own metric vanished precisely
+    when it was most likely to matter.
+    """
+    missing = tmp_path / "never-created" / "spool"
+    assert not missing.exists()
+
+    # A spool pointed at a path nothing has created yet (fresh-boot shape).
+    cfg = default_config()
+    cfg.storage.spool_dir = str(missing)
+    stranded_spool = Spool(mem_database(), cfg)
+    app.state.spool = stranded_spool  # the endpoint reads app.state.spool
+    client = TestClient(app)
+
+    body = client.get("/api/system/metrics").text
+    for name in (
+        "mercure_gateway_disk_usage_percent",
+        "mercure_gateway_disk_total_bytes",
+        "mercure_gateway_disk_free_bytes",
+        "mercure_gateway_disk_over_threshold",
+    ):
+        assert f"# HELP {name} " in body, f"missing HELP for {name}"
+        assert f"# TYPE {name} " in body, f"missing TYPE for {name}"
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Web UI TLS wiring (D3a — ADR-0007)
 # ══════════════════════════════════════════════════════════════════════
+
 
 def test_run_web_admin_passes_tls_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
     """When web_ui TLS is configured, uvicorn.run gets ssl_certfile/ssl_keyfile."""

@@ -49,12 +49,24 @@ export default function QueueView() {
   const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
 
   const handleRetry = async (studyId: number) => {
-    await retryStudy(studyId);
+    const ok = await retryStudy(studyId);
+    if (!ok) {
+      setError("Retry failed — the study has no incomplete routes, or the request was rejected.");
+      return;
+    }
     load();
   };
 
   const handleEnqueue = async (studyId: number) => {
-    await enqueueStudy(studyId);
+    // A 409 here is a real condition the operator can act on (no destination
+    // enabled, or the study is already terminal) — not a silent no-op.
+    const ok = await enqueueStudy(studyId);
+    if (!ok) {
+      setError(
+        "Enqueue failed — enable a destination first, or the study is already sent (see the Destinations page).",
+      );
+      return;
+    }
     load();
   };
 

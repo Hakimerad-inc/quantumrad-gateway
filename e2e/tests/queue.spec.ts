@@ -36,6 +36,18 @@ test.describe("Study Queue", () => {
     await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
   });
 
+  test("enqueue rescues a stranded RECEIVED study (E1 dry-run fix)", async ({ page }) => {
+    // A RECEIVED study with zero routes (the E1 dry-run stranded condition,
+    // which /retry cannot reach) offers Enqueue instead. The seeded gateway
+    // has no destination enabled, so the endpoint answers 409 and the panel
+    // must surface that as an actionable error — not a silent no-op.
+    const row = page.locator("tr", { hasText: "E2E-ACC-1" });
+    await expect(row.getByRole("button", { name: "Enqueue" })).toBeVisible();
+    await row.getByRole("button", { name: "Enqueue" }).click();
+    await expect(page.locator(".error-banner")).toBeVisible();
+    await expect(page.locator(".error-banner")).toContainText(/enable a destination/i);
+  });
+
   test("pagination controls stay hidden for a single page", async ({ page }) => {
     await expect(page.locator(".pagination")).toHaveCount(0);
   });

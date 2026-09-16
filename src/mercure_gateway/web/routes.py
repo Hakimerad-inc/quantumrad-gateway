@@ -291,11 +291,20 @@ def system_metrics(request: Request) -> Response:
          ("RECEIVED", "QUEUED", "SENDING", "SENT", "ERROR", "FAILED")],
     )
 
-    # Spool filesystem capacity (mirrors /system/disk; unmeasurable fs -> skip
-    # the series rather than fail the whole scrape — health/partial > nothing).
+    # Spool filesystem capacity (mirrors /system/disk). The spool dir may not
+    # exist yet on a fresh boot (nothing received, dir created lazily) —
+    # measure the nearest existing ancestor so the series is *always* present:
+    # a scrape that silently omits the disk gauges makes the disk-full alert
+    # (the primary unmanned-box failure mode) invisible exactly when it bites.
     storage = cfg.storage
-    with contextlib.suppress(OSError):
-        disk = shutil.disk_usage(sp.spool_dir)
+    probe = Path(sp.spool_dir)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        disk = shutil.disk_usage(probe)
+    except OSError:
+        disk = None
+    if disk is not None:
         usage_pct = disk.used * 100.0 / max(1, disk.total)
         gauge(
             "mercure_gateway_disk_usage_percent",
@@ -309,6 +318,18 @@ def system_metrics(request: Request) -> Response:
             "1 once usage >= the configured warning threshold.",
             1 if usage_pct >= storage.disk_full_warning_pct else 0,
         )
+    else:
+        # Filesystem genuinely unmeasurable (no device at all). Emit zeros
+        # rather than dropping the series — a missing metric is indistinguish
+        # from "healthy" in Prometheus, and this path means "look here".
+        for name in (
+            "mercure_gateway_disk_usage_percent",
+            "mercure_gateway_disk_total_bytes",
+            "mercure_gateway_disk_free_bytes",
+        ):
+            gauge(name, "Spool filesystem capacity (unmeasurable — 0).", 0)
+        gauge("mercure_gateway_disk_over_threshold",
+              "1 once usage >= the configured warning threshold.", 0)
 
     return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 

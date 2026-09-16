@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import type { StudySummary } from "../api";
-import { fetchStudies, retryStudy, requestReport } from "../api";
+import { fetchStudies, retryStudy, enqueueStudy, requestReport } from "../api";
 import { IconInbox, IconChevronLeft, IconChevronRight } from "../ui/icons";
 
 const PAGE_SIZE = 50;
@@ -53,6 +53,11 @@ export default function QueueView() {
     load();
   };
 
+  const handleEnqueue = async (studyId: number) => {
+    await enqueueStudy(studyId);
+    load();
+  };
+
   const handleRequestReport = async (studyId: number) => {
     await requestReport(studyId, "sr");
     load();
@@ -96,6 +101,11 @@ export default function QueueView() {
                     {s.state === "FAILED" && (
                       <button className="btn" onClick={() => handleRetry(s.id)}>
                         Retry
+                      </button>
+                    )}
+                    {s.state === "RECEIVED" && s.num_destinations === 0 && (
+                      <button className="btn" onClick={() => handleEnqueue(s.id)}>
+                        Enqueue
                       </button>
                     )}
                     <button className="btn" onClick={() => handleRequestReport(s.id)}>

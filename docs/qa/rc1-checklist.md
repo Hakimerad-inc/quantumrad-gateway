@@ -42,6 +42,37 @@ K-gates in §1/refinement §10.
 - [ ] Windows service mode: install/start/stop/uninstall from the admin panel (S07-T9)
 - [ ] Auto-update: point a test install at a staging `latest.json`, verify signature enforcement rejects a tampered artifact — **headless/Python half ✅ 2026-09-14** (`scripts/rehearse_updater_tamper.py`: real signed deb served over loopback HTTP; genuine signature staged, bit-flipped signature refused with nothing staged). Tauri in-app half needs the desktop shell on a real install (§3)
 
+## 3b. E1 site-deployment dry run (2026-09-16) — FAILED rc1 as-shipped
+
+Full record: `docs/qa/e1-dryrun.md`. Ran the published rc1 deb end-to-end
+against the test Orthanc (signed-artifact provenance ✅, golden-config
+deploy ✅, C-ECHO 28 ms ✅, K1 persisted-before-ack ✅, D3b bind-refusal ✅,
+audit valid ✅, D1 metrics exposed the failure ✅) — and found the defect the
+712-green suite could not:
+
+- ❌ **Auto-enqueue burst loss (release-blocking).** Three studies sent
+  inside one debounce window → only the last forwarded; the other two
+  stranded in RECEIVED with zero routes, confirmed on both the gateway API
+  and the Orthanc REST expansion. A single Spool-wide timer was cancelling
+  predecessors. **Fixed `553b718`** (per-study timers + TDD in
+  `tests/test_auto_enqueue.py`); verified 3/3 SENT + landed + audit valid.
+  **The published rc1 artifacts carry the bug — rc1 must not ship to a
+  clinical site; rc2 must carry `553b718`.**
+- ✅ **No operator recovery for a route-less RECEIVED study — closed.**
+  `/retry` returned 400 (it iterates existing routes); no data was lost
+  (spool holds the files) but rescue needed DB access. Added
+  `Spool.enqueue_study()` + `POST /api/studies/{id}/enqueue` (idempotent,
+  409 on terminal/no-destination), verified live: stranded RECEIVED/0-route
+  study → `/enqueue` → SENT + landed in Orthanc. 11 new tests.
+- ⚠️ **`config_version` must be a string.** An unquoted `1` makes the frozen
+  binary exit at boot with a pydantic ValidationError. Strict typing is
+  correct (it rejects loudly, not silently); the remedy is documentation —
+  site-deployment §3 now quotes it — since hand-authored fleet templates are
+  the realistic failure mode. Not a product bug.
+
+§3 UAT legs unchanged (still hardware-gated). The dry run's §2 burst is the
+rc2 go/no-go gate: 3-minute re-run against the rc2 artifact.
+
 ## 4. K-gate evidence table
 
 | Gate | Criterion | Evidence |

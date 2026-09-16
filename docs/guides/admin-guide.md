@@ -196,12 +196,19 @@ check (e.g. cron + `curl … /api/audit/verify | jq -e .valid`).
 | Problem | Likely cause / fix |
 |---------|--------------------|
 | Modality rejected | Check `allowed_ae_titles`; add the modality's AE title. |
+| Studies stuck **RECEIVED** (0 routes) | Instances arrived while no destination was enabled, or auto-enqueue failed. **Enqueue** the study once a destination is enabled: `POST /api/studies/{id}/enqueue` (API-only in v1.1 — the panel's queue view has no button for it yet; the **Retry** button will not help here, it only resets *existing* routes). |
 | Studies stuck queued | Forwarder stopped? Destination disabled? Check `forwarding.concurrency`. |
 | Repeated "Error" then "Failed" | Destination unreachable or credentials invalid; fix and **Retry**. |
 | Disk filling up | Raise `max_spool_gb`, lower `retention_delivered_days`, or enable `purge_on_disk_full`. |
 | Audit verify reports breaks | Someone modified the database — restore from backup ([Backup & Restore](backup-restore.md)); do **not** hand-edit rows. |
 | Web panel slow with many studies | Queue view is paginated (10k rows render within budget); reduce page size. |
 | Updates not appearing | Auto-update checks the signed manifest (see below); ensure outbound HTTPS to the update URL. |
+
+The two actions are deliberately distinct: **Retry** re-arms routes that
+already exist (a FAILED study gets a fresh delivery attempt); **Enqueue**
+creates the routes in the first place (a RECEIVED study that never got any).
+Neither deletes the stored instances — undelivered copies are retained
+(US-04).
 
 ## Updates (v1.1)
 

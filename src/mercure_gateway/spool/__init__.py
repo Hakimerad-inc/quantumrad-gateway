@@ -720,6 +720,40 @@ class Spool:
             self._db.set_study_state(study_id, StudyState.ERROR.value)
         return self.state(study_id)
 
+    def enqueue_study(self, study_id: int) -> int:
+        """Operator action: route a RECEIVED study to the enabled destinations.
+
+        This is the recovery path ``_auto_enqueue`` refers to when it leaves
+        a study in RECEIVED — e.g. instances arrived while no destination was
+        enabled (destinations added after receipt), or auto-enqueue failed
+        and logged the exception. ``reforward_study`` cannot reach these
+        studies: it iterates *existing* routes, and a stranded study has
+        none (E1 dry run, 2026-09-16).
+
+        Returns the number of routes created (0 if the study was already
+        routed). Raises ``KeyError`` for an unknown id, ``ValueError`` if the
+        study is in a terminal state (SENT must never be re-routed —
+        re-delivery is not idempotent) or if no destination is enabled
+        (routing would be a silent no-op, which hides a config error).
+        """
+        row = self._db.get_study(study_id)
+        if row is None:
+            raise KeyError(f"no study with id {study_id}")
+        if row["state"] == StudyState.SENT.value:
+            raise ValueError(f"study {study_id} is SENT — terminal, will not re-route")
+        if self._config is None:
+            raise ValueError("no configuration loaded; cannot determine targets")
+        targets = [d for d in self._config.destinations if d.enabled]
+        if not targets:
+            raise ValueError(
+                "no enabled destination to enqueue study "
+                f"{row['study_uid']} to — enable a destination first"
+            )
+        if self._db.get_routes(study_id):
+            return 0  # already routed; idempotent, not an error
+        self.enqueue(study_id, targets)
+        return len(targets)
+
     def reforward(self, study_id: int, target_name: str) -> None:
         """Return an errored route to the waiting queue for a manual re-forward."""
         routes = self._db.get_routes(study_id)

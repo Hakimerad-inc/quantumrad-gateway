@@ -134,6 +134,13 @@ export async function retryStudy(studyId: number): Promise<boolean> {
   return (await postJson(`/api/studies/${studyId}/retry`)) !== null;
 }
 
+// Rescue a RECEIVED study that never got routes (destinations were added
+// after receipt, or auto-enqueue failed). /retry only resets *existing*
+// routes, so it cannot reach these — see the E1 dry-run writeup.
+export async function enqueueStudy(studyId: number): Promise<boolean> {
+  return (await postJson(`/api/studies/${studyId}/enqueue`)) !== null;
+}
+
 export async function requestReport(
   studyId: number,
   reportType: "sr" | "pdf" | "both",

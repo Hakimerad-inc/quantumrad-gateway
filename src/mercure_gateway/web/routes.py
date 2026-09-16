@@ -531,6 +531,26 @@ def retry_study(request: Request, study_id: int) -> dict[str, str]:
     return {"status": "queued", "study_id": str(study_id)}
 
 
+@router.post("/studies/{study_id}/enqueue")
+def enqueue_study(request: Request, study_id: int) -> dict[str, str]:
+    """Route a RECEIVED study that auto-enqueue left stranded.
+
+    ``/retry`` only resets *existing* routes; a study that arrived while no
+    destination was enabled, or whose auto-enqueue failed, has none and is
+    unreachable from the panel without this endpoint (E1 dry run, 2026-09-16).
+    """
+    sp = _spool(request)
+    try:
+        created = sp.enqueue_study(study_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Study {study_id} not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not created:
+        return {"status": "already-queued", "study_id": str(study_id)}
+    return {"status": "queued", "study_id": str(study_id)}
+
+
 # ---------------------------------------------------------------------------
 # Pipeline visualization endpoints  (§7.2 — flow view)
 # ---------------------------------------------------------------------------

@@ -54,7 +54,9 @@ Two paths — pick one, don't mix:
    `POST /api/config/import` (or the Config page). Note: the export path
    redacts destination secrets, so secrets must come from `gateway.env` /
    the keyring (secrets-and-env-overrides.md), not the imported JSON. Set
-   `config_version` correctly so migration checks pass.
+   `config_version` correctly so migration checks pass — **it is a string**
+   (`"1"`, quoted): an unquoted `1` fails schema validation and, on the
+   frozen sidecar, aborts boot outright (E1 dry run, 2026-09-16).
 
 Set web auth on if the panel will be network-reachable (§5). Enabling auth
 means `/api/system/health` answers 401 — swap the systemd health probe per
@@ -116,6 +118,14 @@ refusal message, not bind. Then revert to loopback or fix per above.
 Send a controlled test study (a phantom / known UID — **not** real PHI) through
 a modality or `demo/fake_modality.py`, then observe for 24–48 h:
 
+> **Do this *before* the soak, on every new build:** send a *burst* of three
+> distinct studies inside one auto-enqueue debounce window
+> (`demo/fake_modality.py` three times back-to-back). All three must reach
+> SENT. rc1 silently routed only the last study of a burst (E1 dry run,
+> `docs/qa/e1-dryrun.md`) — the soak's single-study probe would not have
+> caught it.
+
+- [ ] **Burst check:** 3/3 studies SENT (not just the last).
 - [ ] Test study reached every destination (state SENT; audit shows the route).
 - [ ] `GET /api/queue/stats` — queue drains to zero backlog (steady-state 0 queued).
 - [ ] `GET /api/system/disk` — usage sane, no unexpected growth.

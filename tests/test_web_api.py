@@ -33,13 +33,16 @@ from mercure_gateway.web import create_app
 
 @pytest.fixture()
 def spool() -> Spool:
-    return Spool(mem_database())
+    # The app fixture below builds its config from the same default; the
+    # spool must carry it too — endpoints like /enqueue route via
+    # spool._config.destinations, not app.state.config.
+    return Spool(mem_database(), default_config())
 
 
 @pytest.fixture()
 def app(spool: Spool, fake_receiver: FakeReceiver, fake_forwarder: FakeForwarder):
     """Create a FastAPI app with in-memory spool and fake receiver/forwarder."""
-    cfg = default_config()
+    cfg = spool._config or default_config()
     application = create_app(cfg, spool)
     application.state.receiver = fake_receiver
     application.state.forwarder = fake_forwarder
@@ -232,6 +235,72 @@ def test_retry_study_not_failed(client: TestClient, spool: Spool) -> None:
 
 def test_retry_study_not_found(client: TestClient) -> None:
     r = client.post("/api/studies/99999/retry")
+    assert r.status_code == 404
+
+
+# ── /enqueue: rescue a RECEIVED study that never got routes (E1 dry run) ──
+
+
+def test_enqueue_rescues_routeless_study(
+    client: TestClient, app, spool: Spool, target_hub: DICOMDestination
+) -> None:
+    """A stranded study with zero routes becomes QUEUED via the panel.
+
+    Mirrors the E1 dry-run condition exactly: instances arrived while no
+    destination was enabled, so no route was ever created.
+    """
+    spool._config.destinations = [target_hub]  # destinations added post-receipt
+    app.state.config.destinations = [target_hub]
+    study_id = spool.receive("1.1.2")
+    assert spool.get_routes(study_id) == []  # the stranded condition
+
+    r = client.post(f"/api/studies/{study_id}/enqueue")
+    assert r.status_code == 200
+    assert r.json()["status"] == "queued"
+    assert [t["target_name"] for t in spool.get_routes(study_id)] == ["hub"]
+
+
+def test_enqueue_is_idempotent(
+    client: TestClient, app, spool: Spool, target_hub: DICOMDestination
+) -> None:
+    """A second call reports already-queued, never duplicates routes."""
+    spool._config.destinations = [target_hub]
+    app.state.config.destinations = [target_hub]
+    study_id = spool.receive("1.1.3")
+    assert client.post(f"/api/studies/{study_id}/enqueue").status_code == 200
+
+    r = client.post(f"/api/studies/{study_id}/enqueue")
+    assert r.status_code == 200
+    assert r.json()["status"] == "already-queued"
+    assert len(spool.get_routes(study_id)) == 1
+
+
+def test_enqueue_no_destination_is_config_error(client: TestClient, spool: Spool) -> None:
+    """Enqueueing with no enabled destination surfaces as a client error,
+    not a silent 200 — hiding a config error would strand the study again."""
+    study_id = spool.receive("1.1.5")
+
+    r = client.post(f"/api/studies/{study_id}/enqueue")
+    assert r.status_code == 409
+    assert "no enabled destination" in r.json()["detail"]
+
+
+def test_enqueue_sent_study_refused(
+    client: TestClient, app, spool: Spool, target_hub: DICOMDestination
+) -> None:
+    """Terminal studies must not be re-routed (re-delivery is not idempotent)."""
+    spool._config.destinations = [target_hub]
+    app.state.config.destinations = [target_hub]
+    study_id = spool.receive("1.1.4")
+    spool._db.set_study_state(study_id, StudyState.SENT.value)
+
+    r = client.post(f"/api/studies/{study_id}/enqueue")
+    assert r.status_code == 409
+    assert "terminal" in r.json()["detail"]
+
+
+def test_enqueue_not_found(client: TestClient) -> None:
+    r = client.post("/api/studies/99999/enqueue")
     assert r.status_code == 404
 
 

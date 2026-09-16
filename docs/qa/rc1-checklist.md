@@ -12,11 +12,11 @@ K-gates in §1/refinement §10.
 
 | Gate | Target | Measured | ☐ |
 |------|--------|----------|---|
-| pytest | all green | 712 passed, 0 failed — CI matrix green on main (run 34901586844, ubuntu + windows) | ☒ CI |
+| pytest | all green | **726 passed, 5 skipped** (was 712 — +14: auto-enqueue burst regression, manual-enqueue rescue, disk-gauge missing-dir regression). CI matrix green incl. the ubuntu job that first caught the disk-gauge bug (run 35149851506, 2026-09-16) | ☒ CI |
 | coverage | ≥ 80% | **85%** (`coverage report`, src/mercure_gateway, 2026-09-14) | ☒ |
 | ruff / mypy strict | clean | ruff: all checks passed · mypy strict: 0 issues / 52 files | ☒ |
 | frontend (tsc / eslint / vitest) | clean, all pass | tsc 0 · eslint 0 · vitest **14 tests / 4 files** (jsdom suite replaced by Playwright e2e in `15ade80`) | ☒ |
-| e2e (Playwright, real gateway) | green | **25/25 passed locally 2026-09-14** (seeded source-run gateway, ports 18299/18113); fixed a cross-spec order dependency in `pipeline.spec.ts` reports test | ☒ |
+| e2e (Playwright, real gateway) | green | **26/26 passed locally 2026-09-16** (+1: enqueue rescue of a stranded RECEIVED study); CI E2E job green in 35149851506 | ☒ |
 | Rust (cargo check / clippy / test) | clean | check ✅ · clippy -D warnings ✅ · test ✅ **4 unit tests** (`backend_port` override/fallback + candidate ordering + deb-layout regression — re-added with the tray fixes, 2026-09-14); earlier "0 tests" row was stale | ☒ |
 | pip-audit | no critical vulns | CI `dependency-audit` job **green on main** (run 34901586844, 2026-09-14): pip-audit + `npm audit --omit=dev` + rustsec (`cargo audit`, src-tauri) | ☒ CI |
 | perf gates (K3/K8, §5.6) | within budget | **forwarding begin 226 ms / 2000 ms; throughput 380.5 items/s / ≥5** (`check_perf_gates.py`, 2026-09-14); CI `performance gates` job green | ☒ |

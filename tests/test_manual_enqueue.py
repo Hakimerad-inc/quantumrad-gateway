@@ -19,7 +19,7 @@ import pytest
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian
 
-from mercure_gateway.config import DICOMDestination, default_config
+from mercure_gateway.config import DICOMDestination, ForwardingRule, default_config
 from mercure_gateway.spool import Spool, StudyState
 from mercure_gateway.spool.db import mem_database
 
@@ -127,3 +127,71 @@ def test_manual_enqueue_unknown_study(tmp_path: Path, hub: DICOMDestination) -> 
     spool = spool_with(tmp_path, [hub])
     with pytest.raises(KeyError):
         spool.enqueue_study(999999)
+
+
+# ── 3. a stale forwarding-rule target must not strand a study irrecoverably ─
+#
+# A rule naming a destination that was renamed/disabled/removed narrows the
+# target set to nothing. enqueue() used to set QUEUED anyway — with zero
+# routes. That state is strictly worse than stranded: the Enqueue action
+# renders only for RECEIVED, and /retry only resets routes that exist. The
+# study is unreachable from the panel and needs direct DB access.
+
+
+def test_stale_rule_target_keeps_study_received(
+    tmp_path: Path, hub: DICOMDestination
+) -> None:
+    """A rule matching no enabled destination must not produce QUEUED+0 routes."""
+    cfg = default_config()
+    cfg.storage.spool_dir = str(tmp_path / "spool")
+    cfg.receiver.auto_enqueue_delay_sec = 10.0
+    cfg.destinations = [hub]
+    # 'pacs' doesn't exist — the classic copied-from-another-profile case.
+    cfg.forwarding_rules = [ForwardingRule(rule="modality:CT", targets=["pacs"])]
+    spool = Spool(mem_database(), cfg)
+    study_id = spool.store_instance(make_dataset("1.2.3.31", "1.2.3.31.1.1"))
+
+    with pytest.raises(ValueError, match="no enabled destination"):
+        spool.enqueue_study(study_id)
+
+    assert spool.state(study_id) == StudyState.RECEIVED  # still rescuable
+    assert spool._db.get_routes(study_id) == []
+
+
+def test_stale_rule_target_on_auto_enqueue_stays_received(
+    tmp_path: Path, hub: DICOMDestination
+) -> None:
+    """The automatic path has the same guard — no QUEUED-without-routes."""
+    cfg = default_config()
+    cfg.storage.spool_dir = str(tmp_path / "spool")
+    cfg.receiver.auto_enqueue_delay_sec = 0.05
+    cfg.destinations = [hub]
+    cfg.forwarding_rules = [ForwardingRule(rule="modality:CT", targets=["pacs"])]
+    spool = Spool(mem_database(), cfg)
+    study_id = spool.store_instance(make_dataset("1.2.3.32", "1.2.3.32.1.1"))
+
+    import time
+
+    time.sleep(0.3)  # past the delay: the timer fired
+    assert spool.state(study_id) == StudyState.RECEIVED
+    assert spool._db.get_routes(study_id) == []
+
+
+def test_matching_rule_enqueues_only_the_named_target(
+    tmp_path: Path, hub: DICOMDestination
+) -> None:
+    """The happy path still works: a rule narrows to its own targets only."""
+    pacs = DICOMDestination(
+        name="pacs", type="dicom", host="pacs.local", port=11112, aet_target="PACS"
+    )
+    cfg = default_config()
+    cfg.storage.spool_dir = str(tmp_path / "spool")
+    cfg.receiver.auto_enqueue_delay_sec = 10.0
+    cfg.destinations = [hub, pacs]
+    cfg.forwarding_rules = [ForwardingRule(rule="modality:CT", targets=["pacs"])]
+    spool = Spool(mem_database(), cfg)
+    study_id = spool.store_instance(make_dataset("1.2.3.33", "1.2.3.33.1.1"))
+
+    assert spool.enqueue_study(study_id) == 1
+    assert [r["target_name"] for r in spool._db.get_routes(study_id)] == ["pacs"]
+    assert spool.state(study_id) == StudyState.QUEUED

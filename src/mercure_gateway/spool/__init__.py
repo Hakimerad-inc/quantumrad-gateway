@@ -585,11 +585,35 @@ class Spool:
         When ``config.forwarding_rules`` contains a matching rule, only the
         rule's named targets are routed (MVP modality filter, refinement §3.1);
         otherwise every enabled target receives the study.
+
+        If a forwarding rule narrowed the target set to nothing — a rule names
+        a destination that was renamed, removed, or copied from another
+        profile — the study stays RECEIVED rather than going QUEUED with zero
+        routes. QUEUED-with-no-routes is unreachable from the panel (the
+        Enqueue action only renders for RECEIVED, and /retry only resets
+        routes that exist) and would need direct DB access to recover.
+
+        This guard is deliberately scoped to the *rule-filtered* case. A
+        caller that passes only disabled targets (an operator's explicit
+        choice) keeps the legacy QUEUED-with-no-routes behavior — see
+        ``test_disabled_target_is_skipped`` — which is a deliberate no-op,
+        not a misconfiguration.
         """
-        routed = self._route_targets(study_id, targets)
+        filtered, rule_narrowed = self._route_targets(study_id, targets)
+        routed = [t for t in filtered if t.enabled]
+        if not routed and rule_narrowed:
+            # A matching rule narrowed the set to destinations that are stale,
+            # renamed, or disabled — a misconfiguration. Staying RECEIVED
+            # keeps the panel rescue path open; QUEUED-with-zero-routes would
+            # be unreachable (Enqueue renders only for RECEIVED, /retry only
+            # resets routes that exist) and would need direct DB access.
+            logger.warning(
+                "study %s: forwarding rules matched no enabled destination "
+                "(stale rule target?); staying RECEIVED",
+                self.study_uid(study_id),
+            )
+            return
         for target in routed:
-            if not target.enabled:
-                continue
             self._db.insert_route(
                 study_id=study_id,
                 target_name=target.name,
@@ -601,24 +625,31 @@ class Spool:
             {
                 "study_id": study_id,
                 "study_uid": self.study_uid(study_id),
-                "targets": [t.name for t in routed if t.enabled],
+                "targets": [t.name for t in routed],
             },
         )
 
-    def _route_targets(self, study_id: int, targets: list[Destination]) -> list[Destination]:
+    def _route_targets(
+        self, study_id: int, targets: list[Destination]
+    ) -> tuple[list[Destination], bool]:
         """Filter ``targets`` by the first matching modality rule (MVP).
 
         Rules are ``modality:<MODALITY>`` strings; matching is case-insensitive
         on the study's Modality tag. When no rule matches, *all* targets are
         returned (default: all studies to all destinations).
+
+        Also returns whether a rule actually narrowed the set — the caller
+        distinguishes "rule matched but its targets are stale/disabled" (a
+        misconfiguration; the study should not advance) from "the caller passed
+        only disabled destinations" (a deliberate no-op).
         """
         rules = self._config.forwarding_rules if self._config is not None else []
         if not rules:
-            return targets
+            return targets, False
         study = self._db.get_study(study_id)
         modality = str(study["modality"]).upper() if study and study["modality"] else None
         if not modality:
-            return targets
+            return targets, False
 
         matched_names: set[str] = set()
         for rule in rules:
@@ -628,8 +659,8 @@ class Spool:
                 if modality == wanted:
                     matched_names.update(rule.targets)
         if not matched_names:
-            return targets
-        return [t for t in targets if t.name in matched_names]
+            return targets, False
+        return [t for t in targets if t.name in matched_names], True
 
     def claim_next(self, limit: int = 1) -> list[ClaimedTask]:
         """Atomically claim the next waiting task(s).
@@ -751,8 +782,18 @@ class Spool:
             )
         if self._db.get_routes(study_id):
             return 0  # already routed; idempotent, not an error
+        before = len(self._db.get_routes(study_id))
         self.enqueue(study_id, targets)
-        return len(targets)
+        created = len(self._db.get_routes(study_id)) - before
+        if not created:
+            # A forwarding rule narrowed the enabled set to nothing — a stale
+            # rule target. Report the config error rather than letting the
+            # caller (and the panel) read it as success.
+            raise ValueError(
+                f"forwarding rules matched no enabled destination for study "
+                f"{row['study_uid']} — a rule target is stale, renamed, or disabled"
+            )
+        return created
 
     def reforward(self, study_id: int, target_name: str) -> None:
         """Return an errored route to the waiting queue for a manual re-forward."""

@@ -110,6 +110,8 @@ def test_rule_target_not_in_config_ignored() -> None:
     spool.enqueue(study_id, [make_destination("hub"), make_destination("pacs")])
 
     # "nowhere" doesn't exist → no route created; nothing to route to.
+    # The study stays RECEIVED rather than QUEUED-with-zero-routes (that
+    # state is unrecoverable from the panel) — see test_manual_enqueue.py.
     assert routes_for(spool, study_id) == []
 
 

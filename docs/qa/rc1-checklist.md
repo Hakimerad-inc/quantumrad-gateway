@@ -91,7 +91,7 @@ Full record: `docs/qa/e1-dryrun.md` §6.
 | K2 | ≥ 99% delivered within retry budget | chaos suite retry tests ✅ |
 | K3 | ≥ 95% reports within SLA | `check_perf_gates.py` 2026-09-14 ✅ (forwarding-begin 226 ms / 2 s budget; SLA row per script's report gate) |
 | K4 | ≤ 10 min to first forwarded study | clean-VM UAT timing — Windows hardware |
-| K5 | 100% of events audited | `test_audit_coverage.py` ✅ + interop proof `test_hub_bookkeeper_interop.py` (`87d6713`) — but see the D2 finding: `FORWARD_*` events reach the chain yet not the external anchor (tamper-evidence, not audit coverage) |
+| K5 | 100% of events audited | `test_audit_coverage.py` ✅ + interop proof `test_hub_bookkeeper_interop.py` (`87d6713`) — the D2 finding (`FORWARD_*` reached the chain but not the external anchor) is fixed in `9c10423` |
 | K6 | ≤ 250 MB installer / ≤ 150 MB RAM | CI size gate (Windows pending); deb number in §1; RAM from UAT |
 | K7/K8 | refinement §10 perf criteria | `check_perf_gates.py` ✅ (throughput 380.5/s ≥ 5) |
 | K9/K10 | USB boot ≤ 30 s / flush ≤ 10 s | `docs/qa/usb-perf-09.md` — K10 mechanism + proxy timing ✅; boot rows need the rig |
@@ -107,10 +107,14 @@ Full record: `docs/qa/e1-dryrun.md` §6.
   (stop/copy/restart and online `VACUUM INTO` snapshot) round-trip — health,
   audit chain, and undelivered work all survive a total-loss restore.
   **One finding**: the forwarder's separately-constructed `AuditLog`
-  (`main.py:169`) never receives the head anchorer, so `FORWARD_*` events are
+  (`main.py:169`) never received the head anchorer, so `FORWARD_*` events were
   absent from `audit-heads.txt` (0/4 anchored vs 2/2 for other types) and also
-  miss the hub stream — weakens K5 for delivery provenance. Triage gates GA
-  (E2); added to the D5 review package.
+  missed the hub stream — weakens K5 for delivery provenance.
+  **FIXED 2026-09-17** (`9c10423`): `_build_forwarder` now takes the wired
+  audit (the call site already ran after the wiring, so it was one line of
+  plumbing); FORWARD_START went 0/4 → 1/1 anchored in a live re-check, with
+  two regression tests pinning the shared-audit contract. Not in the rc2 tag
+  — rides the next cut.
 - PRD §11 external security review — **booking package prepared 2026-09-14**
   (`docs/qa/security-review-package.md` — scope, control/evidence table, declared
   gaps, reviewer quick-start); booking itself = open human step, suggested to

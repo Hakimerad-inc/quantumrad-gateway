@@ -234,34 +234,33 @@ the fleet-wide key-compromise answer (see #4).
 
 ---
 
-## What rides the next tag
+## What rides the next tag — rc3 is cut; this is now the GA list
 
-`v1.1.0-rc2` points at `abb1ed5`. Ten commits on `main` are ahead of it and are
-**not** in any published artifact:
+**`v1.1.0-rc3` was cut and published 2026-09-17** (tag at `d7bd58e`, release run
+35221436901 green, deb Ed25519-verified against the §0.1 custody key — see
+`rc1-checklist.md` §2). It carries the ten post-rc2 commits, so the K5 anchoring
+gap, the dead-backend login screen, and the stale-rule warning are now in a
+published artifact; any site on rc2 should move to rc3.
+
+Two commits landed on `main` after the tag and ride the GA cut:
 
 ```
-3e76012 docs(qa): close the B3 Ubuntu tray row in rc1-checklist
-a84d9e6 docs(qa): B3 Ubuntu tray leg done on rc2; all three glyphs distinct
-b0e74d4 fix(web): a dead backend must not masquerade as a login prompt
-fc76c11 docs(qa): mark the forwarder anchoring finding fixed in the D2 record
-3a83452 docs(qa): mark the forwarder anchoring gap fixed (9c10423)
-9c10423 fix(audit): the forwarder must share the anchored AuditLog, not a fresh one
-9eefaa4 docs(qa): rc2 passes the E1 go/no-go gate — 3/3 burst on the published artifact
-6cb3858 docs(qa): book the security review, Windows UAT run sheet, release-sig verifier
-dcd6245 feat(config): warn at load when a forwarding rule names no destination
-6d750d5 docs(qa): D2 backup/restore drill proven on rc2; forwarder anchoring gap logged
+fb6455f fix(update): a differing version is not an upgrade — gate the downgrade path
+4ad00cd docs(qa): draft the fleet-wide key-compromise answer, gaps declared
 ```
 
-Three change shipped behavior — `9c10423` (audit anchoring), `b0e74d4` (dead
-backend view), `dcd6245` (config warning); the rest is evidence. The one that
-matters operationally: **the published rc2 artifact still carries the K5
-anchoring gap** — the forwarder's `FORWARD_*` events don't reach
-`audit-heads.txt`. Fixed on main, verified live (0/4 → 1/1 anchored), pinned by
-two regression tests. Any site on rc2 should move to the next tag when it cuts.
+Only `fb6455f` changes shipped behavior — the downgrade gate. Two notes for the
+GA cut:
 
-Rotation no longer rides the next tag (#4 declined), so the tag's only purpose is
-shipping those three fixes. That is still worth doing — but it is now a
-schedule call, not a security one.
+- rc3's published manifest now correctly advertises `1.1.0-rc3` to a box on rc2
+  and offers nothing to a box on rc3. Confirm the panel shows that during #5's
+  Windows UAT — it is the first time the "no update available" path sees a
+  real, newer published release.
+- `fb6455f`'s `_version_key` parses only the two forms `sync_version.py`
+  publishes (`X.Y.Z`, `X.Y.Z-rcN`) and fails closed on anything else. That is
+  deliberate — an unorderable version must not be offered — but it means a
+  future scheme change needs a matching parser update, or the updater silently
+  stops offering updates.
 
 ## Decisions I need from you
 
@@ -272,6 +271,7 @@ schedule call, not a security one.
 3. ~~**#6:** re-run the tray scenario for you to watch?~~ **Resolved 2026-09-17:
    done** — programmatic glyph verification closed it; see `b3-tray-leg.md`. The
    evidence PNG is in the repo if you still want the one-look sign-off.
-4. **New:** cut the next tag now to ship the three post-rc2 behavior fixes (the
-   rc2 artifact's K5 anchoring gap is the load-bearing one), or fold them into
-   the GA cut? Tags are immutable, so this only decides timing.
+4. ~~**Cut the next tag to ship the three post-rc2 behavior fixes?**~~
+   **Resolved 2026-09-17: cut.** `v1.1.0-rc3` is published and custody-verified;
+   rc2's K5 anchoring gap is out of the channel. What remains on the GA path is
+   #5 (Windows UAT) and #9 (book the review) — plus deciding #2 above.

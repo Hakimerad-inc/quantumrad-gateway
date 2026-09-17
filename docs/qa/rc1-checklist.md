@@ -81,7 +81,7 @@ rc2 go/no-go gate: 3-minute re-run against the rc2 artifact.
 | K2 | ≥ 99% delivered within retry budget | chaos suite retry tests ✅ |
 | K3 | ≥ 95% reports within SLA | `check_perf_gates.py` 2026-09-14 ✅ (forwarding-begin 226 ms / 2 s budget; SLA row per script's report gate) |
 | K4 | ≤ 10 min to first forwarded study | clean-VM UAT timing — Windows hardware |
-| K5 | 100% of events audited | `test_audit_coverage.py` ✅ + interop proof `test_hub_bookkeeper_interop.py` (`87d6713`) |
+| K5 | 100% of events audited | `test_audit_coverage.py` ✅ + interop proof `test_hub_bookkeeper_interop.py` (`87d6713`) — but see the D2 finding: `FORWARD_*` events reach the chain yet not the external anchor (tamper-evidence, not audit coverage) |
 | K6 | ≤ 250 MB installer / ≤ 150 MB RAM | CI size gate (Windows pending); deb number in §1; RAM from UAT |
 | K7/K8 | refinement §10 perf criteria | `check_perf_gates.py` ✅ (throughput 380.5/s ≥ 5) |
 | K9/K10 | USB boot ≤ 30 s / flush ≤ 10 s | `docs/qa/usb-perf-09.md` — K10 mechanism + proxy timing ✅; boot rows need the rig |
@@ -91,6 +91,16 @@ rc2 go/no-go gate: 3-minute re-run against the rc2 artifact.
 - S10 boot-mode legs (S01-T8, S09-T9 boot rows, S10-T2/T3/T10/T11) — physical USB hardware
 - Hub `/anchor` signing endpoint is documented (`docs/dev/hub-anchor-api.md`) but not implemented hub-side — **gateway side now proven end-to-end against a contract stub** (`test-rig/bookkeeper/`, `tests/test_hub_bookkeeper_interop.py`); live hub interop remains with the hub team (S01-T5/Q7)
 - Packaged-sidecar resource-path validation happens only in clean-VM UAT (§3)
+- **D2 backup/restore drill — DONE 2026-09-17** against the rc2 code
+  (`docs/qa/d2-backup-restore-drill.md`, repeatable via
+  `scripts/d2_backup_restore_drill.sh`): both documented backup paths
+  (stop/copy/restart and online `VACUUM INTO` snapshot) round-trip — health,
+  audit chain, and undelivered work all survive a total-loss restore.
+  **One finding**: the forwarder's separately-constructed `AuditLog`
+  (`main.py:169`) never receives the head anchorer, so `FORWARD_*` events are
+  absent from `audit-heads.txt` (0/4 anchored vs 2/2 for other types) and also
+  miss the hub stream — weakens K5 for delivery provenance. Triage gates GA
+  (E2); added to the D5 review package.
 - PRD §11 external security review — **booking package prepared 2026-09-14**
   (`docs/qa/security-review-package.md` — scope, control/evidence table, declared
   gaps, reviewer quick-start); booking itself = open human step, suggested to

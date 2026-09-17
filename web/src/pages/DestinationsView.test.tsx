@@ -208,8 +208,57 @@ describe('DestinationsView', () => {
     expect(screen.getByText('Save Changes')).toBeEnabled();
   });
 
-  it('offers the Echo probe only where the answer can be trusted (plaintext dicom)', async () => {
-    // The endpoint probes in plaintext; a TLS-only PACS would report
+  it('drops a stale Echo badge when the destination is edited afterwards', async () => {
+    // The badge was keyed by the destination's live host:port, so it survived
+    // an edit and vouched for an endpoint it had never touched. It must be
+    // keyed by what was actually probed.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.stubGlobal('fetch', stubFetch({ echoStatus: 'refused' }));
+    render(<DestinationsView />);
+    const name = await screen.findByDisplayValue('pacs-a');
+    const card = name.closest('.card')!;
+    await user.click(card.querySelector('button')!); // Echo
+    expect(await screen.findByText('refused')).toBeInTheDocument();
+
+    // Change where the destination points: the old result no longer describes it.
+    await user.clear(screen.getByLabelText('pacs-a Host'));
+    await user.type(screen.getByLabelText('pacs-a Host'), '10.0.0.99');
+
+    expect(screen.queryByText('refused')).not.toBeInTheDocument();
+  });
+
+  it('offers the one remedy for a stale routing rule that this page can perform', async () => {
+    // The lint warning advises renaming the target or adding the destination —
+    // but no forwarding-rules UI exists, so "rename" sends the operator to raw
+    // JSON. Adding the destination is what this page is for; the warning must
+    // carry the fix, not just the complaint.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const fetchStub = stubFetch({
+      config: {
+        config_version: '1.0',
+        destinations: CONFIG_WITH_SECRET.destinations,
+        forwarding_rules: [
+          { rule: 'StudyDescription ~ ^MRI', targets: ['pacs-a', 'orthanc-2'], priority: 'normal' },
+        ],
+      },
+      warnings: [
+        {
+          path: 'forwarding_rules[0].targets',
+          message: 'Rule targets unknown destination(s) orthanc-2. Rename or remove the target, or add the destination.',
+          severity: 'warning',
+        },
+      ],
+    });
+    vi.stubGlobal('fetch', fetchStub);
+    render(<DestinationsView />);
+    const btn = await screen.findByText(/Add destination orthanc-2/);
+    expect(btn).toBeInTheDocument();
+
+    await user.click(btn);
+    expect(await screen.findByDisplayValue('orthanc-2')).toBeInTheDocument();
+  });
+
+  it('offers the Echo probe only where the answer can be trusted (plaintext dicom)', async () => {    // The endpoint probes in plaintext; a TLS-only PACS would report
     // "refused" while healthy. The button must not appear for dicom_tls.
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     vi.stubGlobal('fetch', stubFetch());

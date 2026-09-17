@@ -14,7 +14,7 @@
  * one means "cleared by the operator". We never send a blank secret for an
  * existing destination the operator did not touch.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchConfig, saveConfig, apiUrl, fetchConfigWarnings } from "../api";
 import type { ConfigWarning } from "../api";
 import { IconCheck, IconX, IconPlus } from "../ui/icons";
@@ -101,6 +101,20 @@ const TYPE_FIELDS: Record<
 
 const DEST_TYPES = Object.keys(TYPE_FIELDS);
 
+// The model's enum values are developer-facing ("dicom_tls"); an operator
+// picking from a dropdown should not have to decode them. The value sent to
+// the server stays the enum — only the label changes.
+const TYPE_LABELS: Record<string, string> = {
+  dicom: "DICOM (C-STORE)",
+  dicom_tls: "DICOM over TLS",
+  dicomweb: "DICOMweb (STOW-RS)",
+  sftp: "SFTP",
+  rsync: "rsync over SSH",
+  s3: "S3 / object storage",
+  folder: "Local folder",
+  xnat: "XNAT",
+};
+
 interface Destination {
   name: string;
   type: string;
@@ -126,8 +140,23 @@ async function echoProbe(host: string, port: number, aet: string, aetSource: str
 
 const SECRET_PLACEHOLDER = "••••••••";
 
+/** Identity of the endpoint a probe actually contacted.
+ *
+ * A badge is only truthful while the destination still matches the target that
+ * was probed. Keying the result by host/port/called AET/calling AET means an
+ * edit after the probe changes the key and the badge simply stops showing,
+ * instead of vouching for an endpoint it never touched (review I4). The calling
+ * title is part of the signature because a PACS that whitelists callers can
+ * answer differently per source (review I3). */
+function probeSignature(d: Destination): string {
+  return [String(d.host ?? ""), Number(d.port ?? 0), String(d.aet_target ?? ""), String(d.aet_source ?? "")].join("|");
+}
+
 export default function DestinationsView() {
   const [destinations, setDestinations] = useState<Destination[]>([]);
+  // Kept so the stale-rule warning can offer the one remedy this page can
+  // actually perform — adding the missing destination (review I6).
+  const [forwardingRules, setForwardingRules] = useState<unknown[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -140,6 +169,7 @@ export default function DestinationsView() {
     try {
       const cfg = (await fetchConfig()) as Record<string, unknown>;
       setDestinations((cfg.destinations as Destination[]) ?? []);
+      setForwardingRules(Array.isArray(cfg.forwarding_rules) ? (cfg.forwarding_rules as unknown[]) : []);
       setDirty(false);
       setError("");
     } catch (e) {
@@ -160,7 +190,13 @@ export default function DestinationsView() {
       });
   }, [load]);
 
-  const markDirty = () => setDirty(true);
+  // The "Saved" note describes the on-disk config; the moment the operator
+  // edits it, that is no longer true, so the note must go rather than sit
+  // next to unsaved changes claiming they are applied.
+  const markDirty = () => {
+    setDirty(true);
+    setMsg("");
+  };
 
   const update = (i: number, key: string, value: unknown) => {
     setDestinations((ds) => {
@@ -185,7 +221,7 @@ export default function DestinationsView() {
   };
 
   const handleEcho = async (d: Destination) => {
-    const key = d.name || `${d.host}:${d.port}`;
+    const key = probeSignature(d);
     setEchoState((prev) => ({ ...prev, [key]: "probing" }));
     const status = await echoProbe(
       String(d.host),
@@ -241,6 +277,34 @@ export default function DestinationsView() {
   });
   const hasNameErrors = nameErrors.some(Boolean);
 
+  // The stale-rule lint finding says "add the destination" — and unlike the
+  // "rename or remove the target" half of its advice, that is something this
+  // page can do. Pointing the operator at a forwarding-rules editor that does
+  // not exist sends them to the JSON; offering the fix here closes the loop
+  // (review I6).
+  const knownNames = useMemo(
+    () => new Set(destinations.map((d) => String(d.name ?? "").trim()).filter(Boolean)),
+    [destinations],
+  );
+  const staleTargets = useMemo(() => {
+    const stale = new Set<string>();
+    for (const rule of forwardingRules) {
+      if (typeof rule !== "object" || rule === null) continue;
+      const targets = (rule as { targets?: unknown }).targets;
+      if (!Array.isArray(targets)) continue;
+      for (const t of targets) if (typeof t === "string" && !knownNames.has(t)) stale.add(t);
+    }
+    return [...stale].sort();
+  }, [forwardingRules, knownNames]);
+
+  const addMissingDestination = (name: string) => {
+    setDestinations((ds) => [
+      ...ds,
+      { name, type: "dicom", enabled: true, host: "", port: 104, aet_target: "", aet_source: "GATEWAY" },
+    ]);
+    markDirty();
+  };
+
   if (!loaded) return <div className="loading">Loading destinations</div>;
 
   return (
@@ -250,9 +314,21 @@ export default function DestinationsView() {
       {warnings.length > 0 ? (
         <div className="banner warn" role="alert" style={{ marginBottom: 12 }}>
           {warnings.map((w) => (
-            <div key={w.path + w.message}>
+            <div key={w.path + w.message} style={{ marginBottom: 4 }}>
               {w.severity === "info" ? "Note: " : ""}
               {w.message}
+              {w.path.startsWith("forwarding_rules") && staleTargets.length > 0
+                ? staleTargets.map((t) => (
+                    <button
+                      key={t}
+                      className="btn"
+                      style={{ marginLeft: 8 }}
+                      onClick={() => addMissingDestination(t)}
+                    >
+                      <IconPlus size={12} /> Add destination {t}
+                    </button>
+                  ))
+                : null}
             </div>
           ))}
         </div>
@@ -271,7 +347,10 @@ export default function DestinationsView() {
       ) : (
         destinations.map((d, i) => {
           const fields = TYPE_FIELDS[d.type] ?? [];
-          const echoKey = d.name || `${d.host}:${d.port}`;
+          // The badge is keyed by the endpoint that was probed, not by the
+          // destination's current value — so editing host/port/AET afterwards
+          // changes the key and the stale result stops showing (review I4).
+          const echoKey = probeSignature(d);
           const echoStatus = echoState[echoKey];
           // Computed once for the whole list so Save can be gated too.
           const nameError = nameErrors[i];
@@ -322,7 +401,9 @@ export default function DestinationsView() {
                   aria-label="Destination type"
                 >
                   {DEST_TYPES.map((t) => (
-                    <option key={t} value={t}>{t}</option>
+                    <option key={t} value={t}>
+                      {TYPE_LABELS[t] ?? t}
+                    </option>
                   ))}
                 </select>
                 <label className="check" title="A disabled destination is never routed to">
@@ -393,7 +474,17 @@ export default function DestinationsView() {
                         placeholder={isSecret ? SECRET_PLACEHOLDER : f.placeholder}
                         value={display}
                         onChange={(e) => {
-                          const next = f.type === "number" ? Number(e.target.value) : e.target.value;
+                          // Number("") is 0, so clearing a port field would
+                          // silently submit 0 and 400 on "greater than 0" while
+                          // the operator sees an empty box. An empty numeric
+                          // field is omitted from the payload instead, and the
+                          // server reports it as required — the accurate error.
+                          const next =
+                            f.type === "number"
+                              ? e.target.value === ""
+                                ? undefined
+                                : Number(e.target.value)
+                              : e.target.value;
                           update(i, f.key, next);
                         }}
                         aria-label={`${d.name || "destination"} ${f.label}`}

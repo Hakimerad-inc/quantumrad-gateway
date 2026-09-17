@@ -70,8 +70,15 @@ link — no forged or orphaned anchors.
 
 ## Finding: forwarding events never reach the external anchor
 
-**Severity: weakens K5 tamper-evidence for delivery provenance. Should be
-triaged before GA (E2 gate) and handed to the external review (D5).**
+**Severity: weakens K5 tamper-evidence for delivery provenance.**
+**Status: FIXED 2026-09-17 (`9c10423`)** — `_build_forwarder` now takes the
+wired `AuditLog` (the call site already ran after the wiring, so it was one
+line of plumbing, no reordering). Re-checked live the same way the gap was
+found: `FORWARD_START` went 0/4 → 1/1 anchored. Two regression tests pin the
+contract (`tests/test_forwarder.py` Slice 6b). The fix is post-rc2 — it rides
+the next cut, so the published rc2 artifact still carries the gap and sites
+on rc2 should move to the next tag when it cuts. Worth mentioning to the D5
+reviewers as a found-and-fixed item.
 
 Mapping each anchor line back to its event id gave a clean signal:
 

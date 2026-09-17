@@ -37,8 +37,8 @@ K-gates in §1/refinement §10.
 
 - [ ] Windows 10 x64: install → wizard → first study forwarded (K4 ≤ 10 min) — `docs/qa/uat-06.md`
 - [ ] Windows 11 x64: same walkthrough
-- [ ] Ubuntu (supported LTS): deb + AppImage boot and forward — **dpkg-level ✅ 2026-09-14**: deb installs clean in a `ubuntu:24.04` Docker container (all deps resolve, `quantum-rad-gateway 1.1.0-rc1` reaches `ii` state, `/usr/bin/mercure-gateway` + bundled sidecar resolve, sidecar prints 1.1.0-rc1); GUI boot + tray forward leg still needs a desktop session
-- [x] Packaged sidecar spawn verified (tray state transitions idle→sending→error; the one gap CI cannot drive headless) — **2026-09-14 on this box's GNOME session**, deb extracted and run as a normal user with `MERCURE_BACKEND_PORT=18080` (8080 held by another service): sidecar spawned from the fixed deb-layout candidate path, health `1.1.0-rc1`, tray glyph live idle→sending→idle→error (backend killed → poller mapped transport failure), C-STORE of 3 synthetic studies accepted on 11112 and all routed `complete` to Orthanc on first attempt. Found and fixed two product bugs: sidecar path candidate used the binary name instead of productName, and CSP/window plumbing for a non-default port. Visual glyph confirmation (tray icon rendering distinct per state on the real panel) pending user's eyes — appindicator was live in the session.
+- [x] Ubuntu (supported LTS): deb + AppImage boot and forward — **dpkg-level ✅ 2026-09-14** (`ubuntu:24.04` container: clean install, `ii` state, sidecar prints 1.1.0-rc1); **GUI boot + tray leg ✅ 2026-09-17** against the published rc2 deb in this box's GNOME session — `docs/qa/b3-tray-leg.md`: all three glyphs pixel-distinct (green idle / amber sending / red error, 312–334 of 1024 px differ), a 120-instance study forwarded to the test-rig Orthanc and went SENT, glyph returned to idle on completion, audit valid. One finding fixed post-rc2: a dead backend rendered the login screen (`b0e74d4`) — the status probe treated a refused connection as a 401.
+- [x] Packaged sidecar spawn verified (tray state transitions idle→sending→error; the one gap CI cannot drive headless) — **2026-09-14 on this box's GNOME session**, deb extracted and run as a normal user with `MERCURE_BACKEND_PORT=18080` (8080 held by another service): sidecar spawned from the fixed deb-layout candidate path, health `1.1.0-rc1`, tray glyph live idle→sending→idle→error (backend killed → poller mapped transport failure), C-STORE of 3 synthetic studies accepted on 11112 and all routed `complete` to Orthanc on first attempt. Found and fixed two product bugs: sidecar path candidate used the binary name instead of productName, and CSP/window plumbing for a non-default port. Visual glyph confirmation closed 2026-09-17 by `docs/qa/b3-tray-leg.md` (glyphs read over D-Bus + pixel-diffed, evidence PNG in `docs/qa/evidence/`).
 - [ ] Windows service mode: install/start/stop/uninstall from the admin panel (S07-T9)
 - [ ] Auto-update: point a test install at a staging `latest.json`, verify signature enforcement rejects a tampered artifact — **headless/Python half ✅ 2026-09-14** (`scripts/rehearse_updater_tamper.py`: real signed deb served over loopback HTTP; genuine signature staged, bit-flipped signature refused with nothing staged). Tauri in-app half needs the desktop shell on a real install (§3)
 
@@ -91,7 +91,7 @@ Full record: `docs/qa/e1-dryrun.md` §6.
 | K2 | ≥ 99% delivered within retry budget | chaos suite retry tests ✅ |
 | K3 | ≥ 95% reports within SLA | `check_perf_gates.py` 2026-09-14 ✅ (forwarding-begin 226 ms / 2 s budget; SLA row per script's report gate) |
 | K4 | ≤ 10 min to first forwarded study | clean-VM UAT timing — Windows hardware |
-| K5 | 100% of events audited | `test_audit_coverage.py` ✅ + interop proof `test_hub_bookkeeper_interop.py` (`87d6713`) — the D2 finding (`FORWARD_*` reached the chain but not the external anchor) is fixed in `9c10423` |
+| K5 | 100% of events audited | `test_audit_coverage.py` ✅ + interop proof `test_hub_bookkeeper_interop.py` (`87d6713`) — the D2 finding (`FORWARD_*` reached the chain but not the external anchor) is fixed in `9c10423`; rc2's bundled SPA also rendered a login screen for a dead backend, fixed in `b0e74d4` |
 | K6 | ≤ 250 MB installer / ≤ 150 MB RAM | CI size gate (Windows pending); deb number in §1; RAM from UAT |
 | K7/K8 | refinement §10 perf criteria | `check_perf_gates.py` ✅ (throughput 380.5/s ≥ 5) |
 | K9/K10 | USB boot ≤ 30 s / flush ≤ 10 s | `docs/qa/usb-perf-09.md` — K10 mechanism + proxy timing ✅; boot rows need the rig |
@@ -99,6 +99,15 @@ Full record: `docs/qa/e1-dryrun.md` §6.
 ## 5. Known-open items at RC
 
 - S10 boot-mode legs (S01-T8, S09-T9 boot rows, S10-T2/T3/T10/T11) — physical USB hardware
+- **B3 Ubuntu desktop tray leg — DONE 2026-09-17** against the published rc2
+  deb (`docs/qa/b3-tray-leg.md`): all three tray glyphs render pixel-distinct
+  in a real GNOME session, a 120-instance study forwarded to Orthanc and went
+  SENT, audit chain valid. Found and fixed one operator-facing bug post-rc2:
+  the SPA rendered the **login screen when the backend was unreachable**
+  (`b0e74d4` — the status probe treated a refused connection the same as a
+  401; now a distinct "Gateway unreachable" view with no password field).
+  The deb's bundled SPA is frozen at tag time, so this fix and `9c10423`
+  both ride the next cut.
 - Hub `/anchor` signing endpoint is documented (`docs/dev/hub-anchor-api.md`) but not implemented hub-side — **gateway side now proven end-to-end against a contract stub** (`test-rig/bookkeeper/`, `tests/test_hub_bookkeeper_interop.py`); live hub interop remains with the hub team (S01-T5/Q7)
 - Packaged-sidecar resource-path validation happens only in clean-VM UAT (§3)
 - **D2 backup/restore drill — DONE 2026-09-17** against the rc2 code
@@ -115,6 +124,13 @@ Full record: `docs/qa/e1-dryrun.md` §6.
   plumbing); FORWARD_START went 0/4 → 1/1 anchored in a live re-check, with
   two regression tests pinning the shared-audit contract. Not in the rc2 tag
   — rides the next cut.
+- **B3 finding: a dead backend rendered the login screen — FIXED 2026-09-17**
+  (`b0e74d4`). `AuthContext.checkAuth` set `isAuthenticated = false` on both a
+  401 and a connection refusal, so an operator whose backend was down saw a
+  password prompt and a "Network error" that read like a wrong password. Now a
+  separate `backendUnreachable` state plus a `BackendDownView` naming the
+  probed host:port, with no password field. 6 new frontend tests (20/20, was
+  14). Post-rc2 — the deb's bundled SPA is frozen at tag time.
 - PRD §11 external security review — **booking package prepared 2026-09-14**
   (`docs/qa/security-review-package.md` — scope, control/evidence table, declared
   gaps, reviewer quick-start); booking itself = open human step, suggested to

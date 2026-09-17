@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from mercure_gateway import __version__
+from mercure_gateway.audit import AuditLog
 from mercure_gateway.config import (
     GatewayConfig,
     apply_env_overrides,
@@ -465,7 +466,6 @@ def main(argv: list[str] | None = None) -> int:
     from mercure_gateway.config.encryption import load_master_password
 
     database = open_database(spool_dir / "mercure-gateway.db", encrypt_key=load_master_password())
-    from mercure_gateway.audit import AuditLog
 
     audit = AuditLog(database)
     # Local head anchor (review M4): every chain head is appended to an

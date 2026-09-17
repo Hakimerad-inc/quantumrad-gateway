@@ -423,7 +423,9 @@ def test_stale_forwarding_rule_target_warns_but_loads(caplog) -> None:
 
     cfg = GatewayConfig(
         destinations=[DICOMDestination(name="pacs-a", host="h", port=104, aet_target="A")],
-        forwarding_rules=[ForwardingRule(rule="StudyDescription ~ 'CHEST'", targets=["pacs-a", "pacs-gone"])],
+        forwarding_rules=[
+            ForwardingRule(rule="StudyDescription ~ 'CHEST'", targets=["pacs-a", "pacs-gone"])
+        ],
     )
     assert cfg.forwarding_rules[0].targets == ["pacs-a", "pacs-gone"]  # loaded, not truncated
     stale = [r for r in caplog.records if "pacs-gone" in r.getMessage()]

@@ -85,11 +85,16 @@ Ed25519 updater trust root and the web-admin boundary. We have a full package
 - Updater trust root: key custody SPOF (runbook §0.1), what happens on key
   compromise, downgrade protection. **Note (incident to disclose):** a PAT and the
   signer passphrase were exposed in an agent transcript on 2026-09-14; the PAT had
-  scopes sufficient to read the encrypted private-key secret, so the keypair is
-  treated as compromised and rotated on 2026-09-17. rc2's published artifacts are
-  signed with the exposed key and are superseded by rc3. Expect to be asked how
-  we'd handle an equivalent exposure across a deployed fleet — that answer is
-  currently weak, and is a finding we'd rather raise ourselves.
+  scopes sufficient to read the encrypted private-key secret, so the keypair was
+  treated as potentially compromised. **After assessment, the maintainer declined
+  rotation (2026-09-17)** — the exposed key remains the live signing key, and the
+  published `v1.1.0-rc2` artifacts are signed with it. Rotation has no in-band
+  path (runbook §0.1: updaters signed with the old key stop verifying), so
+  declining the rotation means living with the exposure rather than forcing a
+  full re-install at every deployed site. Expect to be asked about both halves —
+  why the key was not rotated, and how we'd handle an equivalent exposure across a
+  deployed fleet. The fleet answer is currently weak, and is a finding we'd rather
+  raise ourselves.
 - The loopback single-password model vs. a real multi-operator site.
 - Spool DB at-rest story vs. the (encrypted) config vault sitting next to it.
 - Whether the audit chain's trust assumptions hold when the hub anchor is absent.

@@ -3,9 +3,11 @@
 **Written:** 2026-09-17 · **Code:** `fc76c11` (main, post-`v1.1.0-rc2`)
 
 Every agent-doable item on the release board is done (#1, #2, #3, #11, #14, #15).
-What remains falls into three classes: things needing **credentials you control**
-(#4), things needing **hardware/VMs you control** (#5, #6, #7), things needing
-**other humans** (#8, #9), and the downstream items they gate (#10, #12, #13).
+Since this plan was written, two gates closed without waiting on a human: **#6
+(Ubuntu tray) finished 2026-09-17**, and **#4 (credential rotation) was declined
+by the maintainer 2026-09-17** — see its section below. What remains: things
+needing **hardware/VMs you control** (#5, #7), things needing **other humans**
+(#8, #9), and the downstream items they gate (#10, #12, #13).
 
 This file is the plan for closing them: for each gate, what is already prepared,
 the concrete steps, the time it costs, and the one decision I need from you.
@@ -13,37 +15,53 @@ the concrete steps, the time it costs, and the one decision I need from you.
 ## Sequencing (dependency graph)
 
 ```
-#4 rotate credentials ──────────────┐
-                                   ├──► rc3 cut (new compiled-in pubkey)
-#5 Windows UAT ──┐                  │      + the 7 post-rc2 commits on main
-#6 Ubuntu tray ──┼──► #12 desktop updater ──┐
+#4 rotate credentials — DECLINED 2026-09-17 (no rc3 is forced by key rotation)
+     ┌─ the 10 post-rc2 commits on main still argue for a next tag (§below)
+#5 Windows UAT ──┐
+#6 Ubuntu tray ──┼──► #12 desktop updater ──┐   (#6 DONE 2026-09-17)
                  │                         ├──► #10 cut v1.1.0 GA ──► #13 first site
 #9 book review ──┴─── triage buffer ────────┘
 #7 USB rig (hardware) — NOT on the GA path; S10 boot-mode legs are a §5 known-open
 #8 hub interop — NOT on the GA path; closes D2 criterion (c) and completes K5
 ```
 
-GA (#10) is gated on #5, #6, #9 (per rc1-checklist). #7 and #8 are recorded
-known-open items, not GA blockers — but #8 is what makes the audit story
-complete, so treat it as a credibility gap rather than a checklist row.
+GA (#10) is gated on #5, #6, #9 (per rc1-checklist) — and #6 is now done, so the
+GA gate is #5 + #9. #7 and #8 are recorded known-open items, not GA blockers —
+but #8 is what makes the audit story complete, so treat it as a credibility gap
+rather than a checklist row.
 
-**Cheapest unblock first:** #6 (~30 min, on this box, no procurement).
-**Most consequential:** #4 (it is the one gate with a security deadline, and it
-forces an rc3).
+**Cheapest unblock remaining:** #9's booking email (~20 min, you send it; the
+package is already assembled). The last on-box unblock (#6) is closed.
 
 ---
 
-## #4 — Rotate the leaked PAT and signer password
+## #4 — Rotate the leaked PAT and signer password — CLOSED: DECLINED 2026-09-17
 
-**Why it can't be delegated:** the secrets are yours; the rotation *changes what
-the published artifacts trust*, which is a release decision.
+**Decision (maintainer, 2026-09-17): rotation is not necessary; it will not
+happen.** The exposure stands disclosed (below and in
+`security-review-outreach.md`), the exposed key remains the live signing key, and
+`v1.1.0-rc2` is **not** superseded. This closes the gate: no rc3 is forced by key
+rotation.
+
+The residue of declining, stated plainly so it isn't rediscovered later: runbook
+§0.1 has no in-band rotation path — the compiled-in updater pubkey cannot be
+swapped without a new build, and updaters signed with the old key stop verifying —
+so declining means living with the exposed key rather than forcing a full
+re-install at every deployed site. A reviewer is still likely to ask about both
+halves (why we did not rotate, and the fleet-wide answer), and the fleet answer
+remains weak. That is now a declared gap rather than a pending action.
+
+**Why it couldn't be delegated:** the secrets were yours; the rotation *changes
+what the published artifacts trust*, which was a release decision — now made.
 
 **Exposed in the pre-clear transcript on 2026-09-14:** a GitHub PAT (scopes
 included `repo`, `workflow`, `admin:org` — enough to read the encrypted
 `MERCURE_TAURI_PRIVATE_KEY` secret, so the keypair is treated as compromised) and
 the tauri signer passphrase.
 
-### Steps for you
+### If the decision is ever revisited
+
+The rotation procedure is retained for the record, superseded but not deleted:
 
 1. **Revoke the PAT.** GitHub → Settings → Developer settings → Personal access
    tokens → revoke the token. Then check the org audit log for any unexpected
@@ -63,37 +81,22 @@ the tauri signer passphrase.
 4. **Tell me the new key-file SHA-256** and I update the runbook §0.1 custody
    record.
 
-### The decision this forces
+Rotation then **requires a new build** (there is no in-band path), which is what
+made it consequential enough to be a decision rather than a chore. The earlier
+(a)-cut-rc3-now / (b)-fold-into-GA choice is settled by the decline: neither.
 
-The compiled-in updater pubkey (`tauri.conf.json` → set by the release overlay)
-cannot be updated in-band — runbook §0.1 is explicit: *"updaters signed with the
-old key stop verifying"*. So rotation **requires a new build**: rc2's published
-artifacts stay signed by the exposed key forever and must be superseded.
+### What is left on this gate
 
-**I need you to choose:**
-
-- **(a) Cut rc3 now** carrying only the rotation + the 7 post-rc2 commits, then
-  GA after #5/#6/#9. Cleanest: the exposed-key artifacts leave the channel
-  quickly, and the review engagement starts from a trustworthy tag.
-- **(b) Fold rotation into the GA cut.** Fewer tags, but every artifact between
-  now and GA carries a known-compromised signing key — and #9's reviewer will
-  ask about exactly that.
-
-I recommend **(a)**. The tag cost is ~40 min of CI; the alternative is shipping
-installers signed by a key we have declared compromised.
-
-### What I can do for you here
-
-- Bump all six version sources to `1.1.0-rc3` and cut the signed tag once the
-  new secrets are set (the same sequence that produced rc2).
-- Fix `docs/qa/security-review-outreach.md` — **it currently asserts the
-  rotation already happened** ("rotated on 2026-09-17 … superseded by rc3"). That
-  was written ahead of the fact. Either we do the rotation before sending it, or
-  I reword it to future tense; as written it would go to an external reviewer as
-  a false statement about our own incident handling.
-- Draft the answer the outreach doc itself flags as weak: *how would we handle an
-  equivalent exposure across a deployed fleet?* Right now there is no fleet-side
-  story, only a key-side one. That is a finding we should raise ourselves.
+- ~~Bump all six version sources to `1.1.0-rc3` and cut the signed tag once the
+  new secrets are set~~ — superseded by the decline (a next tag would carry only
+  the post-rc2 fixes; see decision 4).
+- ~~Fix `docs/qa/security-review-outreach.md`~~ — **done 2026-09-17**: it no longer
+  asserts the rotation happened; the incident note now states the exposure, the
+  declined rotation, and that rc2's artifacts remain signed by the exposed key.
+- **Draft the answer the outreach doc itself flags as weak:** *how would we handle
+  an equivalent exposure across a deployed fleet?* Right now there is no
+  fleet-side story, only a key-side one. That is a finding we should raise
+  ourselves, and declining rotation makes it more likely to be asked.
 
 ---
 
@@ -127,24 +130,27 @@ failure from pasted logs; cut rcN.
 
 ---
 
-## #6 — Ubuntu desktop GUI/tray leg (blocks #12; cheapest unblock)
+## #6 — Ubuntu desktop GUI/tray leg — DONE 2026-09-17
 
-**Prepared and mostly done already** — `rc1-checklist.md:41` records the substantive
-part executed on this box's GNOME session 2026-09-14: deb extracted, sidecar
-spawned from the packaged candidate path with a non-default port, tray state
-machine driven live (idle → sending → idle → error on backend kill), three
-synthetic studies accepted on 11112 and routed `complete` to Orthanc on first
-attempt. Two product bugs were found and fixed in that pass.
+**Closed by `docs/qa/b3-tray-leg.md`** (commits `a84d9e6`, `3e76012`): the
+visual-glyph gap this plan called "the only thing left" was closed without a
+human at the panel — the glyphs were read live from the session's
+StatusNotifierItem over D-Bus and pairwise pixel-diffed (idle↔sending 312/1024
+px, idle↔error 322, sending↔error 334), so the states are provably distinct
+rather than eyeballed. A 120-instance study forwarded to the test-rig Orthanc
+and went SENT; audit chain valid throughout.
 
-**The only gap is your eyes:** nobody has visually confirmed the tray icon renders
-*distinct glyphs per state* on the real panel. appindicator was live in the
-session, so the mechanism works — but the gate as written is a visual one.
+The substantive half ran 2026-09-14 (rc1) and is recorded at
+`rc1-checklist.md:41`: deb extracted, sidecar spawned from the packaged candidate
+path with a non-default port, tray state machine driven live, three synthetic
+studies routed `complete` on first attempt. Two product bugs were found and fixed
+in that pass; a third (the dead-backend login screen, `b0e74d4`) was found in
+*this* leg and also fixed.
 
-**Cost:** ~30 min, on this box, no procurement.
-
-**What I can do:** run the whole scripted scenario again while you watch, and
-capture screenshots of each state for the evidence record — you just call the
-states.
+**The caveat that remains:** the verification was programmatic, not a human eye
+on the panel. The evidence composite is `docs/qa/evidence/b3-tray-states.png` if
+you want the visual sign-off anyway — it's a one-look confirmation, not a
+re-run of the drill.
 
 ---
 
@@ -215,9 +221,12 @@ findings land in an `-rcN` rather than being deferred.
 
 **Cost:** ~2 h of your time over 2–3 weeks; the engagement is 2–3 weeks.
 
-**Timing decision:** the outreach positions us at `v1.1.0-rc2`. If we cut rc3
-(#4 option a), the pin should move to rc3 — I'll update the doc. Start now rather
-than after Phase A; the triage buffer is what makes the booking valuable.
+**Timing decision:** the outreach positions us at `v1.1.0-rc2`, and the review-pin
+stays there — with #4 declined there is no rc3 pending for rotation reasons. If
+you do cut a fixes tag (decision 4 below), move the pin before granting access;
+a pinned tag is only meaningful if it's the tag the reviewer actually reads. Start
+now rather than after Phase A; the triage buffer is what makes the booking
+valuable.
 
 **What I can do:** assemble the reviewer-access bundle (pin the tag, export the
 ADR set and `docs/guides/`, confirm the test-rig contains no live PHI), and draft
@@ -225,12 +234,15 @@ the fleet-wide key-compromise answer (see #4).
 
 ---
 
-## What rides the next tag (rc3 or GA)
+## What rides the next tag
 
-`v1.1.0-rc2` points at `abb1ed5`. Seven commits on `main` are ahead of it and are
+`v1.1.0-rc2` points at `abb1ed5`. Ten commits on `main` are ahead of it and are
 **not** in any published artifact:
 
 ```
+3e76012 docs(qa): close the B3 Ubuntu tray row in rc1-checklist
+a84d9e6 docs(qa): B3 Ubuntu tray leg done on rc2; all three glyphs distinct
+b0e74d4 fix(web): a dead backend must not masquerade as a login prompt
 fc76c11 docs(qa): mark the forwarder anchoring finding fixed in the D2 record
 3a83452 docs(qa): mark the forwarder anchoring gap fixed (9c10423)
 9c10423 fix(audit): the forwarder must share the anchored AuditLog, not a fresh one
@@ -240,15 +252,26 @@ dcd6245 feat(config): warn at load when a forwarding rule names no destination
 6d750d5 docs(qa): D2 backup/restore drill proven on rc2; forwarder anchoring gap logged
 ```
 
-Only `9c10423` and `dcd6245` change shipped behavior; the rest is evidence. The
-one that matters operationally: **the published rc2 artifact still carries the
-K5 anchoring gap** — the forwarder's `FORWARD_*` events don't reach
+Three change shipped behavior — `9c10423` (audit anchoring), `b0e74d4` (dead
+backend view), `dcd6245` (config warning); the rest is evidence. The one that
+matters operationally: **the published rc2 artifact still carries the K5
+anchoring gap** — the forwarder's `FORWARD_*` events don't reach
 `audit-heads.txt`. Fixed on main, verified live (0/4 → 1/1 anchored), pinned by
 two regression tests. Any site on rc2 should move to the next tag when it cuts.
 
+Rotation no longer rides the next tag (#4 declined), so the tag's only purpose is
+shipping those three fixes. That is still worth doing — but it is now a
+schedule call, not a security one.
+
 ## Decisions I need from you
 
-1. **#4 option:** cut rc3 to rotate the signing key (recommended), or fold
-   rotation into GA?
+1. ~~**#4 option:** cut rc3 to rotate the signing key, or fold rotation into GA?~~
+   **Resolved 2026-09-17: rotation declined; no rc3 forced.** (The next tag, if
+   cut, carries only the post-rc2 fixes above.)
 2. **#7:** may K9/K10 slip past GA, or do they gate it?
-3. **#6:** want me to re-run the tray scenario on this box now for you to watch?
+3. ~~**#6:** re-run the tray scenario for you to watch?~~ **Resolved 2026-09-17:
+   done** — programmatic glyph verification closed it; see `b3-tray-leg.md`. The
+   evidence PNG is in the repo if you still want the one-look sign-off.
+4. **New:** cut the next tag now to ship the three post-rc2 behavior fixes (the
+   rc2 artifact's K5 anchoring gap is the load-bearing one), or fold them into
+   the GA cut? Tags are immutable, so this only decides timing.

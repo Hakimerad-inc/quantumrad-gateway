@@ -203,6 +203,7 @@ check (e.g. cron + `curl … /api/audit/verify | jq -e .valid`).
 | Audit verify reports breaks | Someone modified the database — restore from backup ([Backup & Restore](backup-restore.md)); do **not** hand-edit rows. |
 | Web panel slow with many studies | Queue view is paginated (10k rows render within budget); reduce page size. |
 | Updates not appearing | Auto-update checks the signed manifest (see below); ensure outbound HTTPS to the update URL. |
+| Wrong receiver port / unexpected defaults | The binary resolves its config from `--config <path>` and **does not read `MERCURE_GATEWAY_CONFIG` itself** — that env var only works under the systemd unit, which expands it into `ExecStart`'s `--config`. Run the binary directly without `--config` and it falls back to `./mercure-gateway.json` relative to its CWD and binds defaults *silently*, which can collide with another gateway on the same box. Always pass `--config` explicitly (or launch from a directory holding the intended file) and confirm the receiver port in the startup log. |
 
 The two actions are deliberately distinct: **Retry** re-arms routes that
 already exist (a FAILED study gets a fresh delivery attempt); **Enqueue**

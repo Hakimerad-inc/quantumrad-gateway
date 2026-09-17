@@ -26,6 +26,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -113,6 +114,50 @@ class UpdateManifest:
     checksum_sha256: str = ""
 
 
+# A final release outranks any pre-release of the same X.Y.Z (PEP 440: 1.1.0
+# is newer than 1.1.0-rc3). Used only for the sentinel below — real rankings
+# come from _version_key, which parses the scheme we actually publish.
+_FINAL_RELEASE = 1 << 30
+
+
+def _version_key(version: str) -> tuple[int, int, int, int]:
+    """Order key for the version scheme the project publishes.
+
+    Accepts ``X.Y.Z`` and ``X.Y.Z-rcN`` — the two forms ``sync_version.py``
+    ever writes. A final ``X.Y.Z`` outranks its own ``-rcN`` pre-releases.
+    Raises ``ValueError`` for anything else, so :func:`_is_newer` can fail
+    closed rather than guess at a string it cannot order.
+
+    Note this is the *Python-side* defence-in-depth check; Tauri's updater
+    plugin performs its own comparison independently.
+    """
+    main, _, pre = version.partition("-")
+    parts = main.split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"unparseable version: {version!r}")
+    rank = _FINAL_RELEASE
+    if pre:
+        match = re.match(r"rc(\d+)$", pre)
+        if match is None:
+            raise ValueError(f"unsupported pre-release suffix: {version!r}")
+        rank = int(match.group(1))
+    return (int(parts[0]), int(parts[1]), int(parts[2]), rank)
+
+
+def _is_newer(manifest_version: str, current_version: str) -> bool:
+    """True only if *manifest_version* is strictly newer than the running one.
+
+    Raises ``ValueError`` for a version it cannot order — the caller decides
+    how to surface that, and the boundary is fail-closed (never "offer it
+    anyway"). The previous behaviour treated *any* differing version as
+    available, which let a compromised endpoint present a validly-signed
+    older archive as an upgrade (a downgrade path needing no key compromise
+    at all).
+    """
+    return _version_key(manifest_version) > _version_key(current_version)
+
+
+
 @dataclass
 class UpdateResult:
     """Outcome of a check/apply/rollback operation."""
@@ -150,9 +195,12 @@ class Updater:
     def check_update(self) -> UpdateResult:
         """Fetch the update manifest and report if a newer version exists.
 
-        Returns ``available=True`` with the manifest when ``manifest.version``
-        differs from the current version.  HTTP failures surface as an error
-        result (never an exception — an offline check must not crash startup).
+        Returns ``available=True`` with the manifest only when
+        ``manifest.version`` is strictly *newer* than the running version — a
+        differing version is not necessarily an upgrade, and an older one must
+        never be offered (downgrade protection).  HTTP failures surface as an
+        error result (never an exception — an offline check must not crash
+        startup).
         """
         try:
             resp = requests.get(self.update_url, timeout=self.timeout_sec)
@@ -169,10 +217,17 @@ class Updater:
             signature=str(data.get("signature", "")),
             checksum_sha256=str(data.get("checksum_sha256", "")),
         )
-        if manifest.version == self.current_version:
-            return UpdateResult(available=False)
         if not manifest.version:
             return UpdateResult(error="update manifest missing version")
+        try:
+            newer = _is_newer(manifest.version, self.current_version)
+        except ValueError as exc:
+            # Fail closed and say why: "cannot order this version" must not
+            # read as "you are up to date" in the panel.
+            logger.warning("update not offered: %s", exc)
+            return UpdateResult(error=str(exc))
+        if not newer:
+            return UpdateResult(available=False)
         return UpdateResult(available=True, manifest=manifest)
 
     def verify_signature(self, data: str | bytes, signature: str) -> bool:

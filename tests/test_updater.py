@@ -19,7 +19,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from mercure_gateway.update import UpdateManifest, Updater
+from mercure_gateway.update import UpdateManifest, Updater, UpdateResult
 
 # A per-session test keypair (Ed25519 keygen is cheap). The private key exists
 # only so these tests can produce signatures the Updater should accept.
@@ -101,6 +101,75 @@ def test_check_update_none_when_up_to_date(mock_get: MagicMock, updater: Updater
 
     assert result.available is False
     assert result.manifest is None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Downgrade protection (a differing version is not necessarily a newer one)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _check_with(manifest_version: str, current_version: str) -> UpdateResult:
+    """Run check_update() with a manifest version against a running version."""
+    with patch("requests.get") as mock_get:
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.return_value = {
+            "version": manifest_version,
+            "url": f"https://updates.example.com/releases/{manifest_version}.tar.gz",
+            "signature": "",
+            "checksum_sha256": "",
+        }
+        mock_get.return_value = resp
+        return Updater(
+            update_url="https://updates.example.com/latest.json",
+            current_version=current_version,
+            public_key=_PUBLIC_B64,
+        ).check_update()
+
+
+@patch("requests.get")
+def test_check_update_rejects_an_older_version(mock_get: MagicMock, updater: Updater) -> None:
+    """An older signed release is not an update — a difference is not an upgrade.
+
+    Previously any *differing* version was reported available, so a compromised
+    endpoint could offer a validly-signed older, vulnerable archive as though it
+    were newer (found while drafting the fleet key-compromise answer).
+    """
+    result = _check_with("0.9.0", "1.1.0")
+
+    assert result.available is False
+    assert result.manifest is None
+
+
+def test_check_update_rejects_an_older_prerelease() -> None:
+    """rc2 does not update a box already on rc3."""
+    result = _check_with("1.1.0-rc2", "1.1.0-rc3")
+
+    assert result.available is False
+
+
+def test_check_update_offers_the_next_prerelease() -> None:
+    """rc3 does update a box on rc2 — the gate blocks regressions only."""
+    result = _check_with("1.1.0-rc3", "1.1.0-rc2")
+
+    assert result.available is True
+    assert result.manifest is not None
+    assert result.manifest.version == "1.1.0-rc3"
+
+
+def test_check_update_offers_the_release_over_its_own_prerelease() -> None:
+    """The final 1.1.0 outranks 1.1.0-rc3 (PEP 440 pre-release ordering)."""
+    result = _check_with("1.1.0", "1.1.0-rc3")
+
+    assert result.available is True
+
+
+def test_check_update_fails_closed_on_an_unparseable_version() -> None:
+    """A version we cannot order is not offered as an update (fail-closed)."""
+    result = _check_with("latest", "1.1.0-rc3")
+
+    assert result.available is False
+    assert result.error is not None
 
 
 @patch("requests.get")

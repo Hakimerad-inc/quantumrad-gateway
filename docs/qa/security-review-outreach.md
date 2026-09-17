@@ -93,8 +93,56 @@ Ed25519 updater trust root and the web-admin boundary. We have a full package
   declining the rotation means living with the exposure rather than forcing a
   full re-install at every deployed site. Expect to be asked about both halves —
   why the key was not rotated, and how we'd handle an equivalent exposure across a
-  deployed fleet. The fleet answer is currently weak, and is a finding we'd rather
-  raise ourselves.
+  deployed fleet. The fleet answer is drafted below — with its own declared gaps.
 - The loopback single-password model vs. a real multi-operator site.
 - Spool DB at-rest story vs. the (encrypted) config vault sitting next to it.
 - Whether the audit chain's trust assumptions hold when the hub anchor is absent.
+
+### Our fleet-wide key-compromise answer (drafted, with its gaps declared)
+
+Stated as we'd answer it, not as we'd like it to be. The mechanism
+(`src/mercure_gateway/update.py`, ADR-0006, config `UpdateConfig`):
+
+**What the compromise of the signing key alone cannot do.** Applying an update
+takes more than a valid signature. The updater never auto-installs — it *checks*
+at startup and applies only after local operator consent and a restart
+(`UpdateConfig.enabled` defaults to `false`; a check is not an install). The
+manifest is fetched from GitHub Releases over HTTPS, so a stolen key does not by
+itself grant publish rights: an attacker needs the key **and** release-publishing
+credentials. Verification is fail-closed in two independent places — Tauri's
+updater plugin against the compiled-in key, and the Python-side `Updater` against
+`config.update.public_key` (empty key = every archive rejected, never accepted).
+A signature that does not verify is a rejection, not a warning.
+
+**What it can do, and what we'd do about it.** A holder of the key plus publish
+rights can ship a malicious archive that *will* verify, and if a site accepts the
+prompt, it runs. Our response is the runbook §0.1 rotation path, and it is
+out-of-band by necessity — the updater trusts only the compiled-in pubkey, so a
+rotated key cannot be pushed to an installed fleet: sites must **re-install** a
+superseding installer, not update to it. In the window between detection and
+re-install, a site can: disable update checks (`config.update.enabled = false`),
+pin `update_url` to an internal mirror we control, or pin a site-owned key in
+`config.update.public_key` behind a re-signing proxy (correct but operationally
+heavy — we would not ask a small site to do it).
+
+**The gaps we are raising ourselves, because a reviewer will find them anyway:**
+
+1. **No in-band revocation.** There is no revocation channel a deployed gateway
+   consults; "stop trusting this key" requires an out-of-band installer. This is
+   the weakest part of the fleet story and we know it.
+2. **The version check is not monotonic.** `Updater.check_update` treats *any*
+   version differing from the running one as available — a lower version is
+   offered as an update. With a valid signature on an old, vulnerable archive,
+   that is a downgrade path even without key compromise, needing only a
+   compromised *endpoint*. We consider this a real finding; it is filed for a
+   fix on `main` (monotonic / minimum-version comparison) rather than deferred.
+3. **Single-key trust root.** The compiled-in key is one secret with no
+   continuity plan — no second key waiting in the firmware for exactly this
+   case. Multi-key support is a design change we'd want reviewer input on before
+   committing to.
+4. **Consent is a control, not a barrier.** A verifying-but-malicious update
+   still presents as a normal prompt; operator vigilance is load-bearing and
+   cannot be assumed at every site.
+
+We would rather have these on the record before the engagement than spend review
+hours having them surfaced.

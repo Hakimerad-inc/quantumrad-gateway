@@ -410,3 +410,33 @@ def test_webui_tls_requires_both_files() -> None:
         WebUIConfig(tls_key_file="/tmp/k.pem")
     ok = WebUIConfig(tls_cert_file="/tmp/c.pem", tls_key_file="/tmp/k.pem")
     assert ok.tls_cert_file == "/tmp/c.pem"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Forwarding-rule target hygiene (E1 follow-up: stale targets must not
+# strand a study — f8c3250 fixed the runtime path; this is the load-time warning)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_stale_forwarding_rule_target_warns_but_loads(caplog) -> None:
+    """A rule naming a removed destination warns at load, not at first study."""
+    from mercure_gateway.config import DICOMDestination, ForwardingRule
+
+    cfg = GatewayConfig(
+        destinations=[DICOMDestination(name="pacs-a", host="h", port=104, aet_target="A")],
+        forwarding_rules=[ForwardingRule(rule="StudyDescription ~ 'CHEST'", targets=["pacs-a", "pacs-gone"])],
+    )
+    assert cfg.forwarding_rules[0].targets == ["pacs-a", "pacs-gone"]  # loaded, not truncated
+    stale = [r for r in caplog.records if "pacs-gone" in r.getMessage()]
+    assert len(stale) == 1 and stale[0].levelname == "WARNING"
+    assert "pacs-a" in stale[0].getMessage()  # the known set is quoted for the operator
+
+
+def test_known_forwarding_rule_targets_are_silent(caplog) -> None:
+    """Rules that resolve to configured destinations emit no warning."""
+    from mercure_gateway.config import DICOMDestination, ForwardingRule
+
+    GatewayConfig(
+        destinations=[DICOMDestination(name="pacs-a", host="h", port=104, aet_target="A")],
+        forwarding_rules=[ForwardingRule(rule="true", targets=["pacs-a"])],
+    )
+    assert not [r for r in caplog.records if "unknown destination" in r.getMessage()]

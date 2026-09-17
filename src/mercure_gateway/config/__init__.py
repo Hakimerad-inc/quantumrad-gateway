@@ -17,6 +17,7 @@ Deviation note (per quality bar):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, get_origin
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AuditConfig",
@@ -533,6 +536,31 @@ class GatewayConfig(BaseModel):
     web_ui: WebUIConfig = Field(default_factory=WebUIConfig)
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
     usb_mode: USBModeConfig = Field(default_factory=USBModeConfig)
+
+    @model_validator(mode="after")
+    def _warn_on_stale_forwarding_rule_targets(self) -> GatewayConfig:
+        """Warn (not reject) when a forwarding rule names no destination.
+
+        A rule target that was renamed, removed, or copied in from another
+        profile narrows the routed set silently. ``Spool.enqueue`` already
+        refuses to strand a study when *every* target is stale (f8c3250), but
+        the operator still wants the misconfiguration surfaced as early as
+        config load rather than at the first received study.
+        """
+        if not self.forwarding_rules:
+            return self
+        known = {d.name for d in self.destinations}
+        for rule in self.forwarding_rules:
+            stale = [t for t in rule.targets if t not in known]
+            if stale:
+                logger.warning(
+                    "forwarding rule %r targets unknown destination(s) %s — "
+                    "known destinations: %s",
+                    rule.rule,
+                    ", ".join(sorted(stale)),
+                    ", ".join(sorted(known)) or "(none configured)",
+                )
+        return self
 
 
 def default_config() -> GatewayConfig:

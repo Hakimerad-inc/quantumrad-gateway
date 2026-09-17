@@ -147,7 +147,7 @@ def _install_shutdown_signal_handlers(shutdown_done: threading.Event) -> None:
     signal.signal(signal.SIGTERM, _request_shutdown)
 
 
-def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) -> Forwarder:
+def _build_forwarder(config: GatewayConfig, spool: Spool, audit: AuditLog) -> Forwarder:
     """Register a handler for every enabled destination.
 
     Every target type the config models (dicom, dicom_tls, dicomweb, sftp,
@@ -156,8 +156,14 @@ def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) ->
     Handlers are registered *per destination* (``target_name``): a type-only
     registry would collapse two enabled destinations of the same type onto the
     last handler and misdeliver every study.
+
+    ``audit`` is the composition-root ``AuditLog`` — the one carrying the head
+    anchorer and the hub event-stream sink. A fresh instance here would emit
+    forwarding events (FORWARD_START/FORWARD_ERROR) that never reach the
+    external anchor file and never stream to the hub, leaving the
+    delivery-provenance tail unaudited externally (found by the D2 drill;
+    see docs/qa/d2-backup-restore-drill.md).
     """
-    from mercure_gateway.audit import AuditLog
     from mercure_gateway.forwarder.handlers.dicom import DICOMHandler, DICOMTLSHandler
     from mercure_gateway.forwarder.handlers.dicomweb import DICOMwebHandler
     from mercure_gateway.forwarder.handlers.folder import FolderHandler
@@ -166,7 +172,7 @@ def _build_forwarder(config: GatewayConfig, spool: Spool, database: Database) ->
     from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
     from mercure_gateway.forwarder.handlers.xnat import XNATHandler
 
-    forwarder = Forwarder(config, spool, audit=AuditLog(database))
+    forwarder = Forwarder(config, spool, audit=audit)
     for destination in config.destinations:
         if not destination.enabled:
             continue
@@ -511,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     receiver = Receiver(config.receiver, spool)
     receiver.start()
 
-    forwarder = _build_forwarder(config, spool, database)
+    forwarder = _build_forwarder(config, spool, audit)
     forwarder.start()
 
     from mercure_gateway.reports import ReportRetriever

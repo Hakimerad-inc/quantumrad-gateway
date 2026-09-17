@@ -471,3 +471,58 @@ def test_failed_study_reforward_then_sent(
     events = [e.event for e in AuditLog(db).list_events()]
     assert "RETRY_MANUAL" in events
     assert "FORWARD_COMPLETE" in events
+
+# ── Slice 6b (D2 finding): forwarding events must reach the EXTERNAL anchor ─
+#
+# The D2 drill proved FORWARD_START/FORWARD_ERROR were absent from
+# audit-heads.txt because _build_forwarder constructed its own AuditLog
+# instead of sharing the composition-root one that carries the head
+# anchorer. The shared-audit contract is now part of the forwarding path's
+# K5 posture, so pin it here.
+
+def test_forwarding_events_reach_the_head_anchor(target_hub: DICOMDestination) -> None:
+    """A Forwarder given the *anchored* AuditLog writes forwarding heads out."""
+    from mercure_gateway.audit import AuditLog
+    from mercure_gateway.forwarder import Forwarder, RetryPolicy
+
+    spool = Spool(mem_database())
+    audit = AuditLog(spool._db)
+    heads: list[str] = []
+    audit.set_head_anchorer(heads.append)  # the composition-root wiring
+
+    fwd = Forwarder(
+        default_config(),
+        spool,
+        retry=RetryPolicy(base_delay_sec=0, max_attempts=1),
+        audit=audit,
+    )
+    fwd.register_handler("dicom", FakeHandler(succeed=True))
+
+    study_id = spool.receive("1.2.840.10008.999.1.61")
+    spool.enqueue(study_id, [target_hub])
+    fwd.process_once()
+
+    forward_events = [e for e in audit.list_events() if e.event.startswith("FORWARD")]
+    assert forward_events, "the forwarding path must emit audit events at all"
+    # Every head the forwarder caused must have been anchored — the head at
+    # anchor time is the chain head, which is exactly what verify() compares.
+    assert audit.head_hash() in heads
+    assert heads[-1] == audit.head_hash()
+
+
+def test_build_forwarder_uses_the_composition_root_audit(target_hub: DICOMDestination) -> None:
+    """_build_forwarder shares the audit it is given; it never makes a fresh,
+    unanchored one (the D2 regression would silently reintroduce the gap)."""
+    from mercure_gateway.audit import AuditLog
+    from mercure_gateway.main import _build_forwarder
+
+    spool = Spool(mem_database())
+    audit = AuditLog(spool._db)
+    heads: list[str] = []
+    audit.set_head_anchorer(heads.append)
+
+    cfg = default_config()
+    cfg.destinations = [target_hub]
+    fwd = _build_forwarder(cfg, spool, audit)
+
+    assert fwd.audit is audit

@@ -12,6 +12,13 @@ uv run mercure-gateway --help
 uv run pytest
 ```
 
+For the full development environment — the SPA, its type gate, local
+pre-commit hooks, and the two ways to invoke the test suites that are easy
+to get wrong — see [docs/dev/setup.md](./docs/dev/setup.md).
+
+If you have [just](https://github.com/casey/just) installed, `just setup &&
+just test && just lint` runs the same gates CI does.
+
 ## Architecture
 
 See [mercure-gateway-PRD.md](./mercure-gateway-PRD.md) for the full product

@@ -44,10 +44,7 @@ src-tauri/gen/schemas/
 .DS_Store
 Thumbs.db
 
-# Packaging (PyInstaller)
-build/
-dist/
-
+# Packaging (PyInstaller, Tauri) — build/ and dist/ are also covered above.
 # Runtime
 /spool/
 "C:\mercure-gateway\spool"/
@@ -60,12 +57,17 @@ operations.log
 # Prototypes (spike artifacts, not production code)
 prototypes/
 benchmark-results.md
+
 # Env & tooling artifacts
-.venv
+.venv/
 graphify-out/
 .workbuddy-ai/
 .coverage
 htmlcov/
+
+# Written by the CI dependency-audit step (uv pip compile). A local re-run of
+# that step leaves it behind; it is a compiled artifact, not a lockfile.
+requirements-audit.txt
 
 # Windows-path bug artifact (literal dir name created on Linux by the pre-fix
 # _default_spool_dir bug) — runtime junk, never commit

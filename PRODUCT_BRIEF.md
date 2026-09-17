@@ -1,8 +1,8 @@
 # mercure Gateway — Product Brief
 
-**Version:** 0.1.0-dev (Sprint 09/10 in progress; targeting v1.1-RC)  
-**Branch:** `docs/sprint-plan`  
-**License:** MIT  
+**Version:** 0.1.0-dev (Sprint 09/10 in progress; targeting v1.1-RC)
+**Branch:** `docs/sprint-plan`
+**License:** MIT
 **Last Updated:** 2026-09-07
 
 ---
@@ -200,7 +200,7 @@ mercure-gateway/
 
 ## 12. Contact / Ownership
 
-**Team:** mercure imaging  
-**Repo:** `dicom-gateway` (private)  
-**Primary Branch:** `docs/sprint-plan`  
+**Team:** mercure imaging
+**Repo:** `dicom-gateway` (private)
+**Primary Branch:** `docs/sprint-plan`
 **CI:** GitHub Actions (Ubuntu + Windows matrix)

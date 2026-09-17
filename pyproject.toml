@@ -26,6 +26,7 @@ mercure-gateway = "mercure_gateway.main:main"
 [project.optional-dependencies]
 dev = [
     "mypy>=1.10",
+    "pre-commit>=4.2",
     "pytest>=8.0",
     "pytest-cov>=6.0",
     "pytest-timeout>=2.3",
@@ -54,6 +55,12 @@ build-backend = "uv_build"
 line-length = 100
 target-version = "py312"
 exclude = [".claude", "build", "dist", ".venv", "e2e"]
+# `exclude` is only honoured for files ruff discovers itself. A hook hands it
+# explicit paths, which would otherwise drag the vendored .claude/skills and
+# e2e scripts into scope and fail a commit on files the project never linted
+# (184 errors' worth, none of them in project code). force-exclude makes the
+# list authoritative regardless of how the files were named.
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

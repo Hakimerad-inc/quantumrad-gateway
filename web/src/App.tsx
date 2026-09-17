@@ -154,11 +154,25 @@ function AppContent() {
   const [version, setVersion] = useState("");
   // Persistent "restart required" banner: the gateway must be restarted for a
   // saved config change to take effect (review H5).
-  const [restartNeeded, setRestartNeeded] = useState(isRestartRequired());
+  //
+  // Two sources, OR'd: the server's config_pending_restart is the *truth* (it
+  // compares the config the running components were built with against the
+  // saved one) and survives a page reload; the module signal gives instant
+  // feedback the moment a save lands, before the next status fetch. Relying on
+  // the module flag alone meant a reload silently cleared the banner and let
+  // an operator believe a saved change was live (C4).
+  const [serverPending, setServerPending] = useState(false);
+  const [clientPending, setClientPending] = useState(isRestartRequired());
+  const restartNeeded = serverPending || clientPending;
   const { isAuthenticated, logout, isLoading: authLoading, backendUnreachable } = useAuth();
 
   useEffect(() => {
-    fetchSystemStatus().then((s) => setVersion(s.version)).catch(() => {});
+    fetchSystemStatus()
+      .then((s) => {
+        setVersion(s.version);
+        setServerPending(s.config_pending_restart);
+      })
+      .catch(() => {});
   }, []);
 
   // Re-read the hash on browser navigation (back/forward, manual edit).
@@ -170,7 +184,7 @@ function AppContent() {
 
   // Subscribe to the module-level "restart required" signal (review H5).
   useEffect(function subscribeToRestartRequired() {
-    return onRestartRequired(setRestartNeeded);
+    return onRestartRequired(setClientPending);
   }, []);
 
   const handleNavigate = (key: Page) => {
@@ -233,8 +247,10 @@ function AppContent() {
       </aside>
       <main className="main">
         {restartNeeded && (
-          <div className="banner warn" role="alert">
-            Configuration changed — restart the gateway for the changes to take effect.
+          <div className="banner warn" role="status">
+            Configuration saved but not yet active — the gateway must restart for changes to take
+            effect. Quit and relaunch the gateway (or restart its service); stopping and starting
+            components from the panel does <strong>not</strong> reload configuration.
           </div>
         )}
         <UpdaterBanner />

@@ -137,6 +137,36 @@ describe('DestinationsView', () => {
     });
   });
 
+  it('exposes every field a destination type requires — XNAT was unusable before', async () => {
+    // The form once showed only the URL for XNAT, but the model requires
+    // username/password/project; every XNAT add ended in a 400 naming fields
+    // the operator never saw. If a required field goes missing from
+    // TYPE_FIELDS again, this test names it.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const fetchStub = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/api/config') && (!init || init.method === undefined)) {
+        return json({ config_version: '1.0', destinations: [] });
+      }
+      if (url.endsWith('/api/config/warnings')) return json({ warnings: [], config_version: '1.0' });
+      if (url.endsWith('/api/config') && init?.method === 'PUT') {
+        return json({ status: 'ok', restart_required: true });
+      }
+      return json({});
+    });
+    vi.stubGlobal('fetch', fetchStub);
+    render(<DestinationsView />);
+    await screen.findByText('No destinations configured');
+
+    await user.click(screen.getByText('Add Destination'));
+    const typeSelect = screen.getByLabelText('Destination type') as HTMLSelectElement;
+    await user.selectOptions(typeSelect, 'xnat');
+
+    for (const label of ['URL', 'Username', 'Password', 'Project']) {
+      expect(screen.getByLabelText(`destination ${label}`)).toBeInTheDocument();
+    }
+  });
+
   it('toggles enable/disable and preserves the secret sentinel', async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const fetchStub = stubFetch();

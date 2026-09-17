@@ -258,6 +258,9 @@ label > .label, .field-label { display: block; font-size: 11px; font-weight: 600
 .dest-header .input[name="name"] { width: 170px; font-weight: 600; }
 .dest-header select { width: 130px; }
 
+.field-hint { display: block; margin-top: 3px; font-size: 10.5px; color: var(--muted); line-height: 1.35; }
+.field-row .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; align-self: end; padding-bottom: 6px; }
+
 /* ── Misc ──────────────────────────────────────────────────────────── */
 
 .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }

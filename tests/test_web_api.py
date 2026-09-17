@@ -102,6 +102,40 @@ def test_system_status_hub_fields_populated(app, client: TestClient) -> None:
     assert data["hub_streaming"] is False
 
 
+def test_system_status_reports_pending_restart(client: TestClient) -> None:
+    """A saved config that the running components do not use yet is flagged.
+
+    The client-side "restart required" flag resets on page reload; without a
+    server-side signal an operator can reload, see no banner, and believe a
+    saved change is live. The startup snapshot is the config the receiver/
+    forwarder were built with, so a differing saved config is the truth.
+    """
+    from mercure_gateway.config import DICOMDestination
+
+    r = client.get("/api/system/status")
+    assert r.json()["config_pending_restart"] is False
+
+    # Save a change. app.state.config is refreshed, the startup snapshot is not.
+    cfg = default_config()
+    cfg.destinations = [DICOMDestination(name="pacs", host="h", port=104, aet_target="A")]
+    client.put("/api/config", json=cfg.model_dump(mode="json"))
+
+    r = client.get("/api/system/status")
+    assert r.json()["config_pending_restart"] is True
+
+
+def test_system_status_no_pending_restart_after_unchanged_save(client: TestClient) -> None:
+    """Saving the same config back does not raise a false pending flag."""
+    r = client.get("/api/system/status")
+    assert r.json()["config_pending_restart"] is False
+
+    body = client.get("/api/config").json()
+    client.put("/api/config", json=body)
+
+    r = client.get("/api/system/status")
+    assert r.json()["config_pending_restart"] is False
+
+
 def test_system_health(client: TestClient) -> None:
     r = client.get("/api/system/health")
     assert r.status_code == 200

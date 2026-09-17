@@ -114,6 +114,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/system/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * System Metrics
+         * @description Prometheus text-exposition scrape target (D1 — headless monitoring).
+         *
+         *     A single flat gauge set composed from state the dashboard endpoints already
+         *     compute (health, disk, queue/stats, status) — no new data access. PHI-free
+         *     by construction: numbers and fixed labels only, no paths, identifiers, or
+         *     study metadata (reviewers of the scrape feed may include non-admins).
+         *
+         *     When ``web_ui.auth_enabled`` is on the router-level ``require_auth``
+         *     dependency applies here too — the Prometheus job needs the Bearer session
+         *     token (see Monitoring section of the admin guide).
+         *
+         *     The audit chain is deliberately NOT verified here: ``AuditLog.verify()``
+         *     replays every row on each call — fine for the operator-triggered
+         *     ``/api/audit/verify``, a scraper-picked DoS vector at 15 s intervals.
+         */
+        get: operations["system_metrics_api_system_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system/start": {
         parameters: {
             query?: never;
@@ -301,6 +334,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/studies/{study_id}/enqueue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enqueue Study
+         * @description Route a RECEIVED study that auto-enqueue left stranded.
+         *
+         *     ``/retry`` only resets *existing* routes; a study that arrived while no
+         *     destination was enabled, or whose auto-enqueue failed, has none and is
+         *     unreachable from the panel without this endpoint (E1 dry run, 2026-09-16).
+         */
+        post: operations["enqueue_study_api_studies__study_id__enqueue_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pipeline": {
         parameters: {
             query?: never;
@@ -428,6 +485,32 @@ export interface paths {
          *     update is validated and applied in memory only.
          */
         put: operations["update_config_api_config_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/config/warnings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Config Warnings
+         * @description Non-fatal misconfiguration findings against the *running* config.
+         *
+         *     Where :exc:`HTTPException` 400 rejects a config that cannot load, this
+         *     reports things that load but are likely wrong — a forwarding rule naming a
+         *     removed destination, every destination disabled, duplicate names. The
+         *     loader already logs the stale-rule case; the panel renders it where the
+         *     mistake is made. ``warnings`` is empty when there is nothing to flag.
+         */
+        get: operations["config_warnings_api_config_warnings_get"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -966,13 +1049,18 @@ export interface components {
             uptime_sec: number;
             /**
              * Version
-             * @default 0.1.0
+             * @default 1.1.0-rc3
              */
             version: string;
             /** Hub Registered */
             hub_registered?: boolean | null;
             /** Hub Streaming */
             hub_streaming?: boolean | null;
+            /**
+             * Config Pending Restart
+             * @default false
+             */
+            config_pending_restart: boolean;
         };
         /** ValidationError */
         ValidationError: {
@@ -1111,6 +1199,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DiskStatus"];
+                };
+            };
+        };
+    };
+    system_metrics_api_system_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };
@@ -1365,6 +1473,39 @@ export interface operations {
             };
         };
     };
+    enqueue_study_api_studies__study_id__enqueue_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                study_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     pipeline_api_pipeline_get: {
         parameters: {
             query?: never;
@@ -1563,6 +1704,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    config_warnings_api_config_warnings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

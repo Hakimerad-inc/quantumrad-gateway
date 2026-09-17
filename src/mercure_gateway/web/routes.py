@@ -131,6 +131,11 @@ class SystemStatus(BaseModel):
     version: str = __version__
     hub_registered: bool | None = None
     hub_streaming: bool | None = None
+    # True when the saved config differs from the one the running components
+    # were built with — i.e. a process restart is needed for it to take
+    # effect. Server-side so it survives a page reload, unlike the client's
+    # session flag.
+    config_pending_restart: bool = False
 
 
 def _get_state(request: Request, name: str) -> _Runnable | None:
@@ -162,7 +167,24 @@ def system_status(request: Request) -> SystemStatus:
         uptime_sec=round(time.time() - _start_time, 2),
         hub_registered=hub_registered,
         hub_streaming=hub_streaming,
+        config_pending_restart=_config_pending_restart(request),
     )
+
+
+def _config_pending_restart(request: Request) -> bool:
+    """Does the saved config differ from the one the running components use?
+
+    ``app.state.config`` is refreshed on every save, but the receiver/forwarder
+    hold construction-time refs, so only a process restart applies it. The
+    startup snapshot (``create_app``) is the baseline; a differing current
+    config means the panel's "restart required" banner is *true*, not merely
+    "was set during this browser session" — the client-side flag resets on
+    reload and would otherwise let an operator believe a saved change is live.
+    """
+    startup: object = getattr(request.app.state, "startup_config_json", None)
+    if not isinstance(startup, str):
+        return False
+    return _config(request).model_dump_json() != startup
 
 
 @router.get("/system/health")

@@ -19,10 +19,22 @@ import { fetchConfig, saveConfig, apiUrl, fetchConfigWarnings } from "../api";
 import type { ConfigWarning } from "../api";
 import { IconCheck, IconX, IconPlus } from "../ui/icons";
 
-/** Fields each destination type exposes in the form. Secret fields are masked. */
+/** Fields each destination type exposes in the form. Secret fields are masked.
+ *
+ * These mirror the required/optional fields of each pydantic destination model
+ * in ``src/mercure_gateway/config/__init__.py``. A required field missing here
+ * means the operator cannot create a valid destination of that type from the
+ * page — the save fails with a 400 naming a field the form never showed. */
 const TYPE_FIELDS: Record<
   string,
-  Array<{ key: string; label: string; type?: "number"; secret?: boolean; placeholder?: string }>
+  Array<{
+    key: string;
+    label: string;
+    type?: "number" | "boolean";
+    secret?: boolean;
+    placeholder?: string;
+    hint?: string;
+  }>
 > = {
   dicom: [
     { key: "host", label: "Host" },
@@ -36,6 +48,7 @@ const TYPE_FIELDS: Record<
     { key: "aet_target", label: "Called AET" },
     { key: "aet_source", label: "Our AET" },
     { key: "cacert", label: "CA cert path", placeholder: "(default system CAs)" },
+    { key: "verify_peer", label: "Verify server cert", type: "boolean" },
   ],
   dicomweb: [
     { key: "url", label: "STOW-RS URL" },
@@ -48,6 +61,16 @@ const TYPE_FIELDS: Record<
     { key: "username", label: "Username" },
     { key: "password", label: "Password", secret: true, placeholder: "(unchanged)" },
     { key: "private_key", label: "Private key path", placeholder: "(or password)" },
+    { key: "passphrase", label: "Key passphrase", secret: true, placeholder: "(optional)" },
+    { key: "remote_path", label: "Remote path" },
+    // An unset known_hosts means no host keys are trusted, so every connection
+    // is rejected — a panel-created SFTP destination would be guaranteed
+    // non-functional, the exact footgun this page exists to remove.
+    {
+      key: "known_hosts",
+      label: "known_hosts path",
+      hint: "Pre-seed with ssh-keyscan; empty rejects every connection",
+    },
   ],
   rsync: [
     { key: "host", label: "Host" },
@@ -61,9 +84,19 @@ const TYPE_FIELDS: Record<
     { key: "region", label: "Region", placeholder: "(optional)" },
     { key: "access_key_id", label: "Access key ID", secret: true },
     { key: "secret_access_key", label: "Secret access key", secret: true, placeholder: "(unchanged)" },
+    { key: "remote_prefix", label: "Remote prefix" },
+    { key: "use_https", label: "Use HTTPS", type: "boolean" },
   ],
   folder: [{ key: "path", label: "Path" }],
-  xnat: [{ key: "url", label: "URL" }],
+  xnat: [
+    { key: "url", label: "URL" },
+    // username/password/project are all min_length=1 in the model; the form
+    // previously showed only the URL, so every XNAT add ended in a 400.
+    { key: "username", label: "Username" },
+    { key: "password", label: "Password", secret: true },
+    { key: "project", label: "Project" },
+    { key: "subject", label: "Subject", placeholder: "(optional)" },
+  ],
 };
 
 const DEST_TYPES = Object.keys(TYPE_FIELDS);
@@ -289,6 +322,19 @@ export default function DestinationsView() {
                     value === undefined || value === null || value === "***"
                       ? ""
                       : String(value);
+                  if (f.type === "boolean") {
+                    return (
+                      <label key={f.key} className="check">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(value)}
+                          onChange={(e) => update(i, f.key, e.target.checked)}
+                          aria-label={`${d.name || "destination"} ${f.label}`}
+                        />
+                        {f.label}
+                      </label>
+                    );
+                  }
                   return (
                     <label key={f.key}>
                       <span className="label">{f.label}</span>
@@ -303,6 +349,9 @@ export default function DestinationsView() {
                         }}
                         aria-label={`${d.name || "destination"} ${f.label}`}
                       />
+                      {f.hint ? (
+                        <span className="field-hint">{f.hint}</span>
+                      ) : null}
                     </label>
                   );
                 })}

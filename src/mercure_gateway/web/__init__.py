@@ -168,6 +168,13 @@ def create_app(
     app.state.config = config
     app.state.spool = spool
     app.state.config_path = str(config_path) if config_path else None
+    # Snapshot the config the running components were constructed with. The
+    # receiver/forwarder hold their own config refs captured at construction,
+    # so a saved change only takes effect after a process restart; comparing
+    # this snapshot to the current config is the *server-side* truth for "is a
+    # restart pending", which survives a page reload (the client-side flag does
+    # not — see SystemStatus.config_pending_restart).
+    app.state.startup_config_json = config.model_dump_json()
 
     # Security middleware FIRST (runs outermost): headers on every response,
     # CSRF origin check before the CORS handling.

@@ -167,6 +167,60 @@ describe('DestinationsView', () => {
     }
   });
 
+  it('switching a destination type drops stale fields instead of 400ing', async () => {
+    // The old handler set only `type`, so a dicom→s3 switch kept host/port and
+    // omitted bucket — the save 400'd on a required field the operator never
+    // filled. The rebuild keeps name/type/enabled only.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<DestinationsView />);
+    await screen.findByDisplayValue('pacs-a');
+
+    const typeSelect = screen.getAllByLabelText('Destination type')[0] as HTMLSelectElement;
+    await user.selectOptions(typeSelect, 's3');
+
+    // The new type's required field is now present…
+    expect(screen.getByLabelText('pacs-a Bucket')).toBeInTheDocument();
+    // …and the stale dicom fields are gone from the saved payload.
+    expect(screen.queryByLabelText('pacs-a Host')).not.toBeInTheDocument();
+  });
+
+  it('blocks duplicate and empty names inline, not after a save', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<DestinationsView />);
+    await screen.findByDisplayValue('pacs-a');
+
+    // Duplicate the existing name.
+    await user.click(screen.getByText('Add Destination'));
+    const names = screen.getAllByLabelText('Destination name');
+    await user.type(names[names.length - 1], 'pacs-a');
+
+    // Both cards sharing the name carry the error.
+    expect(await screen.findAllByText('Name must be unique.')).toHaveLength(2);
+    expect(screen.getByText('Save Changes')).toBeDisabled();
+
+    // Fixing it re-enables the save.
+    await user.clear(names[names.length - 1]);
+    await user.type(names[names.length - 1], 'pacs-c');
+    expect(screen.getByText('Save Changes')).toBeEnabled();
+  });
+
+  it('offers the Echo probe only where the answer can be trusted (plaintext dicom)', async () => {
+    // The endpoint probes in plaintext; a TLS-only PACS would report
+    // "refused" while healthy. The button must not appear for dicom_tls.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.stubGlobal('fetch', stubFetch());
+    render(<DestinationsView />);
+    await screen.findByDisplayValue('pacs-a');
+
+    const typeSelect = screen.getAllByLabelText('Destination type')[0] as HTMLSelectElement;
+    await user.selectOptions(typeSelect, 'dicom_tls');
+    expect(screen.queryByText('Echo')).not.toBeInTheDocument();
+  });
+
   it('toggles enable/disable and preserves the secret sentinel', async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const fetchStub = stubFetch();
@@ -226,6 +280,10 @@ describe('DestinationsView', () => {
     render(<DestinationsView />);
     await screen.findByDisplayValue('pacs-a');
     await user.click(screen.getByText('Add Destination'));
+    // The inline name gate blocks an empty-named save, so the new card needs
+    // a name before this can reach the PUT.
+    const names = screen.getAllByLabelText('Destination name');
+    await user.type(names[names.length - 1], 'pacs-b');
     await user.click(screen.getByText('Save Changes'));
     expect(await screen.findByText(/Input should be greater than 0/)).toBeInTheDocument();
   });

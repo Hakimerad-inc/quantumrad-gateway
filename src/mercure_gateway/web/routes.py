@@ -1093,6 +1093,10 @@ class EchoTarget(BaseModel):
     host: str = ""
     port: int = 104
     aet: str = "MERCURE"
+    # The calling (source) AE title. A PACS that whitelists callers accepts
+    # real forwarding but refuses a probe issued under the default title, so
+    # the Destinations page sends the destination's own configured value.
+    aet_source: str = "GATEWAY"
 
 
 @router.post("/echo")
@@ -1102,6 +1106,9 @@ def echo_probe(payload: EchoTarget) -> dict[str, Any]:
     Used by the web wizard to validate receiver/destination connectivity per
     step (Flow A-7).  Returns ``status`` of ``ok``/``refused``/``timeout``/
     ``error`` plus the probe target.
+
+    The probe runs in plaintext; TLS targets are the caller's responsibility to
+    exclude (see the Destinations page's ``canEcho``).
     """
     from mercure_gateway.config import DICOMDestination
     from mercure_gateway.web.echo import echo_destination
@@ -1111,6 +1118,7 @@ def echo_probe(payload: EchoTarget) -> dict[str, Any]:
         host=payload.host,
         port=payload.port,
         aet_target=payload.aet,
+        aet_source=payload.aet_source,
     )
     status = echo_destination(dest)
     return {"status": status, "target": payload.name or payload.host}

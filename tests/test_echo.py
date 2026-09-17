@@ -81,3 +81,47 @@ def test_echo_api_endpoint_ok() -> None:
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
     scp_ae.shutdown()
+
+
+def test_echo_api_endpoint_accepts_calling_aet() -> None:
+    """The Destinations page sends the destination's own calling AE title.
+
+    A PACS that whitelists callers accepts real forwarding but refuses a probe
+    issued under the default title, so the probe must carry ``aet_source``
+    rather than always defaulting it.
+    """
+    from conftest import FakeForwarder, FakeReceiver
+    from fastapi.testclient import TestClient
+    from pynetdicom import AE
+    from pynetdicom.sop_class import Verification
+
+    from mercure_gateway.config import default_config
+    from mercure_gateway.spool import Spool
+    from mercure_gateway.spool.db import mem_database
+    from mercure_gateway.web import create_app
+
+    scp_ae = AE(ae_title="WHITELISTED")
+    scp_ae.add_supported_context(Verification)
+    srv = scp_ae.start_server(("127.0.0.1", 0), block=False)
+    port = srv.socket.getsockname()[1]
+
+    spool = Spool(mem_database())
+    app = create_app(default_config(), spool)
+    app.state.receiver = FakeReceiver()
+    app.state.forwarder = FakeForwarder()
+    client = TestClient(app)
+
+    # aet_source is accepted and used as the calling AE title.
+    r = client.post(
+        "/api/echo",
+        json={
+            "name": "probe",
+            "host": "127.0.0.1",
+            "port": port,
+            "aet": "WHITELISTED",
+            "aet_source": "GATEWAY",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    scp_ae.shutdown()

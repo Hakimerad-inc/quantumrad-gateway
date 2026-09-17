@@ -108,11 +108,15 @@ interface Destination {
   [key: string]: unknown;
 }
 
-async function echoProbe(host: string, port: number, aet: string): Promise<string> {
+async function echoProbe(host: string, port: number, aet: string, aetSource: string): Promise<string> {
+  // Send the destination's own calling AE title: if the PACS whitelists
+  // callers, probing as the default "GATEWAY" fails while real forwarding
+  // would succeed — a false negative that sends an operator "fixing" a
+  // working config.
   const res = await fetch(apiUrl("/api/echo"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "probe", host, port, aet }),
+    body: JSON.stringify({ name: "probe", host, port, aet, aet_source: aetSource }),
     credentials: "include",
   });
   if (!res.ok) return "error";
@@ -183,11 +187,17 @@ export default function DestinationsView() {
   const handleEcho = async (d: Destination) => {
     const key = d.name || `${d.host}:${d.port}`;
     setEchoState((prev) => ({ ...prev, [key]: "probing" }));
-    const status = await echoProbe(String(d.host), Number(d.port), String(d.aet_target ?? ""));
+    const status = await echoProbe(
+      String(d.host),
+      Number(d.port),
+      String(d.aet_target ?? ""),
+      String(d.aet_source ?? ""),
+    );
     setEchoState((prev) => ({ ...prev, [key]: status }));
   };
 
   const handleSave = async () => {
+    if (hasNameErrors) return; // a duplicate/empty name cannot be saved
     setSaving(true);
     setMsg("");
     setError("");
@@ -216,6 +226,20 @@ export default function DestinationsView() {
 
   const typeWarnings = (i: number) =>
     warnings.filter((w) => w.path === `destinations[${i}]` || w.path.startsWith(`destinations[${i}].`));
+
+  // Names key routing and the credential-restore lookup, so a duplicate
+  // collapses two destinations and an empty one 400s on save. Lint reports
+  // duplicates after the fact; blocking here means the mistake is not made.
+  const nameErrors = destinations.map((d) => {
+    const name = String(d.name ?? "").trim();
+    if (!name) return "Name is required.";
+    // Two or more entries sharing this name — the condition that collapses
+    // routing and cross-attaches credentials in the by-name restore.
+    return destinations.filter((x) => String(x.name ?? "").trim() === name).length > 1
+      ? "Name must be unique."
+      : "";
+  });
+  const hasNameErrors = nameErrors.some(Boolean);
 
   if (!loaded) return <div className="loading">Loading destinations</div>;
 
@@ -249,7 +273,14 @@ export default function DestinationsView() {
           const fields = TYPE_FIELDS[d.type] ?? [];
           const echoKey = d.name || `${d.host}:${d.port}`;
           const echoStatus = echoState[echoKey];
-          const canEcho = d.type === "dicom" || d.type === "dicom_tls";
+          // Computed once for the whole list so Save can be gated too.
+          const nameError = nameErrors[i];
+          // The echo endpoint probes in plaintext: a TLS-only PACS would
+          // report "refused" while perfectly healthy, a false negative that
+          // sends an operator loosening a correct config. TLS probing is a
+          // follow-up; until then the button is offered only where the
+          // answer can be trusted.
+          const canEcho = d.type === "dicom";
           return (
             <div className="card" key={i} style={{ marginBottom: 12 }}>
               <div className="dest-header">
@@ -260,15 +291,33 @@ export default function DestinationsView() {
                   value={String(d.name ?? "")}
                   onChange={(e) => update(i, "name", e.target.value)}
                   aria-label="Destination name"
+                  aria-invalid={nameError ? true : undefined}
                 />
+                {nameError ? (
+                  <span className="field-hint" style={{ color: "var(--red)" }} role="alert">
+                    {nameError}
+                  </span>
+                ) : null}
                 <select
                   className="input"
                   value={d.type}
                   onChange={(e) => {
-                    // Switching type replaces the field set; carry over the
-                    // common fields only, so a stale type-specific field (e.g.
-                    // an S3 bucket on a dicom destination) is not inherited.
-                    update(i, "type", e.target.value);
+                    // Switching type replaces the field set: rebuild the
+                    // destination from the common fields only. Keeping the old
+                    // object and just setting `type` left stale type-specific
+                    // fields in the payload (an S3 bucket on a dicom
+                    // destination) AND omitted the new type's required fields,
+                    // so the save 400'd on a field the operator never filled.
+                    setDestinations((ds) => {
+                      const next = [...ds];
+                      next[i] = {
+                        name: ds[i].name,
+                        type: e.target.value,
+                        enabled: ds[i].enabled,
+                      };
+                      return next;
+                    });
+                    markDirty();
                   }}
                   aria-label="Destination type"
                 >
@@ -376,7 +425,8 @@ export default function DestinationsView() {
         <button
           className="btn primary"
           onClick={() => void handleSave()}
-          disabled={!dirty || saving}
+          disabled={!dirty || saving || hasNameErrors}
+          title={hasNameErrors ? "Resolve the highlighted name issues first" : undefined}
         >
           {saving ? "Saving..." : dirty ? "Save Changes" : "Saved"}
           {dirty ? null : <IconCheck size={14} />}

@@ -753,6 +753,9 @@ export interface paths {
          *     Used by the web wizard to validate receiver/destination connectivity per
          *     step (Flow A-7).  Returns ``status`` of ``ok``/``refused``/``timeout``/
          *     ``error`` plus the probe target.
+         *
+         *     The probe runs in plaintext; TLS targets are the caller's responsibility to
+         *     exclude (see the Destinations page's ``canEcho``).
          */
         post: operations["echo_probe_api_echo_post"];
         delete?: never;
@@ -924,6 +927,11 @@ export interface components {
              * @default MERCURE
              */
             aet: string;
+            /**
+             * Aet Source
+             * @default GATEWAY
+             */
+            aet_source: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {

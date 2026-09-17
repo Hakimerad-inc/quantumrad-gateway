@@ -154,3 +154,40 @@ tag (`-rc2`), per plan risk R2.
 reason.** rc2 must carry `553b718`; re-run this dry run's §2 burst against
 the rc2 artifact as the rc2 go/no-go gate (it is a 3-minute test once the
 sidecar is up).
+
+## 6. rc2 go/no-go gate — PASSED (2026-09-17)
+
+The gate re-run, against the **published rc2 artifact** (not a source
+checkout): the PyInstaller sidecar extracted from
+`QuantumRAD-Gateway_1.1.0-rc2_amd64.deb` — the same bundle a site would
+install — reporting `version 1.1.0-rc2`.
+
+- **Provenance first.** `scripts/verify_release_sig.py` over the downloaded
+  `.deb` against the runbook §0.1 custody key: **verifies** (the deb was
+  not eyeballed, it was checked). Installer 70,063,092 B; bundle artifact
+  201,034,261 B — inside the 250 MB K6 ceiling.
+- **Identical conditions to the failing run:** golden config shape, same
+  `orthanc-testrig` destination, `auto_enqueue_delay_sec: 30`, three
+  single-instance synthetic studies sent back-to-back, one association
+  each, inside one debounce window (`demo/fake_modality.py`, UIDs
+  `.31/.32/.33`).
+
+```
+Sent synthetic study '1.2.840.10008.999.1.31': {'success': 1, 'failure': 0}
+Sent synthetic study '1.2.840.10008.999.1.32': {'success': 1, 'failure': 0}
+Sent synthetic study '1.2.840.10008.999.1.33': {'success': 1, 'failure': 0}
+queue stats: {"total":3,"queued":0,"sending":0,"sent":3,"error":0,"failed":0}
+/api/audit/verify → {"valid":true,"errors":[]}
+/api/studies → .31 SENT (1 dest) · .32 SENT (1 dest) · .33 SENT (1 dest)
+```
+
+**3/3 routed and delivered** — against rc1's 1/3. `SENT` is set only by
+`Spool.complete()`, which the forwarder reaches after the destination
+accepts the C-STORE and which requires *all* routes complete, so the state
+is destination-confirmed, not a local optimism. The per-study debounce
+re-arm holds across the burst.
+
+**Verdict: rc2 PASSES the go/no-go gate.** The artifact carries the fix and
+behaves; the release-blocking defect that grounded rc1 is closed on the
+thing that ships. Remaining rc2→GA gates are the human legs (§3 UAT, D5
+booking) and the D2 finding triage — not this defect.

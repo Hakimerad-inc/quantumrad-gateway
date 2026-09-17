@@ -73,6 +73,16 @@ audit valid ✅, D1 metrics exposed the failure ✅) — and found the defect th
 §3 UAT legs unchanged (still hardware-gated). The dry run's §2 burst is the
 rc2 go/no-go gate: 3-minute re-run against the rc2 artifact.
 
+### 3b-2. rc2 go/no-go gate — PASSED (2026-09-17)
+
+Re-run against the **published rc2 artifact** (sidecar extracted from the
+signed `QuantumRAD-Gateway_1.1.0-rc2_amd64.deb`, signature verified against
+the runbook §0.1 custody key via `scripts/verify_release_sig.py`), identical
+burst conditions: 3 single-instance studies, one association each, inside
+one 30 s debounce window → **3/3 SENT, 0 error, audit valid**. rc1's
+1/3 was the release-blocker; rc2's 3/3 closes it on the bundle that ships.
+Full record: `docs/qa/e1-dryrun.md` §6.
+
 ## 4. K-gate evidence table
 
 | Gate | Criterion | Evidence |

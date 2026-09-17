@@ -196,7 +196,7 @@ check (e.g. cron + `curl … /api/audit/verify | jq -e .valid`).
 | Problem | Likely cause / fix |
 |---------|--------------------|
 | Modality rejected | Check `allowed_ae_titles`; add the modality's AE title. |
-| Studies stuck **RECEIVED** (0 routes) | Instances arrived while no destination was enabled, or auto-enqueue failed. **Enqueue** the study once a destination is enabled: `POST /api/studies/{id}/enqueue` (API-only in v1.1 — the panel's queue view has no button for it yet; the **Retry** button will not help here, it only resets *existing* routes). |
+| Studies stuck **RECEIVED** (0 routes) | Instances arrived while no destination was enabled, or auto-enqueue failed. Use the **Enqueue** button in the Queue view (shown only for a RECEIVED study with no routes) once a destination is enabled; the **Retry** button will not help here, it only resets *existing* routes. The API equivalent is `POST /api/studies/{id}/enqueue`. |
 | Studies stuck queued | Forwarder stopped? Destination disabled? Check `forwarding.concurrency`. |
 | Repeated "Error" then "Failed" | Destination unreachable or credentials invalid; fix and **Retry**. |
 | Disk filling up | Raise `max_spool_gb`, lower `retention_delivered_days`, or enable `purge_on_disk_full`. |

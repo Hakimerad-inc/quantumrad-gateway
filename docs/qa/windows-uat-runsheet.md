@@ -14,11 +14,53 @@ the auto-update tamper check. Evidence row at the end pastes straight back into
       a manifest from the release; clinical/host VLANs commonly block it. If the VM
       can't reach GitHub, do the rest and skip §6 — but say so in the evidence table,
       because §6 is the one row no CI job can substitute for.
-- [ ] Download from the GitHub release page: `QuantumRAD-Gateway_<ver>_x64-setup.exe`
-      and its `.sig` sidecar (optional here; §6 verifies signatures for real).
+      **Note for the private repo:** the release download URL **404s anonymously**
+      — verified 2026-09-17 on both rc2 and rc3. A clean VM cannot fetch the
+      installer from `github.com` at all, so the §6 "outbound HTTPS" row can only
+      pass via a locally-served manifest (see §0b). Do not treat a 404 as a
+      blocked VLAN; it is the repo's visibility.
+- [ ] The installer + `.sig` sidecar. Because the repo is private, get them onto the
+      VM by serving from the host (§0b) rather than by browsing the release page.
+      `gh release download <tag> --pattern "*x64-setup.exe"` works authenticated.
+      rc3's exe measures **42.4 MB** — the K6 size row is already a pass.
 - [ ] A destination to send to: the `test-rig/` Orthanc (`docker compose up` on a
       Linux host reachable from the VM) or any PACS that will answer C-ECHO.
 - [ ] Timer ready — K4 is a timed gate.
+
+## 0b. Running this from the dev box (GNOME workstation) — the recipe
+
+Measured 2026-09-17, so the constraints are known rather than guessed:
+
+- **KVM is available** (`/dev/kvm`, 6 vCPUs) but **no virtualization toolchain is
+  installed** — `virsh`, `virt-manager`, `qemu-img`, `ovmf`, `swtpm` are all
+  missing. `sudo apt install qemu-system-x86 libvirt-daemon-system
+  libvirt-clients virt-manager ovmf swtpm swtpm-tools` covers both Windows
+  versions (`ovmf` + `swtpm` are required only for Windows 11, which refuses to
+  install without UEFI and TPM 2.0).
+- **Disk is the binding constraint:** 13 GB free of 98 GB. `src-tauri/target`
+  holds 7.3 GB of regenerable Rust artifacts — delete it to get to ~20 GB, which
+  fits **one** VM. Run Win10, delete the disk, then recreate for Win11.
+- **RAM:** 4 GiB available of 9 GiB (the live gateway stack holds the rest).
+  Assign the VM 3 GB; expect sluggish but functional Windows. **Two VMs at once
+  is impossible on this box** — the 10 and 11 legs are strictly sequential.
+- **Network (libvirt default NAT, `virbr0` = `192.168.122.1`):**
+  - Host → VM receiver: direct, no forward needed — `virsh domifaddr <vm>` for
+    the IP, then `uv run python demo/fake_modality.py --host <vm-ip> --port
+    11112 --aet GATEWAY --instances 120`.
+  - VM → installer: `cd /tmp/rc3-verify && python3 -m http.server 8000 --bind
+    192.168.122.1`, then in the VM browse `http://192.168.122.1:8000`.
+  - VM → Orthanc: the test-rig binds **`127.0.0.1` only** (RSK-19), so the VM
+    cannot reach it on the bridge. Temporary forward, no file edits:
+    `socat TCP-LISTEN:4242,bind=192.168.122.1,fork TCP:127.0.0.1:4242`.
+  - Wizard destination is then `192.168.122.1`, port `4242`, AET `ORTHANC`.
+- The updater leg (§5/§6) points `config.update.update_url` at
+  `http://192.168.122.1:8000/latest.json`; mutate that local file for the
+  tamper check.
+
+**Two media paths:** real Windows 10/11 x64 ISOs (fidelity to the consumer
+SKUs the product targets; Microsoft's download portal blocks Linux user
+agents), or Microsoft's free evaluation VMs (no install step, but Enterprise
+edition and a `qemu-img convert` from the VirtualBox variant).
 
 ## 1. Install + wizard — K4 ≤ 10 min (uat-06.md §1–3)
 

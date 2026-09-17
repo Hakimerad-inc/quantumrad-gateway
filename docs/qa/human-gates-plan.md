@@ -100,7 +100,16 @@ made it consequential enough to be a decision rather than a chore. The earlier
 
 ---
 
-## #5 — Windows 10/11 clean-VM UAT (blocks #10, #12)
+## #5 — Windows 10/11 clean-VM UAT (blocks #10, #12) — PAUSED 2026-09-17
+
+**Status:** not started; parked in favour of product refinement. Everything
+needed to resume is in `docs/qa/windows-uat-runsheet.md` §0b — including the
+box constraints measured on 2026-09-17 (13 GB free disk with a 7.3 GB
+regenerable `src-tauri/target`; 4 GiB free RAM so the two legs are **sequential,
+not concurrent**; no virtualization toolchain installed) and the private-repo
+networking recipe (serve the installer over the bridge; `socat` forward for the
+loopback-only Orthanc). Resume cost is the apt install + media download, not
+re-deriving any of this.
 
 **Prepared:** `docs/qa/windows-uat-runsheet.md` — a one-pager covering install +
 wizard with K4 timing, tray/sidecar spawn, service mode (S07-T9), K6 RAM, and the

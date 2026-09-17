@@ -208,6 +208,47 @@ describe('DestinationsView', () => {
     expect(screen.getByText('Save Changes')).toBeEnabled();
   });
 
+  it('never sends the client-only stable id to the backend', async () => {
+    // The uid is a React key, not config; the model would reject the extra
+    // field. It must be stripped on the wire even after a type switch.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<DestinationsView />);
+    await screen.findByDisplayValue('pacs-a');
+
+    await user.click(screen.getByText('Add Destination'));
+    const names = screen.getAllByLabelText('Destination name');
+    await user.type(names[names.length - 1], 'pacs-b');
+    await user.click(screen.getByText('Save Changes'));
+
+    await waitFor(() => {
+      const puts = fetchStub.mock.calls.filter(([, init]) => init?.method === 'PUT');
+      expect(puts).toHaveLength(1);
+      const saved = JSON.parse(puts[0]![1]!.body as string);
+      // No destination object carries the internal id.
+      expect(saved.destinations.every((d: Record<string, unknown>) => !('_uid' in d))).toBe(true);
+    });
+  });
+
+  it('reports an expired admin session as such, not as a dead destination', async () => {
+    // A 401 means the operator's session lapsed, not that the PACS is down.
+    // Reporting "error" puts an unreachable badge on a healthy destination.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/echo')) return json({ detail: 'Not authenticated' }, 401);
+        return stubFetch()(url, init);
+      }),
+    );
+    render(<DestinationsView />);
+    const name = await screen.findByDisplayValue('pacs-a');
+    await user.click(name.closest('.card')!.querySelector('button')!); // Echo
+    expect(await screen.findByText('session expired')).toBeInTheDocument();
+  });
+
   it('drops a stale Echo badge when the destination is edited afterwards', async () => {
     // The badge was keyed by the destination's live host:port, so it survived
     // an edit and vouched for an endpoint it had never touched. It must be

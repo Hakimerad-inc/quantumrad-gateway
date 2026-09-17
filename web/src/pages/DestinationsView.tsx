@@ -119,7 +119,31 @@ interface Destination {
   name: string;
   type: string;
   enabled: boolean;
+  // Client-only: a stable identity for React's key, never sent to the backend
+  // (stripped in handleSave). See STABLE_ID below.
+  _uid?: number;
   [key: string]: unknown;
+}
+
+// React keys must be stable across reorders and deletes. Keying by array index
+// is subtly wrong here: delete a card above a focused one and React reuses the
+// DOM node for a *different* destination, so an in-flight keystroke or an
+// open dropdown lands on the wrong row. A monotonic id assigned when a
+// destination is loaded or created keeps each card bound to one object for
+// the life of the list (review M-series).
+let nextStableId = 1;
+const STABLE_ID = "_uid";
+
+function withStableIds(ds: Destination[]): Destination[] {
+  return ds.map((d) => (d[STABLE_ID] === undefined ? { ...d, [STABLE_ID]: nextStableId++ } : d));
+}
+
+/** Drop client-only fields so the payload matches the backend's model. */
+function forPayload(ds: Destination[]): Destination[] {
+  return ds.map((d) => {
+    const { [STABLE_ID]: _omit, ...rest } = d;
+    return rest;
+  });
 }
 
 async function echoProbe(host: string, port: number, aet: string, aetSource: string): Promise<string> {
@@ -133,7 +157,14 @@ async function echoProbe(host: string, port: number, aet: string, aetSource: str
     body: JSON.stringify({ name: "probe", host, port, aet, aet_source: aetSource }),
     credentials: "include",
   });
-  if (!res.ok) return "error";
+  if (!res.ok) {
+    // A 401 is not a property of the destination: the operator's session
+    // expired (auth is on, the cookie lapsed). Reporting "error" here puts
+    // an "unreachable" badge on a PACS that may be perfectly healthy and
+    // sends someone chasing a network problem that is really a login
+    // prompt. "expired" makes the page say so and offer a re-login.
+    return res.status === 401 ? "expired" : "error";
+  }
   const json = (await res.json()) as { status: string };
   return json.status;
 }
@@ -168,7 +199,7 @@ export default function DestinationsView() {
   const load = useCallback(async () => {
     try {
       const cfg = (await fetchConfig()) as Record<string, unknown>;
-      setDestinations((cfg.destinations as Destination[]) ?? []);
+      setDestinations(withStableIds((cfg.destinations as Destination[]) ?? []));
       setForwardingRules(Array.isArray(cfg.forwarding_rules) ? (cfg.forwarding_rules as unknown[]) : []);
       setDirty(false);
       setError("");
@@ -210,7 +241,16 @@ export default function DestinationsView() {
   const addDestination = () => {
     setDestinations((ds) => [
       ...ds,
-      { name: "", type: "dicom", enabled: true, host: "", port: 104, aet_target: "", aet_source: "GATEWAY" },
+      {
+        name: "",
+        type: "dicom",
+        enabled: true,
+        host: "",
+        port: 104,
+        aet_target: "",
+        aet_source: "GATEWAY",
+        [STABLE_ID]: nextStableId++,
+      },
     ]);
     markDirty();
   };
@@ -240,8 +280,10 @@ export default function DestinationsView() {
     try {
       const current = (await fetchConfig()) as Record<string, unknown>;
       // Send only the destinations section; the rest of the config round-trips
-      // untouched so this page cannot clobber an unrelated setting.
-      current.destinations = destinations;
+      // untouched so this page cannot clobber an unrelated setting. The stable
+      // ids are client-only and must not reach the backend — the model would
+      // reject the extra field.
+      current.destinations = forPayload(destinations);
       const result = await saveConfig(current);
       setDirty(false);
       const found = result?.warnings?.length ?? 0;
@@ -300,7 +342,16 @@ export default function DestinationsView() {
   const addMissingDestination = (name: string) => {
     setDestinations((ds) => [
       ...ds,
-      { name, type: "dicom", enabled: true, host: "", port: 104, aet_target: "", aet_source: "GATEWAY" },
+      {
+        name,
+        type: "dicom",
+        enabled: true,
+        host: "",
+        port: 104,
+        aet_target: "",
+        aet_source: "GATEWAY",
+        [STABLE_ID]: nextStableId++,
+      },
     ]);
     markDirty();
   };
@@ -361,7 +412,7 @@ export default function DestinationsView() {
           // answer can be trusted.
           const canEcho = d.type === "dicom";
           return (
-            <div className="card" key={i} style={{ marginBottom: 12 }}>
+            <div className="card" key={d[STABLE_ID] ?? i} style={{ marginBottom: 12 }}>
               <div className="dest-header">
                 <input
                   className="input"
@@ -393,6 +444,10 @@ export default function DestinationsView() {
                         name: ds[i].name,
                         type: e.target.value,
                         enabled: ds[i].enabled,
+                        // The field set changes but the card's identity does
+                        // not: keep the uid so this card is not re-mounted
+                        // (which would drop input focus mid-edit).
+                        [STABLE_ID]: ds[i][STABLE_ID] ?? nextStableId++,
                       };
                       return next;
                     });
@@ -424,7 +479,16 @@ export default function DestinationsView() {
                       Echo
                     </button>
                     {echoStatus && echoStatus !== "probing" ? (
-                      <span className={`badge ${echoStatus === "ok" ? "green" : "red"}`}>{echoStatus}</span>
+                      <span
+                        className={`badge ${echoStatus === "ok" ? "green" : echoStatus === "expired" ? "amber" : "red"}`}
+                        title={
+                          echoStatus === "expired"
+                            ? "Your admin session expired — log in again, then re-probe. This does not mean the destination is unreachable."
+                            : echoStatus
+                        }
+                      >
+                        {echoStatus === "expired" ? "session expired" : echoStatus}
+                      </span>
                     ) : null}
                   </>
                 ) : null}

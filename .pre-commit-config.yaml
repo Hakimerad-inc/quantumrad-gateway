@@ -1,0 +1,59 @@
+# Local gates mirroring the CI `quality` job, so a lint or type error is
+# caught at commit time instead of after push. Install once with
+# `just precommit-install` (or `uv run pre-commit install`).
+#
+# Every hook runs through the project's own uv venv rather than a
+# pre-commit-managed one: the tools are already pinned in pyproject.toml and
+# mirrored in uv.lock, and a second isolated install would silently drift
+# from the versions CI actually runs.
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check --
+        language: system
+        types: [python]
+        # Ruff is fast enough for a commit hook; --fix stays manual (`just fix`)
+        # so an automated rewrite never silently shapes a diff.
+        pass_filenames: true
+
+      - id: mypy
+        name: mypy
+        # mypy is slow and only meaningful over the whole program (it follows
+        # imports), so it runs once on `src` instead of per changed file.
+        # Passing filenames would also break its incremental cache.
+        entry: uv run mypy src
+        language: system
+        types: [python]
+        pass_filenames: false
+
+  # Secrets never belong in a DICOM gateway config commit. The config model
+  # redacts live secrets to "***" already; this catches a pasted key in a
+  # test fixture or a .bak file the ignore rules were written to catch.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks
+
+  # Mechanical checks that need no project context.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        # DICOM test fixtures are legitimately large; the limit catches a
+        # stray study file, not a fixture. Raise via .gitattributes if needed.
+        args: ["--maxkb=2048"]
+      - id: check-merge-conflict
+      - id: check-yaml
+        exclude: ^\.claude/
+      - id: end-of-file-fixer
+        # Generated and binary-ish files reformat meaninglessly under this.
+        # .claude/skills is vendored agent tooling, not project source —
+        # reformatting it only churns files no one here maintains. The
+        # directory prefix gets its own alternative: sharing one anchored
+        # group would only match paths that *end* in ".claude/".
+        exclude: ^\.claude/|^(uv\.lock|package-lock\.json|.*\.tsbuildinfo|LICENSE)$
+      - id: trailing-whitespace
+        exclude: ^\.claude/|^(uv\.lock|package-lock\.json|.*\.tsbuildinfo|LICENSE)$

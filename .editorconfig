@@ -1,0 +1,44 @@
+# EditorConfig — https://editorconfig.org
+# Keeps indentation and line endings consistent across the editors an operator
+# or contributor might use, on Windows and Linux alike. The line-ending rules
+# here mirror .gitattributes: shell must stay LF (the Windows test matrix runs
+# flash_usb.sh under bash and CRLF breaks its argument parsing), while the
+# Windows batch helpers stay CRLF.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{sh,bats}]
+end_of_line = lf
+
+# Windows helpers intentionally keep CRLF — see .gitattributes.
+[*.{ps1,bat}]
+end_of_line = crlf
+
+[*.py]
+indent_size = 4
+
+[*.{ts,tsx,js,jsx,json,jsonc,css,html,md}]
+indent_size = 2
+
+[*.{yaml,yml}]
+indent_size = 2
+
+# Generated or machine-written: reformatting these creates noise.
+[{uv.lock,package-lock.json,*.tsbuildinfo,LICENSE}]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+indent_style = unset
+indent_size = unset
+
+[Makefile]
+indent_style = tab

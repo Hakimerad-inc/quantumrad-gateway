@@ -1,0 +1,107 @@
+# Task runner for the multi-toolchain dev loop.
+# Install: https://github.com/casey/just  (cargo install just, or a package
+# manager of your choice). just works on Windows natively — unlike make —
+# which matters for a project whose operators run Windows.
+#
+# Everything runs through `uv run` / `npm run` so the commands you type here
+# are the same ones CI executes in .github/workflows/ci.yml.
+
+# Default: list the recipes. `just` with no argument prints this.
+default:
+    @just --list
+
+# ── One-time setup ──────────────────────────────────────────────────────
+
+# Install everything: Python deps from the committed uv.lock, then the SPA.
+# CI runs `uv sync --all-extras` + `npm ci`; this mirrors it.
+setup:
+    uv sync --all-extras
+    cd web && npm ci
+
+# Update the lockfiles after a dependency change (pyproject.toml or
+# package.json). uv.lock is committed on purpose — it pins exact versions.
+update-locks:
+    uv lock
+    cd web && npm update --package-lock-only
+
+# ── Tests ───────────────────────────────────────────────────────────────
+
+# Backend test suite. `--no-file-parallelism` is NOT needed here — that flag
+# only matters for the vitest worker crash under jsdom, not pytest.
+test: test-backend test-web
+
+test-backend:
+    uv run pytest
+
+# Same suite with the coverage gate CI enforces (>= 80%, pyproject.toml).
+test-backend-cov:
+    uv run pytest --cov=mercure_gateway --cov-fail-under=80
+
+# The SPA test suite. MUST run from web/ — vitest resolves its jsdom
+# environment relative to the config file, and invoking it from the repo
+# root silently drops the DOM and fails every test with "document is not
+# defined". The `cd` is load-bearing, not cosmetic.
+test-web:
+    cd web && npm run test
+
+# Performance gates (§5.6, K8) — the perf-gates CI job runs this same script.
+perf:
+    uv run python scripts/check_perf_gates.py
+
+# Playwright E2E against a seeded gateway. Requires the SPA build first.
+e2e: build-web
+    uv run python e2e/seed.py > /tmp/e2e-env.txt
+    cd web && npx playwright install --with-deps chromium
+    npx playwright test -c playwright.config.ts --reporter=line
+
+# ── Lint & typecheck ────────────────────────────────────────────────────
+
+# All four gates CI runs in its `quality` job, plus the SPA typecheck.
+lint: lint-py lint-web typecheck-web
+
+lint-py:
+    uv run ruff check .
+    uv run mypy .
+
+lint-web:
+    cd web && npm run lint
+
+# `tsc -b`, not `tsc --noEmit`. The root tsconfig has `files: []` and only
+# project references, so a bare --noEmit checks NOTHING and reports success
+# on a bundle that will not build. A green vitest run hides this: vitest
+# transpiles via esbuild, which skips type-checking entirely.
+typecheck-web:
+    cd web && npx tsc -b
+
+# Apply ruff's formatter-safe fixes. NOT a gate — run it by hand.
+fix:
+    uv run ruff check --fix .
+    cd web && npx eslint --fix src
+
+# ── Build ───────────────────────────────────────────────────────────────
+
+# Build the SPA into src/mercure_gateway/web/static/ (vite emits there; the
+# backend serves that directory). CI verifies index.html lands in it.
+build-web:
+    cd web && npm run build
+
+# Freeze the backend sidecar (PyInstaller onedir) for the Tauri bundle.
+build-backend:
+    uv run python scripts/package_backend.py
+
+# Regenerate the SPA's API types from the backend OpenAPI schema, after any
+# change to a pydantic model or a route signature. Forgetting this leaves the
+# frontend compiling against a backend that no longer has that shape.
+gen-api:
+    uv run python scripts/export_openapi.py
+    cd web && npx openapi-typescript ../mercure-gateway.openapi.json -o src/types/api-schema.ts
+
+# ── Pre-commit ──────────────────────────────────────────────────────────
+
+# Install the hooks into .git/hooks/ (run once after cloning).
+precommit-install:
+    uv run pre-commit install
+
+# Run the hooks against every file, as CI's pre-commit.ci equivalent would.
+precommit:
+    uv run pre-commit run --all-files

@@ -115,6 +115,19 @@ export const IconRefresh = (p: IconProps) => (
   </Icon>
 );
 
+export const IconPlus = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 5v14M5 12h14" />
+  </Icon>
+);
+
+export const IconSend = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="m22 2-7 20-4-9-9-4Z" />
+    <path d="M22 2 11 13" />
+  </Icon>
+);
+
 export const IconWorkflow = (p: IconProps) => (
   <Icon {...p}>
     <rect x="3" y="3" width="7" height="7" rx="1.5" />

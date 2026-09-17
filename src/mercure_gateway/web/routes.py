@@ -35,6 +35,7 @@ from starlette.responses import Response
 from mercure_gateway import __version__
 from mercure_gateway.audit import AuditLog
 from mercure_gateway.config import GatewayConfig
+from mercure_gateway.config.lint import lint_config
 from mercure_gateway.redact import (
     CREDENTIAL_ENTRY_FIELDS,
     DESTINATION_SECRET_FIELDS,
@@ -685,13 +686,28 @@ def _restore_redacted_secrets(payload: dict[str, Any], current: GatewayConfig) -
     GET /config returns redacted values; the SPA saves the whole body back on
     every edit. Without this restoration the sentinel would be persisted as
     the real credential (destroying it — review F4).
+
+    Destinations are matched to their stored counterpart by name, falling back
+    to list position when the name misses. The fallback matters because the
+    Destinations page exposes rename as a first-class action: renaming
+    "lab-sftp" to "lab-sftp-2" leaves the secret field carrying the sentinel
+    under a name the by-name lookup cannot match, which would otherwise persist
+    the literal ``"***"`` and break the destination after the next restart.
+    Position is only consulted when a sentinel is actually present — i.e. the
+    operator did not touch the field — so the fallback cannot overwrite a
+    deliberately entered credential.
     """
     data: dict[str, Any] = json.loads(json.dumps(payload))  # deep copy
     current_data: dict[str, Any] = json.loads(current.model_dump_json())
 
     current_dests = {d.get("name"): d for d in current_data.get("destinations", [])}
-    for destination in data.get("destinations", []):
+    current_dest_list = list(current_data.get("destinations", []))
+    for index, destination in enumerate(data.get("destinations", [])):
         prev = current_dests.get(destination.get("name"))
+        if prev is None:
+            # A rename in place keeps the sentinel under a new name; the stored
+            # counterpart is the destination at the same position.
+            prev = current_dest_list[index] if index < len(current_dest_list) else None
         if prev is None:
             continue
         for key in DESTINATION_SECRET_FIELDS:
@@ -752,7 +768,31 @@ def update_config(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
     request.app.state.config = updated
     # Components hold their own config refs captured at construction, so a
     # restart is required for the new config to take effect (review H5).
-    return {"status": "ok", "message": "Config update saved", "restart_required": True}
+    return {
+        "status": "ok",
+        "message": "Config update saved",
+        "restart_required": True,
+        # Non-fatal findings against the config just saved, so the panel can
+        # tell the operator immediately what the saved state will do (or not
+        # do). Lint never blocks a save that validated.
+        "warnings": [w.as_dict() for w in lint_config(updated)],
+    }
+
+
+@router.get("/config/warnings")
+def config_warnings(request: Request) -> dict[str, Any]:
+    """Non-fatal misconfiguration findings against the *running* config.
+
+    Where :exc:`HTTPException` 400 rejects a config that cannot load, this
+    reports things that load but are likely wrong — a forwarding rule naming a
+    removed destination, every destination disabled, duplicate names. The
+    loader already logs the stale-rule case; the panel renders it where the
+    mistake is made. ``warnings`` is empty when there is nothing to flag.
+    """
+    return {
+        "warnings": [w.as_dict() for w in lint_config(_config(request))],
+        "config_version": _config(request).config_version,
+    }
 
 
 @router.get("/config/export")

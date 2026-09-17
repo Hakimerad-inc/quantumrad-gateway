@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import QueueView from "./pages/QueueView";
+import DestinationsView from "./pages/DestinationsView";
 import ConfigView from "./pages/ConfigView";
 import LogsView from "./pages/LogsView";
 import ReportsView from "./pages/ReportsView";
@@ -12,9 +13,18 @@ import BackendDownView from "./pages/BackendDownView";
 import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus, type SystemStatus } from "./api";
 import UpdaterBanner from "./ui/UpdaterBanner";
 import ErrorBoundary from "./ui/ErrorBoundary";
-import { BrandMark, IconPulse, IconQueue, IconBolt, IconFileText, IconShield, IconSettings, IconTerminal, IconWorkflow, IconLogout } from "./ui/icons";
+import { BrandMark, IconPulse, IconQueue, IconBolt, IconFileText, IconShield, IconSettings, IconTerminal, IconWorkflow, IconLogout, IconSend } from "./ui/icons";
 
-type Page = "dashboard" | "pipeline" | "queue" | "reports" | "audit" | "config" | "logs" | "setup";
+type Page =
+  | "dashboard"
+  | "pipeline"
+  | "queue"
+  | "destinations"
+  | "reports"
+  | "audit"
+  | "config"
+  | "logs"
+  | "setup";
 
 export function Dashboard() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
@@ -124,6 +134,7 @@ const NAV: Array<{ key: Page; icon: React.ReactNode; label: string }> = [
   { key: "dashboard", icon: <IconPulse />, label: "Dashboard" },
   { key: "pipeline", icon: <IconWorkflow />, label: "Pipeline" },
   { key: "queue", icon: <IconQueue />, label: "Queue" },
+  { key: "destinations", icon: <IconSend />, label: "Destinations" },
   { key: "setup", icon: <IconBolt />, label: "Setup" },
   { key: "reports", icon: <IconFileText />, label: "Reports" },
   { key: "audit", icon: <IconShield />, label: "Audit" },
@@ -234,6 +245,7 @@ function AppContent() {
           {page === "dashboard" && <Dashboard />}
           {page === "pipeline" && <PipelineView />}
           {page === "queue" && <QueueView />}
+          {page === "destinations" && <DestinationsView />}
           {page === "setup" && <SetupWizardPage />}
           {page === "reports" && <ReportsView />}
           {page === "audit" && <AuditView />}

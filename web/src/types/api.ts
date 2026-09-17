@@ -72,6 +72,21 @@ export interface SaveConfigResult {
   status: string;
   message: string;
   restart_required: boolean;
+  /** Non-fatal lint findings against the saved config (may be absent on older backends). */
+  warnings?: ConfigWarning[];
+}
+
+/** A non-fatal misconfiguration finding the panel renders (GET/PUT /api/config). */
+export interface ConfigWarning {
+  /** Dotted path into the config document, e.g. "forwarding_rules[0].targets". */
+  path: string;
+  message: string;
+  severity: "warning" | "info";
+}
+
+export interface ConfigWarningsResult {
+  warnings: ConfigWarning[];
+  config_version: string;
 }
 
 export interface DestinationHealth {

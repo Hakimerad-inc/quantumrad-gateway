@@ -392,6 +392,45 @@ def test_put_config_roundtrip_preserves_secrets(
     assert load_config(config_path).destinations[0].password == "REAL-PW"  # type: ignore[union-attr]
 
 
+def test_put_config_rename_preserves_secrets(
+    client: TestClient, app, spool: Spool, tmp_path
+) -> None:
+    """Renaming a destination must not destroy its stored credential.
+
+    The Destinations page exposes rename as a first-class action. The secret
+    field still carries the '***' sentinel (the operator never touched it), but
+    under a name the by-name restore lookup cannot match — so the sentinel would
+    be persisted as the literal password and the destination would break after
+    the next restart with no indication why.
+    """
+    import json as _json
+
+    from mercure_gateway.config import SFTPDestination, load_config
+
+    config_path = tmp_path / "gw.json"
+    app.state.config_path = str(config_path)
+
+    real = default_config()
+    real.destinations = [
+        SFTPDestination(
+            name="nas", type="sftp", host="nas", port=22, username="u", password="REAL-PW"
+        )
+    ]
+    app.state.config = real
+
+    redacted = client.get("/api/config").json()
+    # Rename in place; the password is still the untouched sentinel.
+    redacted["destinations"][0]["name"] = "nas-2"
+
+    r = client.put("/api/config", json=redacted)
+    assert r.status_code == 200
+
+    saved = _json.loads(config_path.read_text())
+    assert saved["destinations"][0]["name"] == "nas-2"
+    assert saved["destinations"][0]["password"] == "REAL-PW"
+    assert load_config(config_path).destinations[0].password == "REAL-PW"  # type: ignore[union-attr]
+
+
 def test_update_config_rejects_invalid(client: TestClient) -> None:
     """A malformed config body returns 400, not a silent success."""
     r = client.put("/api/config", json={"general": {"log_level": "BOGUS"}})
@@ -831,3 +870,54 @@ def test_run_web_admin_plain_http_without_tls(monkeypatch: pytest.MonkeyPatch) -
     )
     assert "ssl_certfile" not in captured
     assert "ssl_keyfile" not in captured
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Config warnings (refinement 2026-09-17) — lint surfaced to the panel
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_get_config_warnings_clean(client: TestClient) -> None:
+    """A healthy running config reports no warnings."""
+    from mercure_gateway.config import DICOMDestination
+
+    cfg = default_config()
+    cfg.destinations = [DICOMDestination(name="pacs", host="h", port=104, aet_target="A")]
+    client.put("/api/config", json=cfg.model_dump(mode="json"))
+
+    r = client.get("/api/config/warnings")
+    assert r.status_code == 200
+    assert r.json()["warnings"] == []
+
+
+def test_get_config_warnings_reports_stale_rule(client: TestClient) -> None:
+    """The stale-rule finding reaches the panel, not just the log."""
+    from mercure_gateway.config import DICOMDestination, ForwardingRule
+
+    cfg = default_config()
+    cfg.destinations = [DICOMDestination(name="pacs-a", host="h", port=104, aet_target="A")]
+    cfg.forwarding_rules = [
+        ForwardingRule(rule="StudyDescription ~ 'CHEST'", targets=["pacs-a", "ghost"])
+    ]
+    client.put("/api/config", json=cfg.model_dump(mode="json"))
+
+    r = client.get("/api/config/warnings")
+    assert r.status_code == 200
+    warnings = r.json()["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0]["path"] == "forwarding_rules[0].targets"
+    assert "ghost" in warnings[0]["message"]
+
+
+def test_put_config_returns_warnings_for_the_saved_state(client: TestClient) -> None:
+    """A save reports what the saved config will do, in the same response."""
+    from mercure_gateway.config import DICOMDestination
+
+    cfg = default_config()
+    cfg.destinations = [
+        DICOMDestination(name="pacs", host="h", port=104, aet_target="A", enabled=False)
+    ]
+    r = client.put("/api/config", json=cfg.model_dump(mode="json"))
+    assert r.status_code == 200
+    warnings = r.json()["warnings"]
+    assert any(w["path"] == "destinations" and "disabled" in w["message"] for w in warnings)

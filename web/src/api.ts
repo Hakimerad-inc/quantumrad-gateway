@@ -16,6 +16,8 @@
 import type {
   AuditEvent,
   AuditVerifyResult,
+  ConfigWarning,
+  ConfigWarningsResult,
   DestinationHealth,
   DestinationNode,
   DestinationRouteRow,
@@ -38,6 +40,8 @@ import type {
 export type {
   AuditEvent,
   AuditVerifyResult,
+  ConfigWarning,
+  ConfigWarningsResult,
   DestinationHealth,
   DestinationNode,
   DestinationRouteRow,
@@ -231,6 +235,12 @@ export async function saveConfig(
     restartListeners.forEach((cb) => cb(true));
   }
   return data;
+}
+
+// ── Config lint (refinement 2026-09-17) ───────────────────────────────
+
+export function fetchConfigWarnings(): Promise<ConfigWarningsResult> {
+  return getJson<ConfigWarningsResult>("/api/config/warnings");
 }
 
 // ── Pipeline flow view ───────────────────────────────────────────────

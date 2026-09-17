@@ -1,5 +1,7 @@
-import { useState, useEffect } from "react";
-import { fetchConfig, saveConfig } from "../api";
+import { useState, useEffect, useMemo } from "react";
+import { fetchConfig, saveConfig, fetchConfigWarnings } from "../api";
+import type { ConfigWarning } from "../api";
+import { lintConfigDocument } from "../config/lint";
 import ServiceCard from "../ui/ServiceCard";
 
 export default function ConfigView() {
@@ -9,19 +11,35 @@ export default function ConfigView() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
   const [loadError, setLoadError] = useState("");
+  const [serverWarnings, setServerWarnings] = useState<ConfigWarning[]>([]);
 
   useEffect(function loadConfigOnMount() {
     fetchConfig()
       .then((c) => {
         setConfig(c);
-        setText(JSON.stringify(c, null, 2));
+        // A slow load must not clobber edits the operator already made into
+        // the textarea — an in-flight keystroke would otherwise be silently
+        // replaced once the fetch resolves.
+        setText((prev) => (prev ? prev : JSON.stringify(c, null, 2)));
       })
       .catch((e: unknown) => {
         setLoadError(e instanceof Error ? e.message : String(e));
       });
+    fetchConfigWarnings()
+      .then((r) => setServerWarnings(r.warnings ?? []))
+      .catch(() => {
+        /* older backend without the endpoint — not fatal */
+      });
   }, []);
 
+  // Immediate feedback: lint on every keystroke so a footgun appears under the
+  // cursor instead of after a save or a restart. Server stays authoritative.
+  const findings = useMemo(() => (text ? lintConfigDocument(text) : []), [text]);
+  const parseErrors = findings.filter((f) => f.message.startsWith("Invalid JSON"));
+  const canSave = dirty && !saving && parseErrors.length === 0;
+
   const handleSave = async () => {
+    if (parseErrors.length > 0) return; // never send a document that won't parse
     setSaving(true);
     setMsg("");
     try {
@@ -30,7 +48,13 @@ export default function ConfigView() {
       if (result) {
         // The running components hold their own config refs, so a saved change
         // only applies after a restart (review H5).
-        setMsg("Config saved — restart the gateway to apply changes.");
+        const found = result.warnings?.length ?? 0;
+        setMsg(
+          found > 0
+            ? `Config saved — ${found} lint warning${found > 1 ? "s" : ""} below; restart the gateway to apply.`
+            : "Config saved — restart the gateway to apply changes.",
+        );
+        if (result.warnings) setServerWarnings(result.warnings);
         setDirty(false);
         setConfig(parsed);
       }
@@ -54,12 +78,47 @@ export default function ConfigView() {
       {loadError && (
         <div className="error-banner" role="alert">Failed to load config: {loadError}</div>
       )}
+
+      {serverWarnings.length > 0 ? (
+        <div className="banner warn" role="alert" style={{ marginBottom: 12 }}>
+          {serverWarnings.map((w) => (
+            <div key={w.path + w.message}>{w.severity === "info" ? "Note: " : ""}{w.message}</div>
+          ))}
+        </div>
+      ) : null}
+
       <div className="toolbar">
-        <button className="btn primary" onClick={handleSave} disabled={!dirty || saving}>
+        <button className="btn primary" onClick={handleSave} disabled={!canSave}>
           {saving ? "Saving..." : "Save"}
         </button>
-        {msg ? <span className={msg.startsWith("Invalid") ? "error-banner" : "ok-note"} style={msg.startsWith("Invalid") ? { margin: 0 } : undefined}>{msg}</span> : null}
+        {msg ? (
+          // Success messages begin "Config saved…"; anything else is a parse
+          // or server rejection, which renders as an error.
+          <span
+            className={msg.startsWith("Config") ? "ok-note" : "error-banner"}
+            style={{ margin: 0 }}
+          >
+            {msg}
+          </span>
+        ) : null}
+        {dirty && parseErrors.length === 0 && findings.length > 0 ? (
+          <span className="warn-note" style={{ margin: 0, display: "inline-block" }}>
+            {findings.length} potential issue{findings.length > 1 ? "s" : ""}
+          </span>
+        ) : null}
       </div>
+
+      {findings.length > 0 ? (
+        <div className="lint-findings">
+          {findings.map((f, i) => (
+            <div key={i} className={f.message.startsWith("Invalid JSON") ? "lint-error" : "lint-warn"}>
+              {f.line ? `Line ${f.line}: ` : ""}
+              {f.message}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       <div className="card">
         <textarea
           style={{

@@ -247,6 +247,16 @@ label > .label, .field-label { display: block; font-size: 11px; font-weight: 600
 .gauge-meta { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
 
 .ok-note { color: var(--green); font-size: 13px; }
+.warn-note { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: var(--yellow-dim); color: var(--yellow); font-size: 12.5px; }
+
+.lint-findings { margin: 10px 0; border-radius: 6px; overflow: hidden; }
+.lint-findings > div { padding: 7px 12px; font-size: 12.5px; }
+.lint-error { background: var(--red-dim); color: var(--red); }
+.lint-warn { background: var(--yellow-dim); color: var(--yellow); }
+
+.dest-header { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.dest-header .input[name="name"] { width: 170px; font-weight: 600; }
+.dest-header select { width: 130px; }
 
 /* ── Misc ──────────────────────────────────────────────────────────── */
 

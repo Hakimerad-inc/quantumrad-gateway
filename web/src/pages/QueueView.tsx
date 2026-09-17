@@ -63,7 +63,7 @@ export default function QueueView() {
     const ok = await enqueueStudy(studyId);
     if (!ok) {
       setError(
-        "Enqueue failed — enable a destination first, or the study is already sent (see the Destinations page).",
+        "Enqueue failed — enable a destination first (Destinations tab), or the study is already sent.",
       );
       return;
     }

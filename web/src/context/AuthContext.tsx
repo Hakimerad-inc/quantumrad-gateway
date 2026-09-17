@@ -6,11 +6,20 @@ import { apiUrl } from '../api';
 export interface LoginResult {
   ok: boolean;
   error?: string;
+  /** True when the request never reached the gateway — connection refused,
+   *  DNS failure, CORS preflight rejected. Distinct from "wrong password":
+   *  no credential can fix it, so the UI must not offer a password field. */
+  unreachable?: boolean;
 }
 
 interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
+  /** True when the status probe could not reach the gateway at all. Render a
+   *  connection error, not the login screen — otherwise a dead backend asks
+   *  the operator for a password they cannot possibly need (B3 tray leg,
+   *  2026-09-17: the shell pointed at a port with no listener). */
+  backendUnreachable: boolean;
   login: (password: string) => Promise<LoginResult>;
   logout: () => Promise<void>;
   checkAuth: () => Promise<void>;
@@ -20,14 +29,20 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [backendUnreachable, setBackendUnreachable] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
   const checkAuth = async () => {
     try {
       const res = await fetch(apiUrl('/api/system/status'), { credentials: 'include' });
+      // fetch rejects only on a transport failure, never on an HTTP status,
+      // so reaching here means the gateway answered. A 401 is a real auth
+      // failure; a connection refusal would have thrown instead.
+      setBackendUnreachable(false);
       setIsAuthenticated(res.ok);
     } catch {
       setIsAuthenticated(false);
+      setBackendUnreachable(true);
     } finally {
       setIsLoading(false);
     }
@@ -59,7 +74,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         (res.status === 401 ? 'invalid credentials' : 'Login failed');
       return { ok: false, error: detail };
     } catch {
-      return { ok: false, error: 'Network error. Please try again.' };
+      // Same transport distinction as checkAuth: the gateway never saw the
+      // attempt. Report it as unreachable, not as an invalid password, and
+      // flip the connection flag so App renders BackendDownView instead of
+      // looping the operator on a password form that cannot succeed.
+      setBackendUnreachable(true);
+      return { ok: false, unreachable: true, error: 'Cannot reach the gateway.' };
     }
   };
 
@@ -72,7 +92,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, isLoading, login, logout, checkAuth }}>
+    <AuthContext.Provider value={{ isAuthenticated, isLoading, backendUnreachable, login, logout, checkAuth }}>
       {children}
     </AuthContext.Provider>
   );

@@ -8,6 +8,7 @@ import AuditView from "./pages/AuditView";
 import SetupWizardPage from "./pages/SetupWizard";
 import PipelineView from "./pages/PipelineView";
 import LoginView from "./pages/LoginView";
+import BackendDownView from "./pages/BackendDownView";
 import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus, type SystemStatus } from "./api";
 import UpdaterBanner from "./ui/UpdaterBanner";
 import ErrorBoundary from "./ui/ErrorBoundary";
@@ -143,7 +144,7 @@ function AppContent() {
   // Persistent "restart required" banner: the gateway must be restarted for a
   // saved config change to take effect (review H5).
   const [restartNeeded, setRestartNeeded] = useState(isRestartRequired());
-  const { isAuthenticated, logout, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, logout, isLoading: authLoading, backendUnreachable } = useAuth();
 
   useEffect(() => {
     fetchSystemStatus().then((s) => setVersion(s.version)).catch(() => {});
@@ -171,6 +172,13 @@ function AppContent() {
   const handleLogout = async () => {
     await logout();
   };
+
+  // A refused connection is not an auth failure: the login screen would ask
+  // for a password no credential can make useful. Checked before the
+  // not-authenticated branch so a dead backend never reads as "sign in".
+  if (backendUnreachable && !authLoading) {
+    return <BackendDownView />;
+  }
 
   // Show login page when not authenticated (and not loading)
   if (!isAuthenticated && !authLoading) {

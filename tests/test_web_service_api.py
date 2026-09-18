@@ -175,8 +175,12 @@ def test_run_web_admin_wires_service_controller_platform_gated(
 
     from mercure_gateway.web import create_app as real_create_app
 
-    def _capture_create_app(config, spool, config_path=None):  # type: ignore[no-untyped-def]
-        application = real_create_app(config, spool, config_path=config_path)
+    def _capture_create_app(config, spool, **kwargs):  # type: ignore[no-untyped-def]
+        # Signature follows create_app: config, spool, then keyword-only
+        # optional wiring (config_path, disk_monitor). Forwarded wholesale so a
+        # new optional wire does not have to be mirrored here to keep this
+        # capture working.
+        application = real_create_app(config, spool, **kwargs)
         app_holder["app"] = application
         return application
 

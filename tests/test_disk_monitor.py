@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -244,3 +245,159 @@ def test_monitor_start_is_idempotent(tmp_path: Path) -> None:
     monitor.start()  # second start must be a no-op
     assert monitor._thread is first_thread
     monitor.stop()
+
+
+# ── Purge loop bounds (review P0-11) ──────────────────────────────────────
+#
+# Each purge iteration deletes files and takes the process-wide DB write lock,
+# so an unbounded loop under sustained incoming load makes the capacity watcher
+# itself the load: the thread meant to protect the spool competes with the
+# receiver for the lock. The bound is a throttle, not a correctness limit —
+# the next poll continues the purge — and hitting it is reported rather than
+# silently succeeding.
+
+
+def _deliver_many(spool: Spool, count: int) -> None:
+    for i in range(count):
+        deliver(spool, f"1.2.3.4.{100 + i}", age_hours=i + 1)
+
+
+def test_purge_loop_is_bounded_per_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spool with more delivered studies than the budget does not chew the
+    whole interval; the remainder waits for the next poll."""
+    spool = make_spool(tmp_path)
+    from mercure_gateway.disk import _MAX_PURGE_ITERATIONS
+
+    _deliver_many(spool, _MAX_PURGE_ITERATIONS + 50)
+    monkeypatch.setattr(
+        "mercure_gateway.disk.shutil.disk_usage", lambda _p: usage(95.0)  # stays over
+    )
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=True, sleep=lambda _s: None)
+
+    monitor.check_once()
+
+    assert monitor.purge_iterations_total == _MAX_PURGE_ITERATIONS
+    assert monitor.purge_budget_hits >= 1
+    # The studies the budget could not reach are still on disk, not lost.
+    remaining = spool._db.count_states()
+    assert remaining.get("SENT", 0) == 50
+
+
+def test_purge_budget_resets_between_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound is per check, not a lifetime quota.
+
+    A lifetime cap would purge exactly 100 studies and then stop forever —
+    silently converting the throttle into a capacity monitor that never
+    recovers space.
+    """
+    from mercure_gateway.disk import _MAX_PURGE_ITERATIONS
+
+    spool = make_spool(tmp_path)
+    _deliver_many(spool, _MAX_PURGE_ITERATIONS * 2)
+    monkeypatch.setattr(
+        "mercure_gateway.disk.shutil.disk_usage", lambda _p: usage(95.0)  # stays over
+    )
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=True, sleep=lambda _s: None)
+
+    monitor.check_once()
+    after_first = monitor.purge_iterations_total
+    assert after_first == _MAX_PURGE_ITERATIONS
+
+    monitor.check_once()
+
+    assert monitor.purge_iterations_total == 2 * _MAX_PURGE_ITERATIONS
+    assert monitor.purge_budget_hits >= 2
+
+
+def test_purge_budget_hit_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Hitting the cap is the one symptom of a capacity-loss cascade, and
+    "disk monitor: running" says nothing about it — so it is warned, not
+    silently deferred."""
+    from mercure_gateway.disk import _MAX_PURGE_ITERATIONS
+
+    spool = make_spool(tmp_path)
+    _deliver_many(spool, _MAX_PURGE_ITERATIONS + 1)
+    monkeypatch.setattr("mercure_gateway.disk.shutil.disk_usage", lambda _p: usage(95.0))
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=True, sleep=lambda _s: None)
+
+    with caplog.at_level(logging.WARNING, logger="mercure_gateway.disk"):
+        monitor.check_once()
+
+    assert any("iteration budget" in rec.message for rec in caplog.records)
+
+
+def test_purge_loop_yields_the_lock_between_studies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long purge sleeps between studies so the receiver is not starved."""
+    from mercure_gateway.disk import _PURGE_PAUSE_SEC
+
+    slept: list[float] = []
+    spool = make_spool(tmp_path)
+    _deliver_many(spool, 5)
+    monkeypatch.setattr(
+        "mercure_gateway.disk.shutil.disk_usage",
+        lambda _p: usage(95.0),
+    )
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=True, sleep=slept.append)
+
+    monitor.check_once()
+
+    assert slept == [_PURGE_PAUSE_SEC] * 5
+
+
+def test_metrics_route_exposes_the_purge_counters(tmp_path: Path) -> None:
+    """The bound is only useful if an operator can see it was hit.
+
+    The counters are the distinction between "the monitor is healthy" and "the
+    monitor is losing the capacity race" — invisible in every other endpoint.
+    """
+    from starlette.testclient import TestClient
+
+    from mercure_gateway.disk import _MAX_PURGE_ITERATIONS
+    from mercure_gateway.web import create_app
+
+    spool = make_spool(tmp_path)
+    _deliver_many(spool, _MAX_PURGE_ITERATIONS + 5)
+    monitor = DiskMonitor(
+        spool, warning_pct=90, purge_on_full=True, sleep=lambda _s: None
+    )
+    monitor._purges_this_check = _MAX_PURGE_ITERATIONS  # simulate a saturated check
+    with unittest.mock.patch(
+        "mercure_gateway.disk.shutil.disk_usage", lambda _p: usage(95.0)
+    ):
+        monitor.check_once()
+
+    cfg = default_config()
+    cfg.storage.spool_dir = str(tmp_path / "spool")
+    app = create_app(cfg, spool, disk_monitor=monitor)
+    body = TestClient(app).get("/api/system/metrics").text
+
+    assert "mercure_gateway_purge_iterations_total" in body
+    assert "mercure_gateway_purge_budget_hits_total" in body
+    # The values are real, not placeholders.
+    name = "mercure_gateway_purge_iterations_total"
+    iterations_line = next(
+        line for line in body.splitlines() if line.startswith(name)
+    )
+    assert int(iterations_line.split()[1]) == monitor.purge_iterations_total
+
+
+def test_metrics_route_omits_purge_counters_without_a_monitor() -> None:
+    """The monitor is optional (tests, --write-default-config) — no series,
+    rather than a zero that reads as 'never purged'."""
+    from starlette.testclient import TestClient
+
+    from mercure_gateway.web import create_app
+
+    app = create_app(default_config(), Spool(mem_database()))
+    body = TestClient(app).get("/api/system/metrics").text
+
+    assert "purge_iterations_total" not in body
+    assert "purge_budget_hits" not in body

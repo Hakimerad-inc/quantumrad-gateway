@@ -9,6 +9,13 @@ under the threshold.  Undelivered / FAILED studies are never auto-removed
 The monitor is best-effort: measurement and purge failures are logged, never
 raised, and it runs on its own daemon thread so a stuck filesystem can never
 block receive/forward (US-10 isolation invariant).
+
+The purge loops are bounded (review P0-11). Each iteration deletes files and
+takes the process-wide database write lock, so an unbounded loop under
+sustained incoming load makes the capacity watcher itself the load: the thread
+that is supposed to protect the spool competes for the lock the receiver
+needs. The cap is not a correctness limit — it is a throttle — and hitting it
+is reported rather than silently succeeding (see :attr:`purge_iterations_capped`).
 """
 
 from __future__ import annotations
@@ -16,6 +23,8 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
+import time
+from collections.abc import Callable
 
 from mercure_gateway.spool import Spool
 
@@ -24,6 +33,16 @@ __all__ = ["DiskMonitor"]
 logger = logging.getLogger(__name__)
 
 _DEFAULT_POLL_SEC = 30.0
+
+# A single check purges at most this many studies. 100 × the median delivered
+# study is far more than one poll interval should recover; the next poll picks
+# up where this one stopped. Without a cap, a spool that grows faster than it
+# can purge pins the DB write lock for the whole interval.
+_MAX_PURGE_ITERATIONS = 100
+
+# Pause between purge iterations so a long purge yields the database write lock
+# to the receiver between studies instead of holding it for the whole run.
+_PURGE_PAUSE_SEC = 0.05
 
 
 class DiskMonitor:
@@ -47,6 +66,10 @@ class DiskMonitor:
         max_spool_gb: int | None = None,
         max_spool_bytes: int | None = None,
         poll_sec: float = _DEFAULT_POLL_SEC,
+        # Test seam: a clock that does not actually sleep. Production passes
+        # time.sleep, tests pass a no-op so a bounded loop does not take
+        # 100 × 50 ms of wall clock.
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self._spool = spool
         self._warning_pct = warning_pct
@@ -62,6 +85,17 @@ class DiskMonitor:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
+        self._sleep = sleep if sleep is not None else time.sleep
+        # Observability (review P0-11): the loops are bounded by design, so
+        # hitting the bound is the signal that the spool is growing faster
+        # than purge can recover — the one symptom of a capacity-loss cascade
+        # that is otherwise invisible while "disk monitor: running" stays green.
+        self.purge_iterations_total = 0
+        self.purge_budget_hits = 0
+        # Per-check budget; reset in check_once() so the bound is a throttle,
+        # not a lifetime quota (a lifetime cap would stop purging forever after
+        # the first 100).
+        self._purges_this_check = 0
 
     @property
     def is_running(self) -> bool:
@@ -105,6 +139,8 @@ class DiskMonitor:
         """
         disk = shutil.disk_usage(self._spool.spool_dir)
         pct = disk.used * 100.0 / max(1, disk.total)
+        # The budget is per check: the next poll continues the purge.
+        self._purges_this_check = 0
         if pct >= self._warning_pct:
             logger.warning(
                 "spool disk usage at %.1f%% (warning threshold %d%%)",
@@ -113,11 +149,7 @@ class DiskMonitor:
             )
             if self._purge_on_full:
                 while pct >= self._warning_pct:
-                    if not self._spool.purge_oldest_delivered():
-                        logger.warning(
-                            "disk still over %d%% but no delivered studies to purge",
-                            self._warning_pct,
-                        )
+                    if not self._purge_once(f"disk still over {self._warning_pct}%"):
                         break
                     disk = shutil.disk_usage(self._spool.spool_dir)
                     pct = disk.used * 100.0 / max(1, disk.total)
@@ -144,10 +176,42 @@ class DiskMonitor:
             total / self._GB,
         )
         while self._spool.spool_num_bytes() > self._max_spool_bytes:
-            if not self._spool.purge_oldest_delivered():
-                logger.warning(
-                    "spool over cap by %.2f GiB but no delivered studies to purge",
-                    (self._spool.spool_num_bytes() - self._max_spool_bytes) / self._GB,
-                )
+            if not self._purge_once("spool still over the byte cap"):
                 break
         logger.info("spool cap enforcement done (was %.2f GiB over)", over_gb)
+
+    def _purge_once(self, still_over_context: str) -> bool:
+        """Purge one delivered study, honouring the iteration budget.
+
+        Returns False when there is nothing more to purge — the caller stops
+        either way. ``True`` means one study was purged and the caller may
+        continue, subject to :data:`_MAX_PURGE_ITERATIONS` *per check*.
+
+        Both purge loops funnel through here so the bound, the yield to the
+        receiver, and the "hit the cap" reporting are one implementation
+        (review P0-11).
+        """
+        if self._purges_this_check >= _MAX_PURGE_ITERATIONS:
+            # Not a failure — the next poll continues the work. Reported
+            # because a spool that needs 100+ purges per interval is losing
+            # the capacity race, and "disk monitor: running" says nothing
+            # about it.
+            if self.purge_budget_hits == 0 or self.purge_budget_hits % 10 == 0:
+                logger.warning(
+                    "purge loop hit the %d-iteration budget in one check; the "
+                    "spool is growing faster than purge can recover — remaining "
+                    "purges deferred to the next poll (budget hit %d time(s))",
+                    _MAX_PURGE_ITERATIONS,
+                    self.purge_budget_hits + 1,
+                )
+            self.purge_budget_hits += 1
+            return False
+        if not self._spool.purge_oldest_delivered():
+            logger.warning("%s but no delivered studies to purge", still_over_context)
+            return False
+        self._purges_this_check += 1
+        self.purge_iterations_total += 1
+        # Yield the DB write lock between studies so a long purge does not
+        # starve the receiver for the whole run.
+        self._sleep(_PURGE_PAUSE_SEC)
+        return True

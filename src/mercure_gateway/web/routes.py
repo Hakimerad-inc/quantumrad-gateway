@@ -354,6 +354,25 @@ def system_metrics(request: Request) -> Response:
         gauge("mercure_gateway_disk_over_threshold",
               "1 once usage >= the configured warning threshold.", 0)
 
+    # Purge loop bounds (review P0-11). The loops are capped so a spool growing
+    # faster than it can purge does not pin the DB write lock; these counters
+    # are what makes that *visible*, since the cap is otherwise indistinguishable
+    # from a healthy monitor. Absent when the web app is built without the
+    # monitor (tests, --write-default-config).
+    monitor = getattr(request.app.state, "disk_monitor", None)
+    if monitor is not None:
+        gauge(
+            "mercure_gateway_purge_iterations_total",
+            "Delivered studies auto-purged since process start.",
+            monitor.purge_iterations_total,
+        )
+        gauge(
+            "mercure_gateway_purge_budget_hits_total",
+            "Times a single check exhausted its purge iteration budget — the "
+            "spool is growing faster than purge can recover.",
+            monitor.purge_budget_hits,
+        )
+
     return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 

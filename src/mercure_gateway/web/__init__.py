@@ -28,6 +28,7 @@ from mercure_gateway.web.auth import require_auth
 
 if TYPE_CHECKING:
     from mercure_gateway.config import GatewayConfig
+    from mercure_gateway.disk import DiskMonitor
     from mercure_gateway.spool import Spool
 
 __all__ = ["create_app"]
@@ -150,11 +151,16 @@ def create_app(
     spool: Spool,
     *,
     config_path: str | Path | None = None,
+    disk_monitor: DiskMonitor | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
     The *config* and *spool* instances are shared with the gateway core;
-    the web layer reads them but does not own their lifecycle.
+    the web layer reads them but does not own their lifecycle.  *disk_monitor*
+    is optional because the web app is also built standalone in tests and by
+    ``--write-default-config`` paths; when present its purge counters reach the
+    metrics route, which is the only place a bounded-but-starving purge loop is
+    visible (review P0-11).
     """
     from mercure_gateway.web.routes import auth_router, router
 
@@ -168,6 +174,7 @@ def create_app(
     app.state.config = config
     app.state.spool = spool
     app.state.config_path = str(config_path) if config_path else None
+    app.state.disk_monitor = disk_monitor
     # Snapshot the config the running components were constructed with. The
     # receiver/forwarder hold their own config refs captured at construction,
     # so a saved change only takes effect after a process restart; comparing

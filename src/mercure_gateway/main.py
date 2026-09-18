@@ -490,13 +490,14 @@ def _run_web_admin(
     text_log: TextLog | None = None,
     config_path: Path | None = None,
     hub_status: dict[str, Any] | None = None,
+    disk_monitor: Any = None,
 ) -> None:
     """Start the FastAPI web admin panel (blocking)."""
     import uvicorn
 
     from mercure_gateway.web import create_app
 
-    app = create_app(config, spool, config_path=config_path)
+    app = create_app(config, spool, config_path=config_path, disk_monitor=disk_monitor)
     app.state.receiver = receiver
     app.state.forwarder = forwarder
     app.state.report_retriever = report_retriever
@@ -697,6 +698,7 @@ def main(argv: list[str] | None = None) -> int:
                     text_log,
                     config_path=args.config,
                     hub_status=hub_status,
+                    disk_monitor=disk_monitor,
                 )
             except KeyboardInterrupt:
                 print("\nShutting down web admin...")

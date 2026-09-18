@@ -53,6 +53,44 @@ def test_hsts_only_over_tls() -> None:
     assert "strict-transport-security" in dict(r.headers)
 
 
+def test_session_cookie_secure_only_over_https(client: TestClient) -> None:
+    """The session cookie carries ``Secure`` only when served over TLS.
+
+    Over plain HTTP (localhost dev, the TestClient, a Tauri shell hitting
+    127.0.0.1) a ``Secure`` cookie would never be stored, so the login flow
+    would silently break. Review P1-16.
+    """
+    r = client.post("/api/login", json={"password": "anything"})
+    assert r.status_code == 200
+    cookie = r.headers.get("set-cookie", "")
+    assert "mercure_session=" in cookie
+    assert "secure" not in cookie.lower()
+
+
+def test_session_cookie_secure_set_over_tls() -> None:
+    """Over TLS the cookie is flagged ``Secure`` so it never rides a cleartext hop."""
+    cfg = default_config()
+    spool = Spool(mem_database())
+    app = create_app(cfg, spool)
+    https_client = TestClient(app, base_url="https://gateway.test")
+    r = https_client.post("/api/login", json={"password": "anything"})
+    assert r.status_code == 200
+    cookie = r.headers.get("set-cookie", "")
+    assert "mercure_session=" in cookie
+    assert "secure" in cookie.lower()
+
+
+def test_logout_cookie_flag_matches_scheme(client: TestClient) -> None:
+    """Logout must set the same ``Secure`` flag the cookie was issued with or
+    the browser will not match it for deletion and the cookie survives."""
+    r = client.post("/api/logout")
+    assert r.status_code == 200
+    cookie = r.headers.get("set-cookie", "")
+    assert "mercure_session=" in cookie
+    # Plain HTTP → plain deletion, no Secure mismatch.
+    assert "secure" not in cookie.lower()
+
+
 # ══════════════════════════════════════════════════════════════════════
 # XSS prevention
 # ══════════════════════════════════════════════════════════════════════

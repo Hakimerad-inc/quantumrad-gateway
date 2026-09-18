@@ -118,15 +118,24 @@ def login(request: Request, response: Response, password: str | None) -> None:
         if not password or not stored or not verify_password(password, stored):
             raise HTTPException(status_code=401, detail="invalid credentials")
     token = create_session_token(_session_secret(config))
+    # ``Secure`` is set only when the panel is actually served over TLS, so
+    # plain-HTTP localhost (and the starlette TestClient, which speaks HTTP)
+    # still receive and replay the cookie. Under web_ui.tls_* the browser will
+    # never send it over a cleartext hop.
     response.set_cookie(
         _COOKIE_NAME,
         token,
         max_age=_SESSION_TTL_SEC,
         httponly=True,
         samesite="lax",
+        secure=request.url.scheme == "https",
     )
 
 
-def logout(response: Response) -> None:
-    """Clear the session cookie."""
-    response.delete_cookie(_COOKIE_NAME)
+def logout(response: Response, secure: bool = False) -> None:
+    """Clear the session cookie.
+
+    *secure* must match the flag the cookie was set with or the browser will
+    not match it for deletion — callers pass ``request.url.scheme == "https"``.
+    """
+    response.delete_cookie(_COOKIE_NAME, secure=secure)

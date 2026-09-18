@@ -98,21 +98,23 @@ class SFTPHandler:
                 )
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
         try:
+            # look_for_keys=False / allow_agent=False: never fall back to the
+            # operator's ambient credentials (ssh-agent, ~/.ssh/id_*). Without
+            # these paramiko tries the user's own key before the configured
+            # password, and a successful delivery is audit-recorded as though
+            # the configured credential worked (review P1-21).
+            common = {
+                "hostname": self.destination.host,
+                "port": self.destination.port,
+                "username": self.destination.username,
+                "look_for_keys": False,
+                "allow_agent": False,
+            }
             if private_key:
                 key = self._load_private_key(private_key, passphrase)
-                client.connect(
-                    hostname=self.destination.host,
-                    port=self.destination.port,
-                    username=self.destination.username,
-                    pkey=key,
-                )
+                client.connect(pkey=key, **common)
             else:
-                client.connect(
-                    hostname=self.destination.host,
-                    port=self.destination.port,
-                    username=self.destination.username,
-                    password=password,
-                )
+                client.connect(password=password, **common)
             sftp = client.open_sftp()
             try:
                 for f in files:

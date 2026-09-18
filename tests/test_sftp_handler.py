@@ -269,3 +269,71 @@ def test_sftp_rejects_unknown_host_key(mock_ssh, tmp_path: Path, spool: Spool) -
 
     assert result.ok is False
     assert "known_hosts" in (result.error or "").lower()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Ambient credential suppression (review P1-21)
+#
+# paramiko's connect() defaults try the operator's own ssh-agent and
+# ~/.ssh/id_* keys *before* the configured password. A delivery that
+# succeeded on a personal key was audit-recorded as though the configured
+# credential had worked. look_for_keys=False / allow_agent=False must reach
+# every connect() branch.
+# ══════════════════════════════════════════════════════════════════════
+
+@patch("paramiko.SSHClient")
+def test_sftp_password_branch_nevers_ambient_credentials(
+    mock_ssh, tmp_path: Path, spool: Spool,
+) -> None:
+    """The password branch must opt out of ssh-agent and ~/.ssh discovery."""
+    mock_client = MagicMock()
+    mock_ssh.return_value = mock_client
+    mock_client.open_sftp.return_value = MagicMock()
+
+    study_id = _write_study(spool)
+    dest = SFTPDestination(
+        name="nas", type="sftp", host="nas.local", port=22, username="u", password="pw"
+    )
+    task = _claim_task(spool, study_id, dest)
+    result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+
+    assert result.ok is True
+    kwargs = mock_client.connect.call_args.kwargs
+    assert kwargs["look_for_keys"] is False
+    assert kwargs["allow_agent"] is False
+    assert kwargs["password"] == "pw"
+
+
+@patch("paramiko.SSHClient")
+def test_sftp_key_branch_nevers_ambient_credentials(
+    mock_ssh, tmp_path: Path, spool: Spool,
+) -> None:
+    """The private-key branch must opt out too — it can still fall back to agent."""
+    mock_client = MagicMock()
+    mock_ssh.return_value = mock_client
+    mock_client.open_sftp.return_value = MagicMock()
+
+    # Generated, not pasted: the key must actually parse so the private-key
+    # branch is exercised rather than failing in _load_private_key and being
+    # mistaken for a password-branch result.
+    import io
+
+    import paramiko
+
+    buf = io.StringIO()
+    paramiko.RSAKey.generate(2048).write_private_key(buf)
+    private_key = buf.getvalue()
+
+    study_id = _write_study(spool)
+    dest = SFTPDestination(
+        name="nas", type="sftp", host="nas.local", port=22, username="u",
+        private_key=private_key,
+    )
+    task = _claim_task(spool, study_id, dest)
+    result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+
+    assert result.ok is True
+    kwargs = mock_client.connect.call_args.kwargs
+    assert kwargs["look_for_keys"] is False
+    assert kwargs["allow_agent"] is False
+    assert kwargs["pkey"] is not None

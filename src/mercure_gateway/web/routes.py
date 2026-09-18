@@ -111,11 +111,11 @@ def login(request: Request, response: JSONResponse, payload: LoginRequest) -> di
 
 
 @auth_router.post("/logout")
-def logout(response: JSONResponse) -> dict[str, str]:
+def logout(request: Request, response: JSONResponse) -> dict[str, str]:
     """Clear the admin session cookie."""
     from mercure_gateway.web.auth import logout as _logout
 
-    _logout(response)
+    _logout(response, secure=request.url.scheme == "https")
     return {"status": "ok"}
 
 

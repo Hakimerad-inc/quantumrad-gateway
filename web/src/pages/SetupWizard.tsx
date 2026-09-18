@@ -76,7 +76,11 @@ export default function SetupWizardPage() {
     setErrors([]);
     try {
       const current = (await fetchConfig()) as Record<string, unknown>;
-      current.general = { ...(current.general as object || {}), ...data.receiver };
+      // The receiver step's ae_title/port belong to the *receiver* section —
+      // writing them into `general` silently discards them (GeneralConfig has
+      // neither field), the operator gets a success toast, and the receiver
+      // keeps its defaults forever (review P0-4).
+      current.receiver = { ...(current.receiver as object || {}), ...data.receiver };
       current.destinations = data.destinations.map((d) => ({
         name: d.name,
         type: "dicom",
@@ -86,7 +90,13 @@ export default function SetupWizardPage() {
         aet_target: d.aet,
         aet_source: "GATEWAY",
       }));
-      current.reports = { ...(current.reports as object || {}), ...data.reports };
+      // Only `enabled` is taken from the wizard: `query_source` is a
+      // structured object (ReportQuerySource), not the free-text
+      // "host:port" string this step collects.
+      current.reports = {
+        ...(current.reports as object || {}),
+        enabled: data.reports.enabled,
+      };
       await saveConfig(current);
       setDone(true);
     } catch (err) {
@@ -148,6 +158,8 @@ export default function SetupWizardPage() {
             <span
               key={s}
               className={`step ${i === step ? "current" : i < step ? "done" : ""}`}
+              // The current step is otherwise conveyed by colour alone.
+              aria-current={i === step ? "step" : undefined}
             >
               {i < step ? <IconCheck size={13} /> : null}{STEP_LABELS[s]}
             </span>
@@ -156,7 +168,7 @@ export default function SetupWizardPage() {
 
         <div style={{ minHeight: 200 }}>
           {errors.length > 0 ? (
-            <div className="error-banner" style={{ marginBottom: 12 }}>
+            <div className="error-banner" role="alert" style={{ marginBottom: 12 }}>
               {errors.map((e) => <div key={e}>{e}</div>)}
             </div>
           ) : null}

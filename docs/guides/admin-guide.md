@@ -47,6 +47,36 @@ secrets redacted (passwords and keys are replaced with `***`). **Import**
 applies a previously exported file. Never edit secrets in an exported file and
 re-import it as plaintext — use the encrypted credential store or the wizard.
 
+### Forwarding rules
+
+`forwarding_rules` narrows which destinations a study is sent to. A study
+matching at least one rule is sent only to the targets the matching rules name
+(unioned); a study matching no rule is sent to every enabled destination — the
+default route. Two spellings are accepted:
+
+```json
+"forwarding_rules": [
+  { "rule": "modality:CT",      "targets": ["hub"],   "priority": "normal" },
+  { "rule": "StudyDescription=*chest*", "targets": ["archive"], "priority": "high" }
+]
+```
+
+- `modality:CT` — the short form, matched case-insensitively against the
+  study's Modality tag. This is what the destinations panel edits.
+- `TagName=value` — the general form for any extracted tag. `value` may use
+  `*` as a wildcard prefix/suffix (`StudyDescription=*chest*`); matching is
+  case-insensitive.
+
+`priority` (`high` > `normal` > `low`) resolves conflicts: among the rules a
+study matches, only those at the best matching priority contribute targets.
+
+Only the Modality tag is known at enqueue time, so a rule on any other tag
+cannot match on the live path — it applies when a full tag set is available,
+e.g. in a rule preview. A rule that cannot be parsed is ignored (the study is
+routed by the remaining rules, or takes the default route) and is flagged as a
+warning in the panel at save time; check the warnings banner after editing
+rules.
+
 ## Security
 
 ### Authentication

@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mercure_gateway.config import GatewayConfig
+from mercure_gateway.rules import RuleSyntaxError, compile_rule
 
 __all__ = ["ConfigWarning", "lint_config"]
 
@@ -54,17 +55,41 @@ def lint_config(cfg: GatewayConfig) -> list[ConfigWarning]:
 # ---------------------------------------------------------------------------
 
 def lint_forwarding_rules(cfg: GatewayConfig) -> list[ConfigWarning]:
-    """A rule target that names no configured destination narrows routing.
+    """A rule that cannot parse, or that targets no configured destination.
 
-    The config loader already logs this (``_warn_on_stale_forwarding_rule_targets``),
-    but a log line is invisible to an operator working in the panel — this is
-    the same finding, surfaced where the mistake is made.
+    The config loader already logs the stale-target case
+    (``_warn_on_stale_forwarding_rule_targets``), but a log line is invisible
+    to an operator working in the panel — this is the same finding, surfaced
+    where the mistake is made.
+
+    The syntax check is here because of how routing handles a bad rule: the
+    spool fails *open* (every destination receives the study, plus an error
+    log) rather than stranding it in RECEIVED.  That is the right call for a
+    running appliance, but it means a typo is invisible unless something
+    compiles the rule — a study silently over-delivered looks like normal
+    operation.  Lint runs at save time, so the operator is told before any
+    study is affected (review P0-9).
     """
     if not cfg.forwarding_rules:
         return []
     known = {d.name for d in cfg.destinations}
     warnings: list[ConfigWarning] = []
     for i, rule in enumerate(cfg.forwarding_rules):
+        try:
+            compile_rule(rule)
+        except RuleSyntaxError as exc:
+            warnings.append(
+                ConfigWarning(
+                    path=f"forwarding_rules[{i}].rule",
+                    message=(
+                        f"Rule cannot be parsed ({exc}) and is ignored at routing "
+                        "time — studies matching its intent are sent to every "
+                        "destination. Use 'modality:CT' or 'TagName=value'."
+                    ),
+                )
+            )
+            # An unparsed rule has no trustworthy targets to check.
+            continue
         stale = [t for t in rule.targets if t not in known]
         if stale:
             warnings.append(

@@ -38,6 +38,7 @@ from mercure_gateway.audit.events import (
     STUDY_SENT,
 )
 from mercure_gateway.config import Destination, GatewayConfig
+from mercure_gateway.rules import RuleEngine, RuleSyntaxError
 from mercure_gateway.spool.db import Database
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,9 @@ class Spool:
         # but the last study of a burst in RECEIVED (E1 dry-run, 2026-09-15).
         self._enqueue_timers: dict[int, threading.Timer] = {}
         self._timer_lock = threading.Lock()
+        # Compiled forwarding rules (review P0-9): built lazily and keyed on
+        # the rule list so a config swap recompiles. See _rule_engine().
+        self._rule_engine_cache: tuple[object, RuleEngine] | None = None
 
     @property
     def spool_dir(self) -> Path:
@@ -632,35 +636,71 @@ class Spool:
     def _route_targets(
         self, study_id: int, targets: list[Destination]
     ) -> tuple[list[Destination], bool]:
-        """Filter ``targets`` by the first matching modality rule (MVP).
+        """Filter ``targets`` by the configured forwarding rules.
 
-        Rules are ``modality:<MODALITY>`` strings; matching is case-insensitive
-        on the study's Modality tag. When no rule matches, *all* targets are
-        returned (default: all studies to all destinations).
+        Delegates to the shared :class:`~mercure_gateway.rules.RuleEngine` so
+        the panel's rule preview and enqueue-time routing are one
+        implementation (review P0-9).  Before that, the spool hand-rolled a
+        ``modality:`` matcher that understood neither priority nor the
+        ``Tag=value`` grammar, while the preview engine raised
+        ``RuleSyntaxError`` on every deployed ``modality:CT`` rule — so
+        preview and production routed differently and neither knew it.
 
         Also returns whether a rule actually narrowed the set — the caller
         distinguishes "rule matched but its targets are stale/disabled" (a
         misconfiguration; the study should not advance) from "the caller passed
         only disabled destinations" (a deliberate no-op).
+
+        A malformed rule fails *open*: the engine skips it (keeping the good
+        rules in the same config), and a study that rule would have matched
+        takes the default route.  Stranding studies in RECEIVED because an
+        operator typo'd a rule is worse than over-delivering, and the mistake
+        is surfaced by the config lint at save time plus the engine's own log
+        rather than hidden here.  The ``except`` below is defence in depth —
+        the engine does not raise after the per-rule skip — so a future change
+        that makes construction strict still degrades instead of crashing the
+        enqueue path.
         """
         rules = self._config.forwarding_rules if self._config is not None else []
         if not rules:
             return targets, False
         study = self._db.get_study(study_id)
         modality = str(study["modality"]).upper() if study and study["modality"] else None
-        if not modality:
+        # Only the Modality tag is available at enqueue time; a rule on any
+        # other tag simply cannot match here (it still previews correctly when
+        # given a full tag set).
+        tags = {"Modality": modality} if modality else {}
+        try:
+            matched_names, matched_any = self._rule_engine().match(tags)
+        except RuleSyntaxError as exc:
+            logger.error(
+                "study %s: a forwarding rule is malformed (%s); routing to all "
+                "destinations — fix the rule in the destinations panel",
+                self.study_uid(study_id),
+                exc,
+            )
             return targets, False
+        if not matched_any:
+            return targets, False
+        wanted = set(matched_names)
+        return [t for t in targets if t.name in wanted], True
 
-        matched_names: set[str] = set()
-        for rule in rules:
-            rule_text = rule.rule.strip().lower()
-            if rule_text.startswith("modality:"):
-                wanted = rule_text.split(":", 1)[1].strip().upper()
-                if modality == wanted:
-                    matched_names.update(rule.targets)
-        if not matched_names:
-            return targets, False
-        return [t for t in targets if t.name in matched_names], True
+    def _rule_engine(self) -> RuleEngine:
+        """Compile the configured rules once, recompiling if they were swapped.
+
+        A config save needs a process restart to reach the spool (see
+        ``_config_pending_restart``), so the compile is cached on the rule
+        list's identity rather than rebuilt per study.  Constructing the engine
+        compiles every rule, so a malformed rule raises here — the caller fails
+        open and this stays uncached, keeping the error live per study.
+        """
+        rules = self._config.forwarding_rules if self._config is not None else []
+        cached = self._rule_engine_cache
+        if cached is not None and cached[0] is rules:
+            return cached[1]
+        engine = RuleEngine(rules)
+        self._rule_engine_cache = (rules, engine)
+        return engine
 
     def claim_next(self, limit: int = 1) -> list[ClaimedTask]:
         """Atomically claim the next waiting task(s).

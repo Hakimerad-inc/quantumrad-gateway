@@ -931,7 +931,7 @@ def test_get_config_warnings_reports_stale_rule(client: TestClient) -> None:
     cfg = default_config()
     cfg.destinations = [DICOMDestination(name="pacs-a", host="h", port=104, aet_target="A")]
     cfg.forwarding_rules = [
-        ForwardingRule(rule="StudyDescription ~ 'CHEST'", targets=["pacs-a", "ghost"])
+        ForwardingRule(rule="StudyDescription=*CHEST*", targets=["pacs-a", "ghost"])
     ]
     client.put("/api/config", json=cfg.model_dump(mode="json"))
 
@@ -941,6 +941,29 @@ def test_get_config_warnings_reports_stale_rule(client: TestClient) -> None:
     assert len(warnings) == 1
     assert warnings[0]["path"] == "forwarding_rules[0].targets"
     assert "ghost" in warnings[0]["message"]
+
+
+def test_get_config_warnings_reports_an_unparsable_rule(client: TestClient) -> None:
+    """A rule that cannot parse makes routing fail open, so the panel says so.
+
+    The spool ignores a rule it cannot parse, which is the right call at
+    runtime (a stranded study is worse than an over-delivered one) but is
+    invisible in operation: a study routed everywhere looks like a config with
+    no rules. The warning is what turns it into something the operator sees
+    (review P0-9).
+    """
+    from mercure_gateway.config import DICOMDestination, ForwardingRule
+
+    cfg = default_config()
+    cfg.destinations = [DICOMDestination(name="pacs", host="h", port=104, aet_target="A")]
+    cfg.forwarding_rules = [ForwardingRule(rule="no-equals-here", targets=["pacs"])]
+    client.put("/api/config", json=cfg.model_dump(mode="json"))
+
+    r = client.get("/api/config/warnings")
+    assert r.status_code == 200
+    (warning,) = r.json()["warnings"]
+    assert warning["path"] == "forwarding_rules[0].rule"
+    assert "cannot be parsed" in warning["message"]
 
 
 def test_put_config_returns_warnings_for_the_saved_state(client: TestClient) -> None:

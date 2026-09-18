@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from mercure_gateway.rules import RuleEngine, RuleSyntaxError
+from mercure_gateway.config import ForwardingRule
+from mercure_gateway.rules import RuleEngine, RuleSyntaxError, compile_rule
 
 
 def _engine(rules: list[dict]) -> RuleEngine:
@@ -105,12 +106,27 @@ def test_wildcard_prefix_suffix() -> None:
 # ══════════════════════════════════════════════════════════════════════
 # Invalid rules
 # ══════════════════════════════════════════════════════════════════════
+#
+# Strictness moved (review P0-9). The engine used to raise at construction on
+# a malformed rule, which meant one typo disabled *every* rule in the config
+# and routed all studies to all destinations — the spool's fail-open applied
+# to the whole rule set, not the one bad rule. Now ``compile_rule`` is the
+# strict boundary (it is what the config lint and the rule preview use to
+# reject a bad rule where the operator can see it), and the engine skips and
+# records instead. See test_routing_rules_unified.py for the fail-open path.
+
 
 def test_invalid_rule_expression_rejected() -> None:
     with pytest.raises(RuleSyntaxError):
-        _engine([{"rule": "no-equals-here", "targets": ["pacs"]}])
+        compile_rule(ForwardingRule(rule="no-equals-here", targets=["pacs"]))
+
+
+def test_engine_records_an_invalid_rule_instead_of_failing() -> None:
+    engine = _engine([{"rule": "no-equals-here", "targets": ["pacs"]}])
+    assert len(engine.skipped) == 1
+    assert engine.skipped[0][0] == 0
 
 
 def test_empty_rule_rejected() -> None:
     with pytest.raises(RuleSyntaxError):
-        _engine([{"rule": "   ", "targets": ["pacs"]}])
+        compile_rule(ForwardingRule(rule="   ", targets=["pacs"]))

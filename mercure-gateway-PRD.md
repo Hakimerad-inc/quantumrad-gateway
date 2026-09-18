@@ -359,7 +359,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
     "queue_poll_interval_ms": 500       // how often workers poll for new tasks
   },
   "forwarding_rules": [                 // optional, v1.1 advanced
-    { "rule": "tags.Modality == 'CT'", "targets": ["hub"], "priority": "normal" }
+    { "rule": "modality:CT", "targets": ["hub"], "priority": "normal" }
   ],
   "reports": {
     "enabled": false,

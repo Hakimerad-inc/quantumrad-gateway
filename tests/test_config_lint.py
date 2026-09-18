@@ -44,12 +44,60 @@ def test_stale_forwarding_rule_target_is_flagged() -> None:
     cfg = _cfg(
         destinations=[DICOMDestination(name="pacs-a", host="h", port=104, aet_target="A")],
         forwarding_rules=[
-            ForwardingRule(rule="StudyDescription ~ 'CHEST'", targets=["pacs-a", "pacs-gone"])
+            ForwardingRule(rule="StudyDescription=*CHEST*", targets=["pacs-a", "pacs-gone"])
         ],
     )
     (warning,) = [w for w in lint_config(cfg) if w.path.startswith("forwarding_rules")]
     assert "pacs-gone" in warning.message
     assert warning.path == "forwarding_rules[0].targets"
+
+
+def test_malformed_forwarding_rule_is_flagged() -> None:
+    """An unparsable rule makes routing fail open — so it must be flagged.
+
+    The spool ignores a rule it cannot parse and routes the study to every
+    destination. That is the right call at runtime (a stranded clinical study
+    is worse than an over-delivered one), but it is invisible in operation:
+    a study routed everywhere looks like a config with no rules. Lint is what
+    turns it into something the operator sees at save time, in the panel
+    (review P0-9).
+    """
+    cfg = _cfg(
+        destinations=[DICOMDestination(name="pacs", host="h", port=104, aet_target="A")],
+        forwarding_rules=[ForwardingRule(rule="no-equals-here", targets=["pacs"])],
+    )
+    (warning,) = [w for w in lint_config(cfg) if w.path == "forwarding_rules[0].rule"]
+    assert "cannot be parsed" in warning.message
+    assert "no-equals-here" in warning.message
+    assert warning.severity == "warning"
+
+
+def test_malformed_rule_does_not_mask_its_stale_targets() -> None:
+    """An unparsable rule's targets are not trustworthy — skip that check.
+
+    ``compile_rule`` raising means the rule text was never understood, so
+    reporting its targets as stale would be advice about a rule that will not
+    run at all. The syntax finding is the one that matters.
+    """
+    cfg = _cfg(
+        destinations=[DICOMDestination(name="pacs", host="h", port=104, aet_target="A")],
+        forwarding_rules=[ForwardingRule(rule="no-equals-here", targets=["ghost"])],
+    )
+    findings = [w for w in lint_config(cfg) if w.path.startswith("forwarding_rules")]
+    assert len(findings) == 1
+    assert findings[0].path == "forwarding_rules[0].rule"
+
+
+def test_both_rule_grammars_lint_clean() -> None:
+    """The short form and the general form are both first-class now."""
+    cfg = _cfg(
+        destinations=[DICOMDestination(name="pacs", host="h", port=104, aet_target="A")],
+        forwarding_rules=[
+            ForwardingRule(rule="modality:CT", targets=["pacs"]),
+            ForwardingRule(rule="StudyDescription=*chest*", targets=["pacs"]),
+        ],
+    )
+    assert [w for w in lint_config(cfg) if w.path.startswith("forwarding_rules")] == []
 
 
 def test_all_disabled_destinations_warn() -> None:

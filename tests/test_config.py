@@ -424,7 +424,7 @@ def test_stale_forwarding_rule_target_warns_but_loads(caplog) -> None:
     cfg = GatewayConfig(
         destinations=[DICOMDestination(name="pacs-a", host="h", port=104, aet_target="A")],
         forwarding_rules=[
-            ForwardingRule(rule="StudyDescription ~ 'CHEST'", targets=["pacs-a", "pacs-gone"])
+            ForwardingRule(rule="StudyDescription=*CHEST*", targets=["pacs-a", "pacs-gone"])
         ],
     )
     assert cfg.forwarding_rules[0].targets == ["pacs-a", "pacs-gone"]  # loaded, not truncated
@@ -439,6 +439,6 @@ def test_known_forwarding_rule_targets_are_silent(caplog) -> None:
 
     GatewayConfig(
         destinations=[DICOMDestination(name="pacs-a", host="h", port=104, aet_target="A")],
-        forwarding_rules=[ForwardingRule(rule="true", targets=["pacs-a"])],
+        forwarding_rules=[ForwardingRule(rule="modality:CT", targets=["pacs-a"])],
     )
     assert not [r for r in caplog.records if "unknown destination" in r.getMessage()]

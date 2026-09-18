@@ -189,8 +189,17 @@ def test_forwarder_falls_back_to_all_classes_when_unrecognised(
 
     Rather than fail the task on a class we do not recognise, request every
     storage context and let the SCP accept the one it knows.
+
+    This used to request ``len(STORAGE_SOP_CLASSES) * 4`` contexts — 111
+    classes × 4 syntaxes = 444 — and pynetdicom raises ``ValueError`` at the
+    128th, so the *fallback path for degraded studies crashed the route
+    instead of rescuing it* (review P0-5). The context budget now truncates
+    to the safe ceiling with a deterministic priority.
     """
-    from mercure_gateway.forwarder.handlers.dicom import _STORAGE_CONTEXTS
+    from mercure_gateway.forwarder.handlers.dicom import (
+        _MAX_REQUESTED_CONTEXTS,
+        _STORAGE_CONTEXTS,
+    )
 
     # Valid DICOM, but a non-storage abstract syntax (Verification SOP Class).
     _write_instance(tmp_path / "v.dcm", "1.2.840.10008.1.1", "1.2.3.1.1")
@@ -198,4 +207,77 @@ def test_forwarder_falls_back_to_all_classes_when_unrecognised(
     handler._send_files([tmp_path / "v.dcm"])
 
     assert _RecordingAE.last is not None
-    assert len(_RecordingAE.last.requested) == len(_STORAGE_CONTEXTS) * 4
+    requested = _RecordingAE.last.requested
+    # Bounded: never above the ceiling that pynetdicom enforces.
+    assert len(requested) <= _MAX_REQUESTED_CONTEXTS, (
+        f"{len(requested)} requested contexts exceeds the protocol budget"
+    )
+    # Every class is still offered — truncation only drops the redundant
+    # per-compressed-syntax duplicates, not a class's ability to be sent.
+    assert {sop for sop, _ in requested} == {
+        str(c) for c in _STORAGE_CONTEXTS
+    }, "a storage class lost its only context to truncation"
+
+
+def test_deliver_returns_failure_not_exception_on_context_overflow(tmp_path: Path) -> None:
+    """A context-budget overflow degrades to a retry, not a crashed route.
+
+    Regression guard for P0-5: the degraded-study fallback used to request 444
+    contexts (111 classes × 4 syntaxes) and pynetdicom raised ``ValueError`` at
+    the 128th. ``deliver()`` caught only ``ConnectionError``, so the exception
+    escaped and the study permanently failed instead of retrying — for exactly
+    the degraded studies the fallback existed to rescue. The budget makes the
+    overflow unreachable; this test asserts the *caught* exception path too, so
+    a future regression degrades to a retry rather than a crash.
+    """
+    from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian
+
+    from mercure_gateway.config import DICOMDestination, default_config
+    from mercure_gateway.forwarder.handlers import dicom as dicom_handler
+    from mercure_gateway.spool import Spool
+    from mercure_gateway.spool.db import mem_database
+
+    study_uid = "1.2.3.4.5.6"
+    _write_instance(tmp_path / "s.dcm", str(CTImageStorage), "1.2.3.4.5.6.1")
+
+    cfg = default_config()
+    cfg.storage.spool_dir = str(tmp_path)
+    spool = Spool(mem_database(), cfg)
+    study_id = spool.receive(study_uid)
+
+    # The file must be where the spool expects it for this study.
+    target_path = tmp_path / study_uid / "1.2.3.4.5.6.1" / "s.dcm"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "s.dcm").replace(target_path)
+
+    handler = DICOMHandler(
+        DICOMDestination(name="pacs", host="pacs.local", port=104, aet_target="PACS"),
+        spool,
+    )
+    # Force the pre-fix overflow: 200 contexts is past the 128 ceiling.
+    handler._requested_contexts = (  # type: ignore[method-assign]
+        lambda files: [(CTImageStorage, ExplicitVRLittleEndian)] * 200
+    )
+
+    class _RaisingAE(_RecordingAE):
+        def add_requested_context(self, abstract_syntax: object, transfer_syntax: object) -> None:
+            if len(self.requested) >= 128:
+                raise ValueError(
+                    "Failed to add the requested presentation context as there "
+                    "are already the maximum allowed number of requested contexts"
+                )
+            super().add_requested_context(abstract_syntax, transfer_syntax)
+
+    dicom_handler.AE = _RaisingAE  # type: ignore[misc]
+    try:
+        from mercure_gateway.spool import ClaimedTask
+
+        task = ClaimedTask(
+            route_id=1, study_id=study_id, target_name="pacs", target_type="dicom"
+        )
+        result = handler.deliver(task, tmp_path)
+    finally:
+        dicom_handler.AE = _RecordingAE  # type: ignore[misc]
+
+    assert result.ok is False
+    assert "maximum allowed number of requested contexts" in (result.error or "")

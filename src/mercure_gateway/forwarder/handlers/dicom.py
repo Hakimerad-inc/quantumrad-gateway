@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pydicom
 from pydicom.uid import (
+    UID,
     AllTransferSyntaxes,
     JPEGBaseline8Bit,
     JPEGLossless,
@@ -48,6 +49,15 @@ _STORAGE_CONTEXTS = list(STORAGE_SOP_CLASSES)
 # JPEG-LS / Deflated; these three are the ones it omits or that need a
 # guaranteed dedicated slot.)
 _COMPRESSED_SYNTAXES = [RLELossless, JPEGBaseline8Bit, JPEGLossless]
+
+# pynetdicom raises ``ValueError`` once 128 requested presentation contexts
+# have been added (DICOM's hard protocol ceiling). The degraded-study
+# fallback offers every storage class — 111 of them — and the compressed
+# multiplication is 4 contexts per class, so without a bound the fallback
+# requests 444 contexts, blows the limit at the 129th, and the ValueError
+# escapes ``deliver()``... which is precisely the degraded study the fallback
+# exists to rescue (review P0-5). 120 leaves headroom under the 128 ceiling.
+_MAX_REQUESTED_CONTEXTS = 120
 
 # Large PDUs are the single biggest throughput lever for C-STORE transfers.
 _MAX_PDU_SIZE = 131072
@@ -89,10 +99,41 @@ class DICOMHandler:
 
         try:
             self._send_files(files)
-        except ConnectionError as exc:
+        except (ConnectionError, ValueError) as exc:
+            # ValueError: pynetdicom raises it at the 128-context protocol
+            # ceiling — unreachable now that _requested_contexts bounds the
+            # list, but caught so any future overflow degrades to a retry
+            # instead of permanently failing the route (review P0-5).
             return DeliveryResult(ok=False, error=str(exc))
 
         return DeliveryResult(ok=True)
+
+    def _requested_contexts(
+        self, files: list[Path]
+    ) -> list[tuple[UID, UID | list[UID]]]:
+        """Build the (abstract syntax, transfer syntaxes) pairs to negotiate.
+
+        Request only the SOP classes the study actually contains, and multiply
+        by the compressed syntaxes only for those. The degraded-study fallback
+        (unreadable files, or a class outside :data:`STORAGE_SOP_CLASSES`)
+        offers every class — 111 of them — and 111 × 4 syntaxes is 444, far
+        past the 128-context protocol ceiling. Truncating to the budget with a
+        deterministic priority keeps the fallback delivering instead of
+        crashing the route (review P0-5).
+        """
+        classes = list(sop_classes_for_files(files)) or list(_STORAGE_CONTEXTS)
+        # Deterministic order so two runs over the same study negotiate the
+        # same contexts: sort by UID. The base context (all syntaxes) for
+        # every class comes first, so truncation only ever drops the redundant
+        # per-compressed-syntax duplicates, never a class's ability to be
+        # delivered at all.
+        pairs: list[tuple[UID, UID | list[UID]]] = []
+        for ctx in sorted(classes, key=str):
+            pairs.append((ctx, AllTransferSyntaxes))
+        for syntax in _COMPRESSED_SYNTAXES:
+            for ctx in sorted(classes, key=str):
+                pairs.append((ctx, syntax))
+        return pairs[:_MAX_REQUESTED_CONTEXTS]
 
     def _send_files(self, files: list[Path]) -> None:
         """Open a single association and send all files."""
@@ -101,15 +142,10 @@ class DICOMHandler:
         # Request only the SOP classes this study actually contains. Negotiating
         # all 111 classes × 4 syntaxes would blow the 128-context protocol
         # limit, and it used to request CT+MR only — which made every other
-        # modality undeliverable (review C4).
-        contexts = list(sop_classes_for_files(files)) or list(_STORAGE_CONTEXTS)
-        for ctx in contexts:
-            ae.add_requested_context(ctx, AllTransferSyntaxes)
-        # Explicitly request dedicated contexts per compressed syntax so
-        # studies stored as-received forward unchanged (F7).
-        for syntax in _COMPRESSED_SYNTAXES:
-            for ctx in contexts:
-                ae.add_requested_context(ctx, syntax)
+        # modality undeliverable (review C4). The budget and ordering live in
+        # _requested_contexts so the degraded-study fallback cannot overflow.
+        for ctx, syntaxes in self._requested_contexts(files):
+            ae.add_requested_context(ctx, syntaxes)
 
         assoc = self._open_association(ae)
         if not assoc.is_established:

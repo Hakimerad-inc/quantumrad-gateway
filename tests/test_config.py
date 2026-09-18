@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import sys
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -131,10 +135,25 @@ def test_report_on_retrieval_enum() -> None:
         GatewayConfig.model_validate({"reports": {"on_retrieval": "burn"}})
 
 
-def test_unknown_top_level_key_ignored_by_default() -> None:
-    # Extra keys are ignored (model_config default). Config is a superset-friendly JSON.
-    cfg = GatewayConfig.model_validate({"general": {"appliance_name": "Unit"}, "bogus": 1})
-    assert cfg.general.appliance_name == "Unit"
+def test_unknown_top_level_key_is_rejected() -> None:
+    # The config schema is the product's contract, so unknown keys are an
+    # error, not silently-dropped input (review P0-4). A typo like this one is
+    # exactly how an appliance ends up running with a setting the operator
+    # believes they set. On-disk files are healed by load_config; direct
+    # construction stays strict because that is what the PUT boundary needs.
+    with pytest.raises(ValidationError) as excinfo:
+        GatewayConfig.model_validate({"general": {"appliance_name": "Unit"}, "bogus": 1})
+    assert "bogus" in str(excinfo.value)
+
+
+def test_unknown_nested_key_is_rejected() -> None:
+    # Pydantic v2 does not propagate model_config to nested classes — the
+    # strict base has to be re-parented onto every model, which is what makes
+    # this one fail. This is the shape of the Setup Wizard bug (P0-4's sibling).
+    with pytest.raises(ValidationError) as excinfo:
+        GatewayConfig.model_validate({"general": {"ae_title": "GATEWAY"}})
+    assert "general" in str(excinfo.value)
+    assert "ae_title" in str(excinfo.value)
 
 
 # ── MERCURE_GATEWAY_* 12-factor env overrides ────────────────────────────
@@ -485,3 +504,94 @@ def test_destination_timeout_sec_rejects_a_budget_below_one_second(payload) -> N
         TypeAdapter(Destination).validate_python(
             {"name": "p", "host": "h", "port": 104, "timeout_sec": 0.1, **payload}
         )
+
+
+# ── Boot-safety: unknown keys on an on-disk file (review P0-4) ──────────
+
+
+def test_load_config_heals_unknown_keys_and_names_them(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A config file with unknown keys still boots; each dropped key is logged.
+
+    The strict schema would otherwise brick every appliance on upgrade — an
+    older build's file carrying a field the new schema dropped, or a hand edit
+    with a typo, is a healable condition, not an unbootable appliance.
+    """
+    path = tmp_path / "mercure-gateway.json"
+    cfg = default_config()
+    cfg.general.appliance_name = "Clinic-A"
+    save_config(cfg, path)
+
+    payload = json.loads(path.read_text())
+    payload["general"]["ae_title"] = "GATEWAY"  # belongs on receiver, not general
+    payload["receiver"]["bogus_option"] = True
+    payload["toplevel_bogus"] = [1, 2]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        loaded = load_config(path)
+
+    assert loaded.general.appliance_name == "Clinic-A"
+    # The real fields are untouched.
+    assert loaded.receiver.ae_title == "GATEWAY"
+    assert "bogus_option" not in loaded.receiver.model_dump()
+
+    log = "\n".join(r.getMessage() for r in caplog.records)
+    for dropped in ("general.ae_title", "receiver.bogus_option", "toplevel_bogus"):
+        assert dropped in log
+
+
+def test_load_config_preserves_the_original_as_a_backup(tmp_path) -> None:
+    """The operator's file is never destroyed by the heal."""
+    path = tmp_path / "mercure-gateway.json"
+    save_config(default_config(), path)
+    original = path.read_text()
+
+    payload = json.loads(original)
+    payload["general"]["oops"] = 1
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    load_config(path)
+
+    backup = path.with_name(path.name + ".unknown-keys.bak")
+    assert backup.exists()
+    assert json.loads(backup.read_text())["general"]["oops"] == 1
+    # And the live file no longer carries the unknown key.
+    assert "oops" not in path.read_text()
+
+
+def test_load_config_still_raises_on_real_validation_errors(tmp_path) -> None:
+    """Healing is scoped to unknown keys — a genuinely broken file still fails.
+
+    Failing to boot loudly is correct here: an operator would rather see a
+    startup error than an appliance silently running the wrong config.
+    """
+    path = tmp_path / "mercure-gateway.json"
+    path.write_text(
+        json.dumps({"general": {"appliance_name": "x"}, "receiver": {"port": "not-a-port"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_config(path)
+
+
+def test_load_config_swallows_an_unwritable_backup(tmp_path) -> None:
+    """Read-only media must not fail the boot over a backup we cannot write.
+
+    A sealed USB appliance or a read-mounted partition is the deployment this
+    product exists for; the heal still applies in memory.
+    """
+    path = tmp_path / "mercure-gateway.json"
+    save_config(default_config(), path)
+    payload = json.loads(path.read_text())
+    payload["stray"] = 1
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def deny_write(*args: object, **kwargs: object) -> int:
+        raise OSError("read-only file system")
+
+    with patch.object(Path, "write_text", deny_write):
+        loaded = load_config(path)  # must not raise
+
+    assert loaded.general.appliance_name == default_config().general.appliance_name

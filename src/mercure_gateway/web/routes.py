@@ -884,11 +884,17 @@ async def import_config(request: Request) -> dict[str, Any]:
     # Restore redacted secrets from current config (same logic as PUT /config)
     restored = _restore_redacted_secrets(payload, _config(request))
 
-    # Validate full config
+    # Validate full config. Unlike PUT /config this is a foreign file — it may
+    # come from another appliance build or an editor — so it gets the same
+    # healing the boot loader applies: unknown keys are dropped and named in
+    # the 400-free path, everything else still rejects (review P0-4).
+    from mercure_gateway.config import normalize_and_validate
+
     try:
-        updated = GatewayConfig.model_validate(restored)
+        updated = normalize_and_validate(restored, source="import")
     except Exception as exc:  # noqa: BLE001 — surface validation as 400
         raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
+    healed = getattr(updated, "_healed_unknown_keys", None) or []
 
     # Persist to disk if config_path is configured
     config_path: object = getattr(request.app.state, "config_path", None)
@@ -901,7 +907,17 @@ async def import_config(request: Request) -> dict[str, Any]:
     request.app.state.config = updated
     # See update_config: components hold their own config refs, so a restart is
     # required for the new config to take effect (review H5).
-    return {"status": "ok", "message": "Config import saved", "restart_required": True}
+    return {
+        "status": "ok",
+        "message": "Config import saved",
+        "restart_required": True,
+        # Healed keys are reported rather than silently swallowed: the imported
+        # file differs from the appliance's schema and the operator should know
+        # which settings did not survive the round trip.
+        "ignored_keys": [
+            ".".join(str(part) for part in loc) for loc in healed
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

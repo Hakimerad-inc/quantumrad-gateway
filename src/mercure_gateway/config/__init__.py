@@ -24,7 +24,15 @@ import sys
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_origin
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +72,31 @@ __all__ = [
 ]
 
 
-class GeneralConfig(BaseModel):
+class _StrictConfigModel(BaseModel):
+    """Base for every config model: unknown keys are rejected.
+
+    The config schema is the product's contract, but nothing enforced it
+    (review P0-4) — a typo like ``general.ae_title`` (which the Setup Wizard
+    was writing until P0-4's sibling fix) was silently dropped on load, so the
+    appliance ran with a field the operator believed they had set. Pydantic's
+    default ``extra="ignore"`` is right for parsing foreign data, wrong for the
+    one document this process is authoritative for.
+
+    Pydantic v2 does **not** propagate ``model_config`` to nested classes, so
+    this has to be re-parented onto each model explicitly — setting it on
+    ``GatewayConfig`` alone changes nothing for ``GeneralConfig``.
+
+    ``_healed_unknown_keys`` records what :func:`load_config` pruned from a
+    file, so the boot path can preserve the original and the import endpoint
+    can tell the operator which of their settings did not survive. It is a
+    private attribute, so it never serialises into a round-tripped body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    _healed_unknown_keys: list[list[Any]] = PrivateAttr(default_factory=list)
+
+
+class GeneralConfig(_StrictConfigModel):
     """Top-level gateway identity and runtime settings."""
 
     appliance_name: str = "Gateway-CLI-01"
@@ -72,7 +104,7 @@ class GeneralConfig(BaseModel):
     log_level: str = Field(default="INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$")
 
 
-class ReceiverConfig(BaseModel):
+class ReceiverConfig(_StrictConfigModel):
     """Local DICOM C-STORE SCP settings.
 
     ``port=0`` is allowed in code/tests: it asks the OS for an ephemeral port
@@ -113,7 +145,7 @@ class ReceiverConfig(BaseModel):
     )
 
 
-class BaseDestination(BaseModel):
+class BaseDestination(_StrictConfigModel):
     """Common fields shared by every destination target."""
 
     name: str = Field(min_length=1)
@@ -234,7 +266,7 @@ Destination = Annotated[
 ]
 
 
-class ForwardingRule(BaseModel):
+class ForwardingRule(_StrictConfigModel):
     """Optional advanced routing rule (v1.1). Evaluated against extracted DICOM tags."""
 
     rule: str = Field(min_length=1)
@@ -242,7 +274,7 @@ class ForwardingRule(BaseModel):
     priority: Literal["normal", "high", "low"] = "normal"
 
 
-class ReportQuerySource(BaseModel):
+class ReportQuerySource(_StrictConfigModel):
     """PACS endpoint used for report retrieval (C-FIND/C-MOVE)."""
 
     type: Literal["dicom", "dicomweb", "fhir", "hl7"] = "dicom"
@@ -264,7 +296,7 @@ class ReportQuerySource(BaseModel):
 _DEFAULT_REPORT_TYPES: list[Literal["sr", "pdf"]] = ["sr", "pdf"]
 
 
-class ReportConfig(BaseModel):
+class ReportConfig(_StrictConfigModel):
     """Report-retrieval configuration."""
 
     enabled: bool = False
@@ -301,7 +333,7 @@ class ReportConfig(BaseModel):
     )
 
 
-class HubReporting(BaseModel):
+class HubReporting(_StrictConfigModel):
     """Optional streaming of audit events to a mercure hub bookkeeper (v1.1)."""
 
     enabled: bool = False
@@ -313,7 +345,7 @@ class HubReporting(BaseModel):
     anchor_public_key: str = ""
 
 
-class AuditConfig(BaseModel):
+class AuditConfig(_StrictConfigModel):
     """Local tamper-evident audit log configuration."""
 
     local: bool = True
@@ -338,7 +370,7 @@ class AuditConfig(BaseModel):
     hub_reporting: HubReporting = Field(default_factory=HubReporting)
 
 
-class UpdateConfig(BaseModel):
+class UpdateConfig(_StrictConfigModel):
     """Auto-update settings (PRD §2.3 Q5, ADR-0006).
 
     The updater is fail-closed: without ``public_key`` configured, every
@@ -376,7 +408,7 @@ def _default_spool_dir() -> str:
     return str(Path.home() / ".local" / "share" / "mercure-gateway" / "spool")
 
 
-class StorageConfig(BaseModel):
+class StorageConfig(_StrictConfigModel):
     """Spool directory and retention settings."""
 
     spool_dir: str = Field(
@@ -394,7 +426,9 @@ class StorageConfig(BaseModel):
     )
     retention_delivered_days: int = Field(default=3, ge=0)
     disk_full_warning_pct: int = Field(
-        default=90, ge=50, le=100,
+        default=90,
+        ge=50,
+        le=100,
         description="Capacity percentage at which a disk-full warning is emitted.",
     )
     purge_on_disk_full: bool = Field(
@@ -406,20 +440,24 @@ class StorageConfig(BaseModel):
     )
 
 
-class ForwardingConfig(BaseModel):
+class ForwardingConfig(_StrictConfigModel):
     """Concurrent forwarding worker settings (product refinement spec §2.2)."""
 
     concurrency: int = Field(
-        default=3, ge=1, le=16,
+        default=3,
+        ge=1,
+        le=16,
         description="Maximum number of concurrent forwarding workers.",
     )
     queue_poll_interval_ms: int = Field(
-        default=500, ge=100, le=5000,
+        default=500,
+        ge=100,
+        le=5000,
         description="How often workers poll for new tasks (milliseconds).",
     )
 
 
-class WebUIConfig(BaseModel):
+class WebUIConfig(_StrictConfigModel):
     """Web admin panel settings (product refinement spec §7)."""
 
     host: str = Field(
@@ -455,20 +493,18 @@ class WebUIConfig(BaseModel):
     def _tls_needs_both_files(self) -> WebUIConfig:
         """Half a TLS pair is a config error — never a silent HTTP downgrade."""
         if bool(self.tls_cert_file) != bool(self.tls_key_file):
-            raise ValueError(
-                "web_ui.tls_cert_file and web_ui.tls_key_file must be set together"
-            )
+            raise ValueError("web_ui.tls_cert_file and web_ui.tls_key_file must be set together")
         return self
 
 
-class CredentialEntry(BaseModel):
+class CredentialEntry(_StrictConfigModel):
     """Encrypted credential block for a single destination."""
 
-    type: str = Field(min_length=1, description="Destination type (e.g. \"sftp\", \"s3\").")
+    type: str = Field(min_length=1, description='Destination type (e.g. "sftp", "s3").')
     username: str | None = None
     password_encrypted: str | None = Field(
         default=None,
-        description="AES-256-GCM encrypted password (\"AES256GCM:...\").",
+        description='AES-256-GCM encrypted password ("AES256GCM:...").',
     )
     private_key_encrypted: str | None = Field(
         default=None,
@@ -484,7 +520,7 @@ class CredentialEntry(BaseModel):
     )
 
 
-class CredentialsConfig(BaseModel):
+class CredentialsConfig(_StrictConfigModel):
     """Encrypted credential storage (product refinement spec §2.5).
 
     Credentials are stored as AES-256-GCM encrypted blocks, decrypted with a
@@ -510,7 +546,7 @@ class CredentialsConfig(BaseModel):
     )
 
 
-class USBModeConfig(BaseModel):
+class USBModeConfig(_StrictConfigModel):
     """USB dongle variant settings (usb-dongle-gateway-spec §6)."""
 
     enabled: bool = Field(
@@ -521,11 +557,13 @@ class USBModeConfig(BaseModel):
         ),
     )
     storage_budget_gb: int = Field(
-        default=18, ge=1,
+        default=18,
+        ge=1,
         description="Maximum data partition usage in GB (shared data partition).",
     )
     retention_delivered_hours: int = Field(
-        default=24, ge=1,
+        default=24,
+        ge=1,
         description="Aggressive retention for USB: delivered studies purged after N hours.",
     )
     hot_unplug_safe: bool = Field(
@@ -533,10 +571,10 @@ class USBModeConfig(BaseModel):
         description="Enable graceful shutdown on USB removal detection.",
     )
     flush_timeout_sec: float = Field(
-        default=10.0, gt=0,
+        default=10.0,
+        gt=0,
         description=(
-            "Max seconds the hot-unplug flush may run before removal is "
-            "forced (K10: flush ≤10 s)."
+            "Max seconds the hot-unplug flush may run before removal is forced (K10: flush ≤10 s)."
         ),
     )
     auto_start_on_boot: bool = Field(
@@ -553,7 +591,7 @@ class USBModeConfig(BaseModel):
     )
 
 
-class GatewayConfig(BaseModel):
+class GatewayConfig(_StrictConfigModel):
     """Root model for ``mercure-gateway.json``."""
 
     config_version: str = Field(
@@ -590,8 +628,7 @@ class GatewayConfig(BaseModel):
             stale = [t for t in rule.targets if t not in known]
             if stale:
                 logger.warning(
-                    "forwarding rule %r targets unknown destination(s) %s — "
-                    "known destinations: %s",
+                    "forwarding rule %r targets unknown destination(s) %s — known destinations: %s",
                     rule.rule,
                     ", ".join(sorted(stale)),
                     ", ".join(sorted(known)) or "(none configured)",
@@ -613,17 +650,131 @@ def _resolve_master_password(master_password: str | None) -> str | None:
     return load_master_password()
 
 
-def load_config(
-    path: str | Path, *, master_password: str | None = None
-) -> GatewayConfig:
+def _prune_extra_keys(payload: Any, errors: list[Any]) -> Any:
+    """Return a deep copy of *payload* without the ``extra_forbidden`` locations.
+
+    Each error's ``loc`` is a path (``("general", "ae_title")``) into the parsed
+    document. ``copy.deepcopy`` is taken first because the payload may be an
+    arbitrary object graph Pydantic built from the input; mutating it in place
+    would corrupt the caller's copy.
+    """
+    import copy
+
+    pruned = copy.deepcopy(payload)
+    for err in errors:
+        loc = list(err.get("loc", ()))
+        if not loc:
+            continue
+        parent, leaf = loc[:-1], loc[-1]
+        node: Any = pruned
+        for part in parent:
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if isinstance(node, dict) and leaf in node:
+            del node[leaf]
+    return pruned
+
+
+def _prune_for_disk(payload: Any, locs: list[list[Any]]) -> Any:
+    """Re-prune *payload* by the recorded ``loc`` paths, for the one-shot rewrite.
+
+    :func:`_prune_extra_keys` operates on the error objects Pydantic returns;
+    this variant takes the already-recorded locs straight from the healed
+    config, so the file rewrite prunes exactly what validation dropped.
+    """
+    import copy
+
+    pruned = copy.deepcopy(payload)
+    for loc in locs:
+        parent, leaf = loc[:-1], loc[-1]
+        node: Any = pruned
+        for part in parent:
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if isinstance(node, dict) and leaf in node:
+            del node[leaf]
+    return pruned
+
+
+def normalize_and_validate(payload: Any, *, source: str | Path) -> GatewayConfig:
+    """Validate *payload*, healing unknown keys when it came from disk.
+
+    Two boundaries, one model (review P0-4):
+
+    * The **write** boundary (``PUT /api/config``) stays strict: the SPA
+      round-trips ``GET /config``, whose body is ``model_dump_json()`` and is
+      therefore key-clean, so an extra key reaching that endpoint is a client
+      bug a 400 should name rather than a file to paper over.
+    * The **boot** boundary (``load_config``) cannot be strict without bricking
+      every appliance on upgrade — an older build's config carrying a field the
+      new schema dropped, or a file edited by hand with a typo, would make the
+      whole appliance unbootable. So a file whose *only* problem is unknown
+      keys is healed: the offending paths are pruned, logged by name, the
+      original is preserved beside it, and validation is retried.
+
+    *source* is the path the payload was read from, used for the backup and the
+    log. Pass ``source="request"`` (or any non-path sentinel) to keep the
+    strict behaviour for an in-memory payload.
+    """
+    try:
+        return GatewayConfig.model_validate(payload)
+    except ValidationError as exc:
+        errors = list(exc.errors())
+        if not all(e["type"] == "extra_forbidden" for e in errors):
+            raise
+        logger.warning(
+            "config %s: ignoring %d unknown key(s) — the schema is strict, but "
+            "a config file is healed rather than refusing to boot: %s",
+            source,
+            len(errors),
+            ", ".join(".".join(str(p) for p in e["loc"]) for e in errors),
+        )
+        healed = normalize_and_validate(_prune_extra_keys(payload, errors), source=source)
+        healed._healed_unknown_keys = [  # noqa: SLF001 — surfaced to the caller
+            list(e["loc"]) for e in errors
+        ]
+        return healed
+
+
+def load_config(path: str | Path, *, master_password: str | None = None) -> GatewayConfig:
     """Load and strictly validate ``mercure-gateway.json`` from ``path``.
+
+    Unknown keys are healed rather than fatal (see
+    :func:`normalize_and_validate`): the offending paths are pruned from the
+    file, the operator's original is preserved beside it as
+    ``<path>.unknown-keys.bak``, and every dropped key is named in the log.
+    Healing is the *only* case where a boot rewrites the config file — it
+    rewrites the raw JSON it just read, so no secret round-trips through a
+    model and encryption placeholders stay exactly as written. Every other
+    validation error still raises: an unreadable config is better surfaced as a
+    boot failure than silently ignored.
 
     When the config is encrypted at rest, secrets are decrypted back into the
     in-memory model using the master password (from *master_password* or the
     ``MERCURE_MASTER_PASSWORD`` / ``MERCURE_MASTER_PASSWORD_FILE`` env vars).
     """
-    with Path(path).open("r", encoding="utf-8") as fh:
-        config = GatewayConfig.model_validate_json(fh.read())
+    path = Path(path)
+    raw = path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    config = normalize_and_validate(payload, source=path)
+
+    unknown = getattr(config, "_healed_unknown_keys", None)
+    if unknown:
+        # Rewrite the pruned JSON and preserve the operator's original beside
+        # it. Both writes are best-effort: read-only media (a sealed USB
+        # appliance, a read-mounted partition) must not fail the boot over a
+        # file we cannot write — the heal still applies in memory.
+        import contextlib
+
+        pruned = json.dumps(_prune_for_disk(payload, unknown), indent=2) + "\n"
+        with contextlib.suppress(OSError):
+            path.with_name(path.name + ".unknown-keys.bak").write_text(raw, encoding="utf-8")
+            path.write_text(pruned, encoding="utf-8")
+
     mp = _resolve_master_password(master_password)
     if mp is not None or config.credentials.encrypted:
         from .encryption import decrypt_config_from_storage

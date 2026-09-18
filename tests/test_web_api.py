@@ -978,3 +978,51 @@ def test_put_config_returns_warnings_for_the_saved_state(client: TestClient) -> 
     assert r.status_code == 200
     warnings = r.json()["warnings"]
     assert any(w["path"] == "destinations" and "disabled" in w["message"] for w in warnings)
+
+
+# ── Strict schema at the write boundary (review P0-4) ───────────────────
+
+
+def test_put_config_rejects_an_unknown_key(client: TestClient) -> None:
+    """PUT stays strict: the SPA round-trips GET /config, whose body is
+    model_dump_json() and therefore key-clean, so an unknown key reaching this
+    endpoint is a client bug a 400 should name (review P0-4).
+    """
+    current = client.get("/api/config").json()
+    current["general"]["ae_title"] = "GATEWAY"  # belongs on receiver
+    r = client.put("/api/config", json=current)
+
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "ae_title" in detail
+    # Nothing was persisted.
+    assert (
+        client.get("/api/config").json()["general"]["appliance_name"]
+        == (current["general"]["appliance_name"])
+    )
+
+
+def test_import_config_heals_and_reports_unknown_keys(client: TestClient, tmp_path) -> None:
+    """A foreign file is healed, not rejected — and the panel is told which
+    settings did not survive, so nothing is silently swallowed (review P0-4)."""
+    config_path = tmp_path / "gw.json"
+    from mercure_gateway.config import save_config
+
+    save_config(default_config(), config_path)
+    client.app.state.config_path = str(config_path)
+
+    import json
+
+    payload = json.loads(default_config().model_dump_json())
+    payload["general"]["ae_title"] = "GATEWAY"
+    payload["toplevel_stray"] = 1
+    files = {"file": ("mercure-gateway.json", json.dumps(payload), "application/json")}
+    r = client.post("/api/config/import", files=files)
+
+    assert r.status_code == 200
+    assert sorted(r.json()["ignored_keys"]) == [
+        "general.ae_title",
+        "toplevel_stray",
+    ]
+    # The healed state is what took effect.
+    assert "ae_title" not in client.get("/api/config").json()["general"]

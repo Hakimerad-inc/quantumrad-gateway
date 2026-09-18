@@ -94,3 +94,11 @@ playwright-report/
 
 # Config backups written by apply-mercure-config.py before live edits.
 *.bak-*
+
+# Comprehensive-review benchmark scratch (44 MB of perf runs). The review
+# reports themselves ARE tracked — every fix commit cites a finding ID
+# (P0-5, P1-6...) that resolves to .full-review/05-final-report.md.
+.full-review/.perfbench/
+
+# Session worktrees (per-user scratch holding in-flight branches).
+.claude/worktrees/

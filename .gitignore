@@ -65,6 +65,9 @@ benchmark-results.md
 graphify-out/
 .workbuddy-ai/
 .coverage
+# Parallel-mode per-process files (P1-6): .coverage.<host>.<pid>.<rand>
+# written by subprocess coverage collection, combined at test-session finish.
+.coverage.*
 htmlcov/
 
 # Written by the CI dependency-audit step (uv pip compile). A local re-run of

@@ -6,9 +6,35 @@ protocol contracts without real DICOM/network I/O.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from mercure_gateway.config import DICOMDestination, GatewayConfig, default_config
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Enable coverage collection in spawned subprocesses (P1-6).
+
+    ``tests/test_main.py`` exercises the composition root by launching
+    ``python -m mercure_gateway.main`` for real. The venv's ``a1_coverage.pth``
+    (pytest-cov) already calls ``coverage.process_startup()`` in *every*
+    interpreter at startup — but that call is a no-op unless
+    ``COVERAGE_PROCESS_START`` names a config file. Setting it here is what
+    makes the child's lines land in the report.
+
+    This runs at configure time, not as a fixture, because it must be live in
+    the environment *before* any child spawns. It is gated on ``--cov`` so a
+    plain ``pytest`` run is unaffected, and the path is resolved absolutely
+    from ``config.rootpath`` so a child whose cwd differs still finds it.
+    """
+    # pytest-cov registers --cov with dest='cov_source' (bare --cov stores
+    # True, --cov=pkg stores the package name, absent stores []).
+    if config.getoption("cov_source"):
+        os.environ["COVERAGE_PROCESS_START"] = str(
+            (Path(config.rootpath) / "pyproject.toml").resolve(),
+        )
 
 
 class FakeReceiver:

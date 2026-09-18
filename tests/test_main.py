@@ -5,10 +5,19 @@ Behaviors:
    a C-STORE from a fake modality (receiver → spool).
 2. The study is persisted in the spool DB (state RECEIVED).
 3. ``main()`` exits 0 on SIGINT with graceful shutdown.
+
+Coverage note (P1-6): these cases are the only ones that exercise main()'s
+``__main__`` block and shutdown path, and they do it as real subprocesses —
+which is why the composition root was invisible to the ≥80% gate for so long.
+conftest.py:pytest_configure sets ``COVERAGE_PROCESS_START`` so the child's
+lines are collected. A test added here that passes ``env=`` or ``cwd=`` to
+Popen will silently break that collection: an inherited-cwd child finds the
+config file, an overridden one does not.
 """
 
 from __future__ import annotations
 
+import os
 import signal
 import socket
 import sqlite3
@@ -50,7 +59,19 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def wait_for_port(host: str, port: int, timeout: float = 10.0) -> None:
+def wait_for_port(host: str, port: int, timeout: float | None = None) -> None:
+    """Wait until a TCP port accepts connections.
+
+    *timeout* defaults to 10 s, but when subprocess coverage is active
+    (``COVERAGE_PROCESS_START`` set — see conftest.py) the child starts under
+    ``sys.settrace``. pydicom's module-level import is pathologically
+    trace-sensitive: 0.8 s with no tracer installed, ~18 s with *any* trace
+    function (measured, not guessed — it is the first thing the child imports
+    after stdlib). Without the extra budget these tests time out and the
+    composition-root coverage P1-6 exists to collect never lands.
+    """
+    if timeout is None:
+        timeout = 60.0 if os.environ.get("COVERAGE_PROCESS_START") else 10.0
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:

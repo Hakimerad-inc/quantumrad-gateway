@@ -54,12 +54,15 @@ build-backend = "uv_build"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = [".claude", "build", "dist", ".venv", "e2e"]
+exclude = [".claude", ".full-review", "build", "dist", ".venv", "e2e"]
 # `exclude` is only honoured for files ruff discovers itself. A hook hands it
 # explicit paths, which would otherwise drag the vendored .claude/skills and
 # e2e scripts into scope and fail a commit on files the project never linted
 # (184 errors' worth, none of them in project code). force-exclude makes the
-# list authoritative regardless of how the files were named.
+# list authoritative regardless of how the files were named. `.full-review`
+# holds the review's preserved benchmark scripts — cited from its reports as
+# reproducibility evidence, but scratch code with hardcoded paths that the
+# project never linted and never ships.
 force-exclude = true
 
 [tool.ruff.lint]
@@ -90,6 +93,17 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["mercure_gateway"]
+# P1-6: tests/test_main.py and a handful of others exercise main() by
+# spawning `python -m mercure_gateway.main` as a real subprocess. Without
+# parallel mode the child's coverage file clobbers the parent's (or is
+# silently lost), so the ≥80% gate below counts a composition root it has
+# never seen — the composition root is exactly where bind-security
+# enforcement, hub reporting, and the disk monitor live. Children write
+# .coverage.<host>.<pid>.<rand> and pytest-cov combines them at finish.
+# Deliberately NOT concurrency = ["multiprocessing"]: these are plain
+# subprocess.Popen children, and that option would enable process-safe
+# tracing we do not need and that slows the suite.
+parallel = true
 
 [tool.coverage.report]
 # Windows-only (pywin32) and thin launcher modules can't be exercised on

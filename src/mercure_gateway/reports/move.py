@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydicom.dataset import FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian
 from pynetdicom import AE, evt
 
@@ -169,6 +170,18 @@ class ReportRetrieve:
 
     def _save(self, ds: Any, study_uid: str, sop_class: str, sop_uid: str) -> Path:
         """Persist *ds* under ``reports/{study_uid}/{sr|pdf}/{sop_uid}.dcm``."""
+        # A dataset arriving over the wire has NO file_meta — group 0002 is
+        # file-format only and is never transmitted in DIMSE. The units tests
+        # that covered this method handed it an in-memory dataset that had
+        # one, which is why the gap was invisible: on a real retrieve
+        # save_as(enforce_file_format=True) raised "Required File Meta
+        # Information elements are either missing" before anything hit disk.
+        # Rebuild it from the dataset itself, as the receiver does.
+        if not getattr(ds, "file_meta", None):
+            ds.file_meta = FileMetaDataset()
+        ds.file_meta.MediaStorageSOPClassUID = sop_class
+        ds.file_meta.MediaStorageSOPInstanceUID = sop_uid
+        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
         sub = "sr" if sop_class == SR_SOP_CLASS else "pdf"
         out_dir = self.reports_dir / study_uid / sub
         out_dir.mkdir(parents=True, exist_ok=True)

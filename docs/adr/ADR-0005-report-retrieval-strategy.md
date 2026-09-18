@@ -50,3 +50,30 @@ Rationale:
   protocols; no changes to the status machine, poller, or config are expected.
 - The `reports.report_types` config option defaults to `["sr", "pdf"]` and controls which
   types are retrieved; a future DICOMweb transport would respect the same option.
+
+## Corrigendum (2026-09-18, review P0-6/P0-7)
+
+This ADR's "Consequences" read as though the C-FIND/C-MOVE path was wired and
+working. Until the review it was not. `main()` constructed `ReportRetriever`
+directly, so `finder`/`mover` were never injected and every retrieval hit
+`RuntimeError("report transports (finder/mover) not configured")`, was
+swallowed to a warning, and marked the report FAILED. The units tested the
+transports against fakes; nothing drove the composition root, so the gap was
+invisible to the suite and this ADR's claims were unfalsifiable.
+
+Two things changed. `main._build_report_retriever()` now builds the DICOM
+transport through the `reports.transport` registry (the seam S08-T3 added for
+exactly this) with the gateway's own AE title, store-SCP port and reports
+directory; and `tests/test_main_report_retrieval.py` drives that wiring
+against in-process pynetdicom C-FIND/C-MOVE SCPs so the full roundtrip — a
+requested report reaching `RETRIEVED` with the instance on disk — is asserted
+rather than assumed. Writing that test also surfaced a second latent bug the
+fakes had hidden: a dataset arriving over DIMSE carries no file meta
+(group 0002 is never transmitted), so `move._save`'s
+`save_as(enforce_file_format=True)` raised on any *real* retrieved instance.
+The receiver had the correct pattern; the mover now synthesizes file meta the
+same way.
+
+The lesson recorded for the transport seam: any new transport
+(`query_source.type` other than `dicom`) must be wired at the composition root
+or it is dead code — the registry dispatches by type but does not construct.

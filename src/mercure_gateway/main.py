@@ -23,12 +23,13 @@ import sys
 import threading
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mercure_gateway import __version__
 from mercure_gateway.audit import AuditLog
 from mercure_gateway.config import (
     GatewayConfig,
+    ReportQuerySource,
     apply_env_overrides,
     apply_usb_defaults,
     default_config,
@@ -48,6 +49,11 @@ from mercure_gateway.hub_events import HubEventStreamer
 from mercure_gateway.receiver import Receiver
 from mercure_gateway.recovery import recover
 from mercure_gateway.spool import Spool
+
+if TYPE_CHECKING:
+    # Import cycle: the report poller imports config, which main also drives.
+    # Only the return annotation needs the name at check time.
+    from mercure_gateway.reports import ReportRetriever
 from mercure_gateway.spool.db import Database, open_database
 from mercure_gateway.textlog import TextLog
 
@@ -216,6 +222,117 @@ def _build_forwarder(config: GatewayConfig, spool: Spool, audit: AuditLog) -> Fo
                 destination.name,
             )
     return forwarder
+
+
+def _build_report_retriever(
+    config: GatewayConfig,
+    database: Database,
+    spool: Spool,
+    audit: AuditLog,
+) -> ReportRetriever:
+    """Construct the report poller with its real find/move transports.
+
+    P0-6 (US-06): the transports are injected as ``finder``/``mover`` callables,
+    and this is the only place that supplies the real ones. Constructing the
+    retriever without them left every poll hitting ``RuntimeError("report
+    transports (finder/mover) not configured")`` — swallowed to a warning and
+    the report marked FAILED, so a feature documented as shipped never retrieved
+    anything. The registry keeps the transport per ``query_source.type`` so
+    dicomweb/fhir are wired by the same path.
+
+    Retrieved reports land under ``<spool_dir>/reports`` deliberately: the
+    appliance may be a USB dongle, and reports must travel with the spool
+    rather than a path relative to the process cwd.
+    """
+    from mercure_gateway.reports import ReportRetriever
+    from mercure_gateway.reports.transport import (
+        register_factory,
+        transport_for_query_source,
+    )
+
+    retriever = ReportRetriever(config.reports, database, spool, audit=audit)
+
+    source = config.reports.query_source
+    if source is None:
+        # enabled with no query_source is a config mistake — surface it rather
+        # than letting the poller fail every report with the generic message.
+        if config.reports.enabled:
+            logger.error(
+                "reports are enabled but reports.query_source is unset; "
+                "no reports will be retrieved"
+            )
+        return retriever
+
+    if source.type == "dicom":
+        # The registry's generic ``cls(source)`` fallback cannot build this
+        # transport: it takes a finder *and* a retriever, and the retriever has
+        # to point at this gateway's own C-STORE SCP (C-MOVE is a pull — the
+        # PACS calls back to store_scp_ae_title on store_scp_port) and at the
+        # spool's reports dir. register_factory is the seam the registry
+        # documents for exactly this, so the composition root closes over the
+        # gateway context and the type dispatch still goes through the
+        # registry — the same path dicomweb/fhir will use.
+        from mercure_gateway.reports.find import ReportFinder
+        from mercure_gateway.reports.move import ReportRetrieve
+        from mercure_gateway.reports.transport import DICOMReportTransport
+
+        ae_title = config.receiver.ae_title
+        reports_dir = Path(config.storage.spool_dir) / "reports"
+        store_scp_port = config.reports.store_scp_port
+
+        def _dicom_factory(src: ReportQuerySource) -> Any:
+            return DICOMReportTransport(
+                ReportFinder(
+                    host=src.host,
+                    port=src.port,
+                    aet=src.aet,
+                    ae_title=ae_title,
+                ),
+                ReportRetrieve(
+                    host=src.host,
+                    port=src.port,
+                    aet=src.aet,
+                    store_scp_port=store_scp_port,
+                    store_scp_ae_title=ae_title,
+                    reports_dir=reports_dir,
+                    ae_title=ae_title,
+                ),
+            )
+
+        register_factory("dicom", _dicom_factory)
+
+    try:
+        transport = transport_for_query_source(source)
+    except KeyError as exc:
+        logger.error(
+            "no report transport registered for query_source.type=%r (%s); "
+            "report retrieval is disabled",
+            source.type,
+            exc,
+        )
+        return retriever
+    except TypeError as exc:
+        # A registered transport whose constructor needs more than the query
+        # source (dicomweb needs base_url, which ReportQuerySource does not
+        # carry) and has no factory wired here yet. Report retrieval stays off
+        # rather than crashing the boot — the poller logs the gap per report.
+        logger.error(
+            "report transport for query_source.type=%r could not be built "
+            "from the query source (%s); report retrieval is disabled",
+            source.type,
+            exc,
+        )
+        return retriever
+
+    retriever.finder = transport.find
+    retriever.mover = transport.retrieve
+    logger.info(
+        "report retrieval wired: query_source.type=%r (%s:%s)",
+        source.type,
+        source.host,
+        source.port,
+    )
+    return retriever
 
 
 def _audit_anchor_path(config: GatewayConfig) -> Path:
@@ -520,9 +637,10 @@ def main(argv: list[str] | None = None) -> int:
     forwarder = _build_forwarder(config, spool, audit)
     forwarder.start()
 
-    from mercure_gateway.reports import ReportRetriever
-
-    report_retriever = ReportRetriever(config.reports, database, spool, audit=audit)
+    # P0-6 (US-06): built with its real find/move transports — a bare
+    # ReportRetriever here left every poll failing on
+    # "report transports (finder/mover) not configured".
+    report_retriever = _build_report_retriever(config, database, spool, audit)
     report_retriever.start()
 
     shutdown_done = threading.Event()

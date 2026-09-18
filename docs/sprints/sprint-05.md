@@ -34,6 +34,18 @@ loop.
 - S05-T2 needs the gateway to act as a C-STORE SCP for the C-MOVE destination — reuse the S02
   receiver transport on an internal port rather than new code.
 - Orthanc on the S01 rig is the integration target for T1/T2; keep fake SCPs for unit tests per §10.
+- **Retrospective (review P0-6/P0-7, 2026-09-18):** the S05-T2/T5 ✅ rows were
+  earned by tests against *fake* finder/mover callables, and US-06's AC was
+  checked the same way — so the sprint exited green while the production path
+  was dead. `main()` constructed `ReportRetriever` without injecting
+  `finder`/`mover`, and every real retrieval failed. The exit criterion that
+  would have caught it is a test that drives the composition root, now
+  `tests/test_main_report_retrieval.py` (real in-process C-FIND/C-MOVE SCPs,
+  report reaches `RETRIEVED` with the file on disk). That test also found a
+  second bug the fakes hid: received datasets have no file meta, so
+  `move._save` raised on any genuine instance. See the ADR-0005 corrigendum.
+  **Change to sprint exit criteria:** any feature claimed ✅ must have at least
+  one test that reaches it from the composition root, not only from its units.
 - **Refinement change (S05-T1/T2/T6):** The original spec specified DICOM SR only. The refinement
   adds **Encapsulated PDF** support. S05-T1 filters by SOP Class UID in C-FIND queries to
   distinguish SR from PDF. S05-T2 stores to separate subdirectories (`sr/` vs `pdf/`). S05-T6

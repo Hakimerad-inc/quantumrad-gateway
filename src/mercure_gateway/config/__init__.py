@@ -248,6 +248,21 @@ class ReportConfig(BaseModel):
 
     enabled: bool = False
     query_source: ReportQuerySource | None = None
+    # C-MOVE is a *pull*: the PACS opens a second association back to us, to the
+    # AE title it has registered for this gateway. That AE must be reachable on
+    # a fixed, known port — the move destination is looked up by AE title in the
+    # PACS config, so an ephemeral port cannot work. Default is one above the
+    # receiver's default 11112.
+    store_scp_port: int = Field(
+        default=11113,
+        ge=1,
+        le=65535,
+        description=(
+            "Port for the report C-STORE SCP the PACS C-MOVEs reports into. "
+            "Must match the port registered for this gateway's AE title on the "
+            "PACS (a C-MOVE destination is resolved by AE title)."
+        ),
+    )
     poll_interval_sec: int = Field(default=300, ge=10)
     sla_seconds: int = Field(
         default=300,

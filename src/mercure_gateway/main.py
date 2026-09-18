@@ -61,6 +61,11 @@ __all__ = ["main"]
 
 logger = logging.getLogger(__name__)
 
+# DIMSE association budget for the report transports when the operator did not
+# set one (review P1-12). Must stay in step with the forwarder's
+# _DEFAULT_ASSOCIATE_TIMEOUT_SEC and the reports transports' own defaults.
+_DIMSE_TIMEOUT = 30.0
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -281,12 +286,17 @@ def _build_report_retriever(
         store_scp_port = config.reports.store_scp_port
 
         def _dicom_factory(src: ReportQuerySource) -> Any:
+            # src.timeout_sec is None unless the operator set one; both
+            # transports fall back to the DIMSE default, and a None passes
+            # through as that default rather than "wait forever".
+            timeout = src.timeout_sec
             return DICOMReportTransport(
                 ReportFinder(
                     host=src.host,
                     port=src.port,
                     aet=src.aet,
                     ae_title=ae_title,
+                    timeout=timeout if timeout is not None else _DIMSE_TIMEOUT,
                 ),
                 ReportRetrieve(
                     host=src.host,
@@ -296,6 +306,7 @@ def _build_report_retriever(
                     store_scp_ae_title=ae_title,
                     reports_dir=reports_dir,
                     ae_title=ae_title,
+                    timeout=timeout if timeout is not None else _DIMSE_TIMEOUT,
                 ),
             )
 

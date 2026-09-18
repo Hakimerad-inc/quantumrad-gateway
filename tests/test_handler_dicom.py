@@ -29,7 +29,10 @@ from pynetdicom.sop_class import CTImageStorage as CTContext
 
 from mercure_gateway.config import DICOMDestination, default_config
 from mercure_gateway.forwarder import Forwarder, RetryPolicy
-from mercure_gateway.forwarder.handlers.dicom import DICOMHandler
+from mercure_gateway.forwarder.handlers.dicom import (
+    _DEFAULT_ASSOCIATE_TIMEOUT_SEC,
+    DICOMHandler,
+)
 from mercure_gateway.spool import Spool, StudyState
 from mercure_gateway.spool.db import mem_database
 
@@ -99,9 +102,7 @@ def make_forwarder(spool: Spool, target: DICOMDestination, max_attempts: int = 1
 # ── Slice 1 (tracer bullet): deliver a study to a live SCP ─────────────
 
 
-def test_dicom_delivery_to_live_scp(
-    tmp_path: Path, dicom_scp: tuple[list[object], int]
-) -> None:
+def test_dicom_delivery_to_live_scp(tmp_path: Path, dicom_scp: tuple[list[object], int]) -> None:
     received, port = dicom_scp
     spool = make_spool(tmp_path)
     study_uid = "1.2.3.4.5.6"
@@ -159,9 +160,7 @@ def test_unreachable_destination_reports_failure(
 # ── Slice 3: no DICOM files on disk fails gracefully ───────────────────
 
 
-def test_no_files_on_disk_fails(
-    tmp_path: Path, dicom_scp: tuple[list[object], int]
-) -> None:
+def test_no_files_on_disk_fails(tmp_path: Path, dicom_scp: tuple[list[object], int]) -> None:
     _, port = dicom_scp
     spool = make_spool(tmp_path)
     study_uid = "1.2.3.4.5.6"
@@ -254,9 +253,7 @@ def rejecting_scp() -> Iterator[tuple[list[object], int]]:
     server.shutdown()
 
 
-def test_association_rejected(
-    tmp_path: Path, rejecting_scp: tuple[list[object], int]
-) -> None:
+def test_association_rejected(tmp_path: Path, rejecting_scp: tuple[list[object], int]) -> None:
     received, port = rejecting_scp
     spool = make_spool(tmp_path)
     study_uid = "1.2.3.4.5.6"
@@ -284,3 +281,59 @@ def test_association_rejected(
     assert count == 1
     assert spool.state(study_id) == StudyState.FAILED
     assert len(received) == 0
+
+
+# ── Slice 5: association budget (review P1-12) ─────────────────────────
+
+
+def test_timeouts_are_applied_to_the_ae(tmp_path: Path) -> None:
+    """The DIMSE budget is bound explicitly rather than left implicit.
+
+    pynetdicom 3.0.4 has no ``timeout=`` kwarg on ``associate()`` — unlike the
+    other handlers, which pass one — so the budget has to be set on the AE
+    instance. A site with a slow PACS raises it via ``timeout_sec``.
+    """
+    target = DICOMDestination(
+        name="pacs",
+        type="dicom",
+        host="127.0.0.1",
+        port=11112,
+        aet_target="PACS",
+        timeout_sec=90.0,
+    )
+    handler = DICOMHandler(target, make_spool(tmp_path))
+
+    ae = AE(ae_title="GATEWAY")
+    handler._apply_timeouts(ae)
+
+    assert ae.acse_timeout == 90.0
+    assert ae.network_timeout == 90.0
+
+
+def test_timeouts_fall_back_to_the_default(tmp_path: Path) -> None:
+    """An unset ``timeout_sec`` inherits the DIMSE convention, not None."""
+    target = DICOMDestination(
+        name="pacs", type="dicom", host="127.0.0.1", port=11112, aet_target="PACS"
+    )
+    handler = DICOMHandler(target, make_spool(tmp_path))
+
+    ae = AE(ae_title="GATEWAY")
+    handler._apply_timeouts(ae)
+
+    assert ae.acse_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
+    assert ae.network_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
+
+
+def test_pynetdicom_defaults_already_bound_a_silent_peer() -> None:
+    """Guard the correction to review P1-12: on the pinned pynetdicom, a peer
+    that accepts the socket but never answers cannot hang the worker forever.
+
+    The review described DIMSE associations as waiting indefinitely. They do
+    not — the library's own defaults bound them, so the fix here is explicit
+    configurability rather than a missing timeout. If pynetdicom ever regresses
+    these defaults, this test fails and the budget becomes load-bearing.
+    """
+    ae = AE(ae_title="GATEWAY")
+    assert ae.acse_timeout is not None
+    assert ae.network_timeout is not None
+    assert ae.dimse_timeout is not None

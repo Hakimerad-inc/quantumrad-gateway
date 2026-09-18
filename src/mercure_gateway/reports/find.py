@@ -37,6 +37,14 @@ _IMAGE_LEVEL_FIND_SOP = "1.2.840.10008.5.1.4.1.2.2.1"
 
 _MAX_PDU_SIZE = 131072
 
+# Association budget. Correction to review P1-12: pynetdicom 3.0.4 has no
+# ``timeout=`` kwarg on associate() and its defaults (acse 30 s, network 60 s)
+# already bound a peer that never answers — the "hangs the poller forever"
+# failure does not occur on the pinned version. What was missing was
+# configurability and visibility; the timeout is applied through the AE
+# attributes (see _apply_timeouts) so a slow PACS can raise it from config.
+_DEFAULT_ASSOCIATE_TIMEOUT_SEC = 30.0
+
 
 class ReportFinderError(Exception):
     """Raised when the report C-FIND query cannot reach the PACS."""
@@ -70,11 +78,18 @@ class ReportFinder:
         port: int,
         aet: str,
         ae_title: str = "GATEWAY",
+        timeout: float = _DEFAULT_ASSOCIATE_TIMEOUT_SEC,
     ) -> None:
         self.host = host
         self.port = port
         self.aet = aet
         self.ae_title = ae_title
+        self.timeout = timeout
+
+    def _apply_timeouts(self, ae: AE) -> None:
+        """Bind the DIMSE budgets explicitly (see the module note on P1-12)."""
+        ae.acse_timeout = self.timeout
+        ae.network_timeout = self.timeout
 
     def find(
         self,
@@ -107,6 +122,7 @@ class ReportFinder:
 
         ae = AE(ae_title=self.ae_title)
         ae.maximum_pdu_size = _MAX_PDU_SIZE
+        self._apply_timeouts(ae)
         ae.add_requested_context(_IMAGE_LEVEL_FIND_SOP, ExplicitVRLittleEndian)
 
         assoc = ae.associate(self.host, self.port, ae_title=self.aet)

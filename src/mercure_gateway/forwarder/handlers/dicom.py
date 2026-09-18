@@ -62,6 +62,18 @@ _MAX_REQUESTED_CONTEXTS = 120
 # Large PDUs are the single biggest throughput lever for C-STORE transfers.
 _MAX_PDU_SIZE = 131072
 
+# Association/connect budget. Correction to the review's P1-12: pynetdicom
+# 3.0.4 does NOT accept a ``timeout=`` kwarg on associate(), and its defaults
+# (acse_timeout 30, network_timeout 60, dimse_timeout 30) already bound a peer
+# that accepts the socket but never answers — the "hangs forever" failure
+# described in the review does not occur on the pinned version. What is
+# missing is that those budgets are implicit and unconfigurable, so a site
+# with a legitimately slow PACS cannot raise them and the value is invisible
+# in the config. Set them explicitly from timeout_sec, defaulting to the
+# DIMSE convention. SFTP is the transport that really did wait forever — see
+# sftp.py.
+_DEFAULT_ASSOCIATE_TIMEOUT_SEC = 30.0
+
 
 class DICOMHandler:
     """C-STORE SCU that sends DICOM instances to a ``dicom`` destination.
@@ -85,6 +97,27 @@ class DICOMHandler:
             self.destination.port,
             ae_title=self.destination.aet_target,
         )
+
+    def _apply_timeouts(self, ae: AE) -> None:
+        """Bind the association/connect budgets from the destination's config.
+
+        pynetdicom's own defaults already bound a non-responding peer
+        (acse 30 s, network 60 s) — this makes the budget explicit and lets a
+        site with a slow PACS raise it via ``timeout_sec`` instead of
+        inheriting a value nothing documents (review P1-12).
+        """
+        timeout = self._associate_timeout()
+        ae.acse_timeout = timeout
+        ae.network_timeout = timeout
+
+    def _associate_timeout(self) -> float:
+        """The association timeout, or the DIMSE default when unset."""
+        from mercure_gateway.config import BaseDestination
+
+        dest: BaseDestination = self.destination
+        if dest.timeout_sec is not None:
+            return dest.timeout_sec
+        return _DEFAULT_ASSOCIATE_TIMEOUT_SEC
 
     def deliver(self, task: ClaimedTask, spool_dir: Path) -> DeliveryResult:
         """Locate the study's DICOM files and C-STORE them to the destination."""
@@ -139,6 +172,7 @@ class DICOMHandler:
         """Open a single association and send all files."""
         ae = AE(ae_title=self.destination.aet_source)
         ae.maximum_pdu_size = _MAX_PDU_SIZE
+        self._apply_timeouts(ae)
         # Request only the SOP classes this study actually contains. Negotiating
         # all 111 classes × 4 syntaxes would blow the 128-context protocol
         # limit, and it used to request CT+MR only — which made every other

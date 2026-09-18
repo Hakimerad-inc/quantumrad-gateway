@@ -118,6 +118,17 @@ class BaseDestination(BaseModel):
 
     name: str = Field(min_length=1)
     enabled: bool = True
+    timeout_sec: float | None = Field(
+        default=None,
+        ge=1.0,
+        description=(
+            "Connect/association timeout in seconds. None uses the transport's "
+            "default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither "
+            "connects nor rejects within this window fails the delivery and the "
+            "study retries on the next pass — without it, one hung destination "
+            "halts all delivery (review P1-12)."
+        ),
+    )
 
 
 class DICOMDestination(BaseDestination):
@@ -238,6 +249,16 @@ class ReportQuerySource(BaseModel):
     host: str = Field(min_length=1)
     port: int = Field(ge=1, le=65535)
     aet: str = Field(min_length=1, max_length=16)
+    timeout_sec: float | None = Field(
+        default=None,
+        ge=1.0,
+        description=(
+            "Association timeout for the report C-FIND/C-MOVE. None uses the "
+            "DIMSE default (30 s). A PACS that never answers the association "
+            "would otherwise hang the report poller and stop retrieval "
+            "silently (review P1-12)."
+        ),
+    )
 
 
 _DEFAULT_REPORT_TYPES: list[Literal["sr", "pdf"]] = ["sr", "pdf"]

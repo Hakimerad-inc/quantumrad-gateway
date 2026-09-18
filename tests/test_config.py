@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from mercure_gateway.config import (
     DICOMDestination,
@@ -55,9 +55,7 @@ def test_invalid_log_level_rejected() -> None:
 
 def test_invalid_target_type_rejected() -> None:
     with pytest.raises(ValidationError):
-        GatewayConfig.model_validate(
-            {"destinations": [{"name": "x", "type": "carrier-pigeon"}]}
-        )
+        GatewayConfig.model_validate({"destinations": [{"name": "x", "type": "carrier-pigeon"}]})
 
 
 def test_dicom_destination_discriminated() -> None:
@@ -109,8 +107,14 @@ def test_all_target_types_parse() -> None:
             {"name": "r", "type": "rsync", "host": "h", "username": "u", "remote_path": "/"},
             {"name": "s3", "type": "s3", "bucket": "b"},
             {"name": "f", "type": "folder", "path": "/tmp/out"},
-            {"name": "x", "type": "xnat", "url": "https://xnat", "username": "u",
-             "password": "p", "project": "P"},
+            {
+                "name": "x",
+                "type": "xnat",
+                "url": "https://xnat",
+                "username": "u",
+                "password": "p",
+                "project": "P",
+            },
         ]
     }
     cfg = GatewayConfig.model_validate(sample)
@@ -119,9 +123,7 @@ def test_all_target_types_parse() -> None:
 
 def test_missing_destination_name_rejected() -> None:
     with pytest.raises(ValidationError):
-        GatewayConfig.model_validate(
-            {"destinations": [{"type": "folder", "path": "/tmp"}]}
-        )
+        GatewayConfig.model_validate({"destinations": [{"type": "folder", "path": "/tmp"}]})
 
 
 def test_report_on_retrieval_enum() -> None:
@@ -391,6 +393,7 @@ def test_block_base_maps_partitions_to_media_device() -> None:
 # Web UI TLS configuration (D3a — ADR-0007 transport posture)
 # ══════════════════════════════════════════════════════════════════════
 
+
 def test_webui_tls_fields_default_empty() -> None:
     """TLS off by default: no cert/key set means plain HTTP (loopback default)."""
     cfg = default_config()
@@ -417,6 +420,7 @@ def test_webui_tls_requires_both_files() -> None:
 # strand a study — f8c3250 fixed the runtime path; this is the load-time warning)
 # ══════════════════════════════════════════════════════════════════════
 
+
 def test_stale_forwarding_rule_target_warns_but_loads(caplog) -> None:
     """A rule naming a removed destination warns at load, not at first study."""
     from mercure_gateway.config import DICOMDestination, ForwardingRule
@@ -442,3 +446,42 @@ def test_known_forwarding_rule_targets_are_silent(caplog) -> None:
         forwarding_rules=[ForwardingRule(rule="modality:CT", targets=["pacs-a"])],
     )
     assert not [r for r in caplog.records if "unknown destination" in r.getMessage()]
+
+
+# ── Transport timeout_sec (review P1-12) ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ({"type": "dicom", "aet_target": "P"}, None),
+        ({"type": "dicom_tls", "aet_target": "P"}, None),
+        ({"type": "sftp", "username": "u"}, None),
+        ({"type": "dicom", "aet_target": "P", "timeout_sec": 45.0}, 45.0),
+    ],
+)
+def test_destination_timeout_sec_is_optional(payload, expected) -> None:
+    """Unset by default; the transport's own budget applies."""
+    from mercure_gateway.config import Destination
+
+    dest = TypeAdapter(Destination).validate_python(
+        {"name": "p", "host": "h", "port": 104, **payload}
+    )
+    assert dest.timeout_sec == expected
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "dicom", "aet_target": "P"},
+        {"type": "sftp", "username": "u"},
+    ],
+)
+def test_destination_timeout_sec_rejects_a_budget_below_one_second(payload) -> None:
+    """A sub-second budget would fail every delivery against a real PACS."""
+    from mercure_gateway.config import Destination
+
+    with pytest.raises(ValidationError):
+        TypeAdapter(Destination).validate_python(
+            {"name": "p", "host": "h", "port": 104, "timeout_sec": 0.1, **payload}
+        )

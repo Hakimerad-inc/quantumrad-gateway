@@ -26,6 +26,12 @@ from mercure_gateway.spool import Spool
 
 __all__ = ["SFTPHandler"]
 
+# SSH handshake + TCP connect budget. paramiko waits indefinitely by default;
+# a peer that accepts the socket but never completes the handshake pins the
+# worker (review P1-12). 30 s covers a slow but legitimate server on a WAN,
+# and matches the DIMSE associate budget.
+_DEFAULT_CONNECT_TIMEOUT_SEC = 30.0
+
 
 class _CredentialEntry(Protocol):
     password_encrypted: str | None
@@ -109,6 +115,11 @@ class SFTPHandler:
                 "username": self.destination.username,
                 "look_for_keys": False,
                 "allow_agent": False,
+                # A peer that accepts the socket but never completes the SSH
+                # handshake hangs this worker forever — one unreachable SFTP
+                # server halts all delivery, not just its own studies
+                # (review P1-12). paramiko's default is to wait indefinitely.
+                "timeout": self.destination.timeout_sec or _DEFAULT_CONNECT_TIMEOUT_SEC,
             }
             if private_key:
                 key = self._load_private_key(private_key, passphrase)

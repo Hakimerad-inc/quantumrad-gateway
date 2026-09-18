@@ -137,3 +137,44 @@ def test_save_creates_parent_dirs(tmp_path: Path) -> None:
 
     assert saved.exists()
     assert deep.exists()
+
+
+# ── Association budget (review P1-12) ───────────────────────────────────
+
+
+def test_timeout_defaults_to_the_dimse_budget(tmp_path) -> None:
+    """An unset timeout inherits the DIMSE convention rather than None.
+
+    pynetdicom 3.0.4 has no ``timeout=`` kwarg on ``associate()``; the budget
+    is applied to the AE inside ``retrieve()``.
+    """
+    from mercure_gateway.reports.move import (
+        _DEFAULT_ASSOCIATE_TIMEOUT_SEC,
+        ReportRetrieve,
+    )
+
+    retrieve = ReportRetrieve(
+        host="127.0.0.1",
+        port=11112,
+        aet="PACS",
+        store_scp_port=0,
+        store_scp_ae_title="GATEWAY",
+        reports_dir=tmp_path / "reports",
+    )
+    assert retrieve.timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
+
+
+def test_configured_timeout_is_honoured(tmp_path) -> None:
+    """A site with a slow PACS raises the C-MOVE budget from config."""
+    from mercure_gateway.reports.move import ReportRetrieve
+
+    retrieve = ReportRetrieve(
+        host="127.0.0.1",
+        port=11112,
+        aet="PACS",
+        store_scp_port=0,
+        store_scp_ae_title="GATEWAY",
+        reports_dir=tmp_path / "reports",
+        timeout=90.0,
+    )
+    assert retrieve.timeout == 90.0

@@ -15,6 +15,7 @@ Behaviors:
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,7 +24,10 @@ from paramiko import AuthenticationException, SSHException
 
 from mercure_gateway.config import SFTPDestination, default_config
 from mercure_gateway.forwarder import Forwarder, RetryPolicy
-from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+from mercure_gateway.forwarder.handlers.sftp import (
+    _DEFAULT_CONNECT_TIMEOUT_SEC,
+    SFTPHandler,
+)
 from mercure_gateway.spool import Spool, StudyState
 from mercure_gateway.spool.db import mem_database
 
@@ -56,9 +60,12 @@ def _claim_task(spool: Spool, study_id: int, dest: SFTPDestination) -> object:
 # Successful delivery
 # ══════════════════════════════════════════════════════════════════════
 
+
 @patch("paramiko.SSHClient")
 def test_sftp_delivery_uploads_files(mock_ssh, tmp_path: Path, spool: Spool) -> None:
-    from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+    from mercure_gateway.forwarder.handlers.sftp import (
+        SFTPHandler,
+    )
 
     mock_client = MagicMock()
     mock_sftp = MagicMock()
@@ -84,9 +91,12 @@ def test_sftp_delivery_uploads_files(mock_ssh, tmp_path: Path, spool: Spool) -> 
 # Auth failures
 # ══════════════════════════════════════════════════════════════════════
 
+
 @patch("paramiko.SSHClient")
 def test_sftp_auth_failure(mock_ssh, tmp_path: Path, spool: Spool) -> None:
-    from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+    from mercure_gateway.forwarder.handlers.sftp import (
+        SFTPHandler,
+    )
 
     mock_client = MagicMock()
     mock_ssh.return_value = mock_client
@@ -107,7 +117,9 @@ def test_sftp_auth_failure(mock_ssh, tmp_path: Path, spool: Spool) -> None:
 
 @patch("paramiko.SSHClient")
 def test_sftp_ssh_exception(mock_ssh, tmp_path: Path, spool: Spool) -> None:
-    from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+    from mercure_gateway.forwarder.handlers.sftp import (
+        SFTPHandler,
+    )
 
     mock_client = MagicMock()
     mock_ssh.return_value = mock_client
@@ -130,9 +142,12 @@ def test_sftp_ssh_exception(mock_ssh, tmp_path: Path, spool: Spool) -> None:
 # Copy semantics (spool files remain)
 # ══════════════════════════════════════════════════════════════════════
 
+
 @patch("paramiko.SSHClient")
 def test_sftp_is_copy_not_move(mock_ssh, tmp_path: Path, spool: Spool) -> None:
-    from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+    from mercure_gateway.forwarder.handlers.sftp import (
+        SFTPHandler,
+    )
 
     mock_client = MagicMock()
     mock_sftp = MagicMock()
@@ -157,9 +172,12 @@ def test_sftp_is_copy_not_move(mock_ssh, tmp_path: Path, spool: Spool) -> None:
 # End-to-end through the forwarder
 # ══════════════════════════════════════════════════════════════════════
 
+
 @patch("paramiko.SSHClient")
 def test_sftp_handler_through_forwarder(mock_ssh, tmp_path: Path, spool: Spool) -> None:
-    from mercure_gateway.forwarder.handlers.sftp import SFTPHandler
+    from mercure_gateway.forwarder.handlers.sftp import (
+        SFTPHandler,
+    )
 
     mock_client = MagicMock()
     mock_sftp = MagicMock()
@@ -178,9 +196,11 @@ def test_sftp_handler_through_forwarder(mock_ssh, tmp_path: Path, spool: Spool) 
 
     assert spool.state(study_id) == StudyState.SENT
 
+
 # ══════════════════════════════════════════════════════════════════════
 # Host key verification (review H4)
 # ══════════════════════════════════════════════════════════════════════
+
 
 @patch("paramiko.SSHClient")
 def test_sftp_no_longer_auto_accepts_host_keys(mock_ssh, tmp_path: Path, spool: Spool) -> None:
@@ -217,8 +237,13 @@ def test_sftp_loads_configured_known_hosts(mock_ssh, tmp_path: Path, spool: Spoo
 
     study_id = _write_study(spool)
     dest = SFTPDestination(
-        name="nas", type="sftp", host="nas.local", port=22, username="u",
-        password="pw", known_hosts=str(known_hosts),
+        name="nas",
+        type="sftp",
+        host="nas.local",
+        port=22,
+        username="u",
+        password="pw",
+        known_hosts=str(known_hosts),
     )
     task = _claim_task(spool, study_id, dest)
     result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
@@ -238,8 +263,13 @@ def test_sftp_creates_missing_known_hosts_file(mock_ssh, tmp_path: Path, spool: 
 
     study_id = _write_study(spool)
     dest = SFTPDestination(
-        name="nas", type="sftp", host="nas.local", port=22, username="u",
-        password="pw", known_hosts=str(known_hosts),
+        name="nas",
+        type="sftp",
+        host="nas.local",
+        port=22,
+        username="u",
+        password="pw",
+        known_hosts=str(known_hosts),
     )
     task = _claim_task(spool, study_id, dest)
     result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
@@ -256,9 +286,7 @@ def test_sftp_rejects_unknown_host_key(mock_ssh, tmp_path: Path, spool: Spool) -
     mock_client = MagicMock()
     mock_ssh.return_value = mock_client
     # RejectPolicy raises this when the host key is not in known_hosts.
-    mock_client.connect.side_effect = SSHException(
-        "Server 'nas.local' not found in known_hosts"
-    )
+    mock_client.connect.side_effect = SSHException("Server 'nas.local' not found in known_hosts")
 
     study_id = _write_study(spool)
     dest = SFTPDestination(
@@ -281,9 +309,12 @@ def test_sftp_rejects_unknown_host_key(mock_ssh, tmp_path: Path, spool: Spool) -
 # every connect() branch.
 # ══════════════════════════════════════════════════════════════════════
 
+
 @patch("paramiko.SSHClient")
 def test_sftp_password_branch_nevers_ambient_credentials(
-    mock_ssh, tmp_path: Path, spool: Spool,
+    mock_ssh,
+    tmp_path: Path,
+    spool: Spool,
 ) -> None:
     """The password branch must opt out of ssh-agent and ~/.ssh discovery."""
     mock_client = MagicMock()
@@ -306,7 +337,9 @@ def test_sftp_password_branch_nevers_ambient_credentials(
 
 @patch("paramiko.SSHClient")
 def test_sftp_key_branch_nevers_ambient_credentials(
-    mock_ssh, tmp_path: Path, spool: Spool,
+    mock_ssh,
+    tmp_path: Path,
+    spool: Spool,
 ) -> None:
     """The private-key branch must opt out too — it can still fall back to agent."""
     mock_client = MagicMock()
@@ -326,7 +359,11 @@ def test_sftp_key_branch_nevers_ambient_credentials(
 
     study_id = _write_study(spool)
     dest = SFTPDestination(
-        name="nas", type="sftp", host="nas.local", port=22, username="u",
+        name="nas",
+        type="sftp",
+        host="nas.local",
+        port=22,
+        username="u",
         private_key=private_key,
     )
     task = _claim_task(spool, study_id, dest)
@@ -337,3 +374,91 @@ def test_sftp_key_branch_nevers_ambient_credentials(
     assert kwargs["look_for_keys"] is False
     assert kwargs["allow_agent"] is False
     assert kwargs["pkey"] is not None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Connect timeout (review P1-12)
+# ══════════════════════════════════════════════════════════════════════
+
+
+@patch("paramiko.SSHClient")
+def test_sftp_passes_a_connect_timeout(mock_ssh, tmp_path: Path, spool: Spool) -> None:
+    """paramiko's default is to wait indefinitely; the budget must be explicit."""
+    mock_client = MagicMock()
+    mock_sftp = MagicMock()
+    mock_ssh.return_value = mock_client
+    mock_client.open_sftp.return_value = mock_sftp
+
+    study_id = _write_study(spool)
+    dest = SFTPDestination(
+        name="nas", type="sftp", host="nas.local", port=22, username="u", password="pw"
+    )
+    task = _claim_task(spool, study_id, dest)
+    SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+
+    timeout = mock_client.connect.call_args.kwargs["timeout"]
+    assert timeout == _DEFAULT_CONNECT_TIMEOUT_SEC
+
+
+@patch("paramiko.SSHClient")
+def test_sftp_honours_a_configured_timeout(mock_ssh, tmp_path: Path, spool: Spool) -> None:
+    """A site with a slow SFTP server raises the budget from config."""
+    mock_client = MagicMock()
+    mock_sftp = MagicMock()
+    mock_ssh.return_value = mock_client
+    mock_client.open_sftp.return_value = mock_sftp
+
+    study_id = _write_study(spool)
+    dest = SFTPDestination(
+        name="nas",
+        type="sftp",
+        host="nas.local",
+        port=22,
+        username="u",
+        password="pw",
+        timeout_sec=90.0,
+    )
+    task = _claim_task(spool, study_id, dest)
+    SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+
+    assert mock_client.connect.call_args.kwargs["timeout"] == 90.0
+
+
+def test_sftp_hung_server_fails_within_the_budget(tmp_path: Path, spool: Spool) -> None:
+    """A peer that accepts the socket but never handshakes does not wedge the worker.
+
+    This is the real P1-12 failure: paramiko's default timeout is ``None``, so a
+    black-holed SFTP server blocks the delivery thread forever and every other
+    destination's studies queue behind it. The fix bounds the connect so the
+    study retries instead of stalling the forwarder.
+    """
+    import socket
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    try:
+        study_id = _write_study(spool)
+        dest = SFTPDestination(
+            name="nas",
+            type="sftp",
+            host="127.0.0.1",
+            port=port,
+            username="u",
+            password="pw",
+            timeout_sec=1.0,
+        )
+        task = _claim_task(spool, study_id, dest)
+        start = time.monotonic()
+        result = SFTPHandler(dest, spool).deliver(task, spool.spool_dir)
+        elapsed = time.monotonic() - start
+    finally:
+        server.close()
+
+    assert result.ok is False
+    # Fails within the budget, not "forever". Generous margin: paramiko's
+    # timeout applies to the socket reads, and the banner exchange is the
+    # first thing that would block.
+    assert elapsed < 15.0, f"hung server took {elapsed:.1f}s to fail"

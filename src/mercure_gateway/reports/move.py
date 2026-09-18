@@ -32,6 +32,11 @@ __all__ = ["ReportRetrieve", "ReportRetrieveError", "RetrievedReport"]
 _STUDY_ROOT_MOVE = "1.2.840.10008.5.1.4.1.2.2.2"
 _MAX_PDU_SIZE = 131072
 
+# Association budget — same correction as reports/find.py: pynetdicom 3.0.4's
+# own defaults already bound a non-answering PACS; this makes the budget
+# explicit and configurable (review P1-12).
+_DEFAULT_ASSOCIATE_TIMEOUT_SEC = 30.0
+
 
 class ReportRetrieveError(Exception):
     """Raised when the report C-MOVE cannot reach the PACS."""
@@ -77,6 +82,7 @@ class ReportRetrieve:
         store_scp_ae_title: str,
         reports_dir: Path,
         ae_title: str = "GATEWAY",
+        timeout: float = _DEFAULT_ASSOCIATE_TIMEOUT_SEC,
     ) -> None:
         self.host = host
         self.port = port
@@ -85,6 +91,7 @@ class ReportRetrieve:
         self.store_scp_ae_title = store_scp_ae_title
         self.reports_dir = Path(reports_dir)
         self.ae_title = ae_title
+        self.timeout = timeout
 
     def retrieve(self, matches: list[ReportMatch]) -> list[RetrievedReport]:
         """C-MOVE each *match* to the gateway store SCP and save it to disk.
@@ -120,6 +127,8 @@ class ReportRetrieve:
 
         ae = AE(ae_title=self.ae_title)
         ae.maximum_pdu_size = _MAX_PDU_SIZE
+        ae.acse_timeout = self.timeout
+        ae.network_timeout = self.timeout
         ae.add_requested_context(_STUDY_ROOT_MOVE, ExplicitVRLittleEndian)
         assoc = ae.associate(self.host, self.port, ae_title=self.aet)
         if not assoc.is_established:

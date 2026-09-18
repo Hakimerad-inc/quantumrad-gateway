@@ -147,3 +147,42 @@ def test_connection_error_raises() -> None:
     finder = ReportFinder(host="127.0.0.1", port=port, aet="FINDSCP")
     with pytest.raises(ReportFinderError):
         finder.find(study_uid="1.2.3.4", report_types=["sr"])
+
+
+# ── Association budget (review P1-12) ───────────────────────────────────
+
+
+def test_timeouts_are_applied_to_the_ae() -> None:
+    """The C-FIND budget is bound explicitly rather than left implicit.
+
+    pynetdicom 3.0.4 has no ``timeout=`` kwarg on ``associate()``; the budget
+    is set on the AE instance so a slow PACS can raise it from config.
+    """
+    from pynetdicom import AE
+
+    from mercure_gateway.reports.find import (
+        ReportFinder,
+    )
+
+    finder = ReportFinder(host="127.0.0.1", port=11112, aet="PACS", timeout=90.0)
+    ae = AE(ae_title="GATEWAY")
+    finder._apply_timeouts(ae)
+
+    assert ae.acse_timeout == 90.0
+    assert ae.network_timeout == 90.0
+
+
+def test_timeouts_fall_back_to_the_default() -> None:
+    from pynetdicom import AE
+
+    from mercure_gateway.reports.find import (
+        _DEFAULT_ASSOCIATE_TIMEOUT_SEC,
+        ReportFinder,
+    )
+
+    finder = ReportFinder(host="127.0.0.1", port=11112, aet="PACS")
+    ae = AE(ae_title="GATEWAY")
+    finder._apply_timeouts(ae)
+
+    assert ae.acse_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
+    assert ae.network_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC

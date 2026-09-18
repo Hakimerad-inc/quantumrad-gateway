@@ -212,11 +212,14 @@ function AppContent() {
 
   // Show loading state while checking auth
   if (authLoading) {
-    return <div className="shell"><main className="main"><div className="loading">Loading…</div></main></div>;
+    return <div className="shell"><main className="main" id="main"><div className="loading">Loading…</div></main></div>;
   }
 
   return (
     <div className="shell">
+      {/* Skip link: the sidebar is 9 nav links before the content — keyboard
+         users need a way past it (2.4.1). Off-screen until focused. */}
+      <a className="skip-link" href="#main">Skip to main content</a>
       <aside className="sidebar">
         <div className="sidebar-header">
           <span className="brand-mark"><BrandMark size={22} /></span>
@@ -245,7 +248,7 @@ function AppContent() {
           </button>
         </div>
       </aside>
-      <main className="main">
+      <main className="main" id="main">
         {restartNeeded && (
           <div className="banner warn" role="status">
             Configuration saved but not yet active — the gateway must restart for changes to take

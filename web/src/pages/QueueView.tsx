@@ -78,7 +78,7 @@ export default function QueueView() {
   return (
     <div>
       <h2>Study Queue</h2>
-      {error ? <div className="error-banner">Error: {error}</div> : null}
+      {error ? <div className="error-banner" role="alert">Error: {error}</div> : null}
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <div className="table-wrap">
         <table>

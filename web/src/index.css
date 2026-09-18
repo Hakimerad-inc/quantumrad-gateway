@@ -27,15 +27,19 @@
   --green-dim: rgba(16, 185, 129, 0.08);
   --yellow: #b45309; /* amber-700 — AA text on white */
   --yellow-dim: rgba(245, 158, 11, 0.1);
-  --red: #dc2626;
+  --red: #b91c1c; /* red-700 — 5.7:1 on --red-dim, AA text on white */
   --red-dim: rgba(220, 38, 38, 0.08);
+  --gray-badge: #475569; /* slate-600 — 6.9:1 on --surface2 (AA) */
 
   --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", sans-serif;
   --mono: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
 
   --radius: 8px;
   --radius-sm: 6px;
-  --focus-ring: 0 0 0 3px rgba(14, 116, 144, 0.35);
+  /* Two-layer solid ring: the inner surface gap isolates the outer accent
+     stroke from the element's own background, so contrast against *any*
+     backdrop is the accent/white ratio (5.4:1) — 1.4.11 non-text contrast. */
+  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
 
   /* login gradient midpoint — slate-800 in light mode (BRAND-KIT §5.1) */
   --login-gradient-mid: #1e293b;
@@ -61,10 +65,11 @@
     --green-dim: rgba(52, 211, 153, 0.15);
     --yellow: #fbbf24; /* amber-400 */
     --yellow-dim: rgba(251, 191, 36, 0.15);
-    --red: #f87171; /* red-400 */
+    --red: #fca5a5; /* red-300 — 6.2:1 on badge bg, AA on --surface */
     --red-dim: rgba(248, 113, 113, 0.15);
+    --gray-badge: #a5b4c8; /* 4.9:1 on --surface2 (AA) */
 
-    --focus-ring: 0 0 0 3px rgba(34, 211, 238, 0.35);
+    --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
 
     /* cyan-600 glow midpoint in dark mode (BRAND-KIT §5.1) */
     --login-gradient-mid: rgba(8, 145, 178, 0.45);
@@ -92,6 +97,17 @@ button, a { -webkit-tap-highlight-color: transparent; }
 /* ── Shell ─────────────────────────────────────────────────────────── */
 
 .shell { display: flex; height: 100vh; }
+
+/* Visually hidden until focused, then pinned to the top-left of the viewport
+   (2.4.1 bypass blocks). */
+.skip-link {
+  position: absolute; left: 8px; top: -60px; z-index: 100;
+  background: var(--accent); color: var(--on-accent);
+  padding: 8px 14px; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 600; text-decoration: none;
+  transition: top 0.15s ease;
+}
+.skip-link:focus { top: 8px; }
 
 /* The sidebar is a dark slate-900 rail in BOTH themes (BRAND-KIT §5.2):
    selected items take a cyan tint with cyan text, base text slate-300. */
@@ -156,7 +172,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .badge.green { background: var(--green-dim); color: var(--green); }
 .badge.yellow { background: var(--yellow-dim); color: var(--yellow); }
 .badge.red { background: var(--red-dim); color: var(--red); }
-.badge.gray { background: var(--surface2); color: var(--muted); }
+.badge.gray { background: var(--surface2); color: var(--gray-badge); }
 .badge.blue { background: var(--accent-dim); color: var(--accent); }
 
 /* ── Tables ────────────────────────────────────────────────────────── */
@@ -310,6 +326,9 @@ pre { font-family: var(--mono); font-size: 12px; line-height: 1.6; overflow-x: a
 }
 .pipe-node:hover rect:not([fill="transparent"]) { stroke: var(--accent); }
 .pipe-node.selected rect:not([fill="transparent"]) { stroke: var(--accent); stroke-width: 2; }
+/* box-shadow from the global :focus-visible rule does not render on SVG, so
+   keyboard focus on a node is shown as a thickened accent stroke instead. */
+.pipe-node:focus-visible rect:not([fill="transparent"]) { stroke: var(--accent); stroke-width: 2.5; }
 .pipe-node-title { fill: var(--text); font-size: 13px; font-weight: 600; font-family: var(--font); }
 .pipe-node-count { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
 
@@ -423,7 +442,9 @@ pre { font-family: var(--mono); font-size: 12px; line-height: 1.6; overflow-x: a
 .login-card input[type="password"]:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(14, 116, 144, 0.25);
+  /* Inherit the AA-safe two-layer ring rather than a local low-alpha copy —
+     a per-component override silently dropped below 3:1 (1.4.11). */
+  box-shadow: var(--focus-ring);
 }
 
 .login-card input[type="password"]:disabled {

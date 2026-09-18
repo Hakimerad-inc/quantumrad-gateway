@@ -126,7 +126,7 @@ export default function PipelineView() {
   return (
     <div>
       <h2>Pipeline</h2>
-      {error ? <div className="error-banner">Error: {error}</div> : null}
+      {error ? <div className="error-banner" role="alert">Error: {error}</div> : null}
       <div className="toolbar">
         <label className="check">
           <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
@@ -139,7 +139,10 @@ export default function PipelineView() {
       </div>
 
       <div className="card" style={{ padding: 0 }}>
-        <svg viewBox={`0 0 ${W} 420`} className="pipe-canvas" role="img"
+        {/* role="group", not role="img": the destination nodes inside are
+           interactive (role="button"), and children of role="img" are treated
+           as presentational — they would be hidden from AT (1.3.1 / 4.1.2). */}
+        <svg viewBox={`0 0 ${W} 420`} className="pipe-canvas" role="group"
           aria-label="Gateway process flow diagram">
           <Defs />
           {/* edges */}
@@ -219,7 +222,21 @@ export default function PipelineView() {
                 </thead>
                 <tbody>
                   {destStudies.map((r) => (
-                    <tr key={r.route_id} style={{ cursor: "pointer" }} onClick={() => openStudy(r.study_id)}>
+                    <tr
+                      key={r.route_id}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => openStudy(r.study_id)}
+                      // Keyboard parity with the click (2.1.1).
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`Study ${r.accession || r.study_uid}, ${r.modality || "unknown modality"}, ${r.status}`}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openStudy(r.study_id);
+                        }
+                      }}
+                    >
                       <td className="mono">{r.accession || "—"}</td>
                       <td>{r.patient_name || "—"}</td>
                       <td>{r.modality || "—"}</td>

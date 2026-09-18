@@ -32,8 +32,23 @@ export function PipeNode({ title, lines, x, y, w = NODE_W, dot, selected, onClic
       className={`pipe-node${selected ? " selected" : ""}`}
       transform={`translate(${x}, ${y})`}
       onClick={onClick}
+      // role="button" is only meaningful when the node acts; without a handler
+      // it must stay a plain group or AT announces a dead control (2.1.1).
       role={onClick ? "button" : undefined}
       aria-label={title}
+      // A SVG group is not focusable by default and gets no key events — both
+      // have to be wired explicitly for keyboard parity with the click (2.1.1).
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
     >
       <rect width={w} height={NODE_H} rx={10} />
       <circle className={`pipe-dot ${dot}`} cx={20} cy={NODE_H / 2} r={5} />

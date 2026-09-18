@@ -62,7 +62,22 @@ export default function ReportsView() {
               </thead>
               <tbody>
                 {reports.map((r) => (
-                  <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => view(r.id)}>
+                  <tr
+                    key={r.id}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => view(r.id)}
+                    // A row that acts as a button must be reachable and
+                    // activatable from the keyboard too (2.1.1).
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`Report ${r.id}, ${r.report_type}, ${r.status}`}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        view(r.id);
+                      }
+                    }}
+                  >
                     <td>{r.id}</td>
                     <td><span className={`badge ${r.report_type === "pdf" ? "blue" : "green"}`}>{r.report_type}</span></td>
                     <td><span className={`badge ${STATUS_BADGE[r.status] || "gray"}`}>{r.status}</span></td>

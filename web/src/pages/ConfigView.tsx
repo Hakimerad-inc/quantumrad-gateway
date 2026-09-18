@@ -96,6 +96,9 @@ export default function ConfigView() {
           // or server rejection, which renders as an error.
           <span
             className={msg.startsWith("Config") ? "ok-note" : "error-banner"}
+            // An error surfaced here must be announced (4.1.3); the ok-note is
+            // a status message and gets the same treatment.
+            role={msg.startsWith("Config") ? "status" : "alert"}
             style={{ margin: 0 }}
           >
             {msg}

@@ -52,8 +52,8 @@ export default function AuditView() {
         </button>
         {verify && (
           verify.valid
-            ? <span className="ok-note" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><IconCheck size={15} /> Chain intact</span>
-            : <span className="error-banner" style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: 0 }}><IconX size={15} /> {verify.errors.length} broken link(s)</span>
+            ? <span className="ok-note" role="status" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><IconCheck size={15} /> Chain intact</span>
+            : <span className="error-banner" role="alert" style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: 0 }}><IconX size={15} /> {verify.errors.length} broken link(s)</span>
         )}
         <span className="hint" style={{ marginLeft: "auto" }}>
           {events.length} events (last 200)

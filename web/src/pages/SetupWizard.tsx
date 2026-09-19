@@ -102,14 +102,35 @@ export default function SetupWizardPage() {
         host: d.host,
         port: d.port,
         aet_target: d.aet,
-        aet_source: "GATEWAY",
+        // The calling AE is the receiver title the operator just set in step
+        // 1, not a literal. A PACS that whitelists calling AE titles rejects
+        // a mismatched source, so a hardcoded "GATEWAY" would make the
+        // wizard's own first-run config unable to forward.
+        aet_source: data.receiver.ae_title,
       }));
-      // Only `enabled` is taken from the wizard: `query_source` is a
-      // structured object (ReportQuerySource), not the free-text
-      // "host:port" string this step collects. Same partial-merge assertion.
+      // `query_source` is a structured ReportQuerySource, but this step
+      // collects a free-text "host:port" string — parse it rather than drop
+      // it. Discarding it meant the wizard forced the operator to type a
+      // required PACS address that the save then threw away, leaving
+      // reports enabled with query_source null, which main.py logs and
+      // silently never retrieves.
+      const [qsHost, qsPort] = (data.reports.query_source ?? "").split(":");
+      // current.reports is undefined only if the running config omits the
+      // section entirely; the object literal below would then lose `enabled`.
       current.reports = {
-        ...current.reports,
+        ...(current.reports ?? { enabled: false }),
         enabled: data.reports.enabled,
+        query_source:
+          data.reports.enabled && qsHost
+            ? {
+                type: "dicom",
+                host: qsHost,
+                port: Number(qsPort) || 104,
+                // aet is min_length=1 — the receiver AE the operator just
+                // chose is this gateway's own C-STORE SCP for C-MOVE.
+                aet: data.receiver.ae_title,
+              }
+            : (current.reports?.query_source ?? null),
       } as GatewayConfig["reports"];
       await saveConfig(current);
       // The admin password is never round-tripped through the config body —

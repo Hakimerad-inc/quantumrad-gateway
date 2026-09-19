@@ -142,4 +142,43 @@ describe('usePoll', () => {
     rerender(<Harness stats={stats} intervalMs={10} deps={['b']} />);
     expect(stats.calls).toBe(2);
   });
+
+  it('cancels the armed timer when the tab hides', async () => {
+    // The visibility listener used to only *re-arm* on the hidden branch —
+    // going hidden cancelled nothing, so a timer already armed still fired
+    // and polled a tab nobody was looking at.
+    const stats = newStats();
+    render(<Harness stats={stats} intervalMs={100} />);
+
+    // Let the mount-time call settle and arm its timer.
+    await vi.advanceTimersByTimeAsync(60);
+    const armed = stats.calls;
+
+    setHidden(true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(stats.calls).toBe(armed);
+  });
+
+  it('does not fork a second poll chain when the tab returns while a timer is armed', async () => {
+    // poll() had three entry points (mount, visibility, refresh) and only
+    // refresh cleared the timer. Returning while one was armed started a
+    // second self-perpetuating chain; timerRef was overwritten so unmount
+    // cleared only the surviving handle and the orphan kept fetching. Every
+    // tab switch added another chain, so the poll rate compounded.
+    const stats = newStats();
+    render(<Harness stats={stats} intervalMs={100} />);
+
+    await vi.advanceTimersByTimeAsync(60);
+    const armed = stats.calls;
+
+    // Leave and come back while that timer is still pending.
+    setHidden(true);
+    setHidden(false);
+
+    await vi.advanceTimersByTimeAsync(600);
+    // One chain: ~150 ms per call (100 ms interval + 50 ms settlement) over
+    // 600 ms. Two chains roughly doubled this and could overlap.
+    expect(stats.calls - armed).toBeLessThan(8);
+    expect(stats.maxConcurrent).toBe(1);
+  });
 });

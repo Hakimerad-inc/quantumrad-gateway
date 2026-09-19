@@ -33,7 +33,7 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function stubFetch() {
+function stubFetch(running: unknown = RUNNING_CONFIG) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url.endsWith('/api/config') && init?.method === 'PUT') {
@@ -44,15 +44,18 @@ function stubFetch() {
     if (url.endsWith('/api/wizard/validate/reports')) return json({ errors: [] });
     if (url.endsWith('/api/wizard/validate/admin')) return json({ errors: [] });
     if (url.endsWith('/api/web-ui/password')) return json({ status: 'ok' });
-    if (url.endsWith('/api/config')) return json(RUNNING_CONFIG);
+    if (url.endsWith('/api/config')) return json(running);
     return json({});
   });
 }
 
 // Walk the wizard to Summary and Save, returning the PUT body the page sent.
-async function saveAndCollect(): Promise<Record<string, unknown>> {
+// `running` is the GET /api/config body the wizard starts from; a fresh
+// appliance has reports.query_source null, which is the case that exposed the
+// discard (the default stub already carries a structured object and masks it).
+async function saveAndCollect(running: unknown = RUNNING_CONFIG): Promise<Record<string, unknown>> {
   const user = userEvent.setup();
-  const fetchStub = stubFetch();
+  const fetchStub = stubFetch(running);
   vi.stubGlobal('fetch', fetchStub);
   render(<SetupWizard />);
 
@@ -120,11 +123,63 @@ describe('SetupWizard', () => {
     );
   });
 
-  it('preserves the structured reports.query_source instead of the free-text string', async () => {
+  it('parses the free-text query source into a structured ReportQuerySource', async () => {
     const saved = await saveAndCollect();
 
     expect(saved.reports).toMatchObject({ enabled: true });
-    // The wizard's "host:port" string must not overwrite the structured object.
+    // The wizard collects "host:port" but query_source on the wire is a
+    // structured object. The wizard used to collect the string because the
+    // backend gate requires it, then drop it — reports came up enabled with
+    // query_source null and silently never retrieved anything.
+    expect(saved.reports).toHaveProperty('query_source', {
+      type: 'dicom',
+      host: '10.0.0.9',
+      port: 104,
+      // The calling AE is the receiver title set in step 1, not a literal.
+      aet: 'NEW-AET',
+    });
+    // The free-text string itself must not reach the wire.
+    expect(saved.reports).not.toHaveProperty('query_source', '10.0.0.9:104');
+  });
+
+  it('writes a query source on a fresh appliance whose config has none', async () => {
+    // The install case that actually shipped broken: GET /api/config on a
+    // fresh appliance returns query_source null, the wizard collected a
+    // required PACS address and threw it away, and main.py logged "reports
+    // are enabled but reports.query_source is unset" with no UI remedy.
+    const fresh = JSON.parse(JSON.stringify(RUNNING_CONFIG)) as Record<string, unknown>;
+    (fresh.reports as Record<string, unknown>).query_source = null;
+
+    const saved = await saveAndCollect(fresh);
+
+    expect(saved.reports).toMatchObject({ enabled: true });
+    const qs = (saved.reports as Record<string, unknown>).query_source;
+    expect(qs).toEqual({ type: 'dicom', host: '10.0.0.9', port: 104, aet: 'NEW-AET' });
+  });
+
+  it('leaves query_source untouched when reports are disabled', async () => {
+    // The wizard step is optional; leaving it off must not null out an
+    // endpoint a later config edit established.
+    const user = userEvent.setup();
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<SetupWizard />);
+
+    await user.type(screen.getByLabelText('AE Title'), 'NEW-AET');
+    await user.click(screen.getByText('Next'));
+    await screen.findByText('+ Add Destination');
+    await user.click(screen.getByText('Next'));
+    // Reports step, left disabled.
+    await screen.findByLabelText('Enable report retrieval');
+    await user.click(screen.getByText('Next'));
+    await screen.findByText('Admin Password');
+    await user.click(screen.getByText('Next'));
+    await screen.findByText('Configuration Summary');
+    await user.click(screen.getByText('Save Configuration'));
+    expect(await screen.findByText('Configuration saved')).toBeInTheDocument();
+
+    const puts = fetchStub.mock.calls.filter(([, init]) => init?.method === 'PUT');
+    const saved = JSON.parse(puts[0]![1]!.body as string);
     expect(saved.reports).toHaveProperty('query_source', REPORT_SOURCE);
   });
 

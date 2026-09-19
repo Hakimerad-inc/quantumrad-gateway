@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import type {
   PipelineSnapshot,
   DestinationNode,
@@ -40,6 +40,10 @@ export default function PipelineView() {
   const [timeline, setTimeline] = useState<TimelineEvent[] | null>(null);
   const prevReceived = useRef<number | null>(null);
   const [inboundFlow, setInboundFlow] = useState(false);
+  // Tracked so leaving the page within the pulse window cannot fire a
+  // setState on an unmounted component — the same leak the usePoll
+  // conversion here was meant to close.
+  const flowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -48,7 +52,8 @@ export default function PipelineView() {
       setError(null);
       if (prevReceived.current !== null && s.receiver_counts.received_last_hour > prevReceived.current) {
         setInboundFlow(true);
-        setTimeout(() => setInboundFlow(false), 4000);
+        if (flowTimerRef.current) clearTimeout(flowTimerRef.current);
+        flowTimerRef.current = setTimeout(() => setInboundFlow(false), 4000);
       }
       prevReceived.current = s.receiver_counts.received_last_hour;
     } catch (e) {
@@ -58,6 +63,8 @@ export default function PipelineView() {
       setError(String(e));
     }
   }, []);
+
+  useEffect(() => () => { if (flowTimerRef.current) clearTimeout(flowTimerRef.current); }, []);
 
   // Self-rescheduling poll: cannot stack, aborts a superseded in-flight
   // fetch, and stops while the tab is hidden (P1-20).

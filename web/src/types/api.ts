@@ -63,7 +63,11 @@ export interface ReportRow {
   report_type: string;
   status: string;
   file_path: string | null;
-  created_at: string | null;
+  // The reports table has no created_at column and /api/reports returns the
+  // rows unmodified, so this key is always absent at runtime. Optional so the
+  // type says what the API actually delivers rather than what a consumer
+  // might wish were there.
+  created_at?: string | null;
   retrieved_at: string | null;
   sop_class_uid: string | null;
 }

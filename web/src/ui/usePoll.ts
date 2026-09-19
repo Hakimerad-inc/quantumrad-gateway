@@ -49,6 +49,14 @@ export function usePoll(fn: PollFn, { intervalMs, enabled = true, deps = [] }: P
     let unmounted = false;
 
     const poll = async () => {
+      // Cancel any armed timer first. poll() has three entry points (mount,
+      // the visibility listener, the Refresh button) and only the last one
+      // cleared the timer; the others orphaned it. An orphaned timer still
+      // fires, re-arms itself, and overwrites timerRef — so two chains run
+      // forever, and cleanup clears only the handle that survived. The
+      // compounding is unbounded: each tab switch while a timer is pending
+      // adds another chain.
+      clearTimeout(timerRef.current!);
       // Latest-wins: supersede any call still in flight so a slow response
       // can never land after a fresher one.
       controllerRef.current?.abort();
@@ -72,9 +80,15 @@ export function usePoll(fn: PollFn, { intervalMs, enabled = true, deps = [] }: P
     };
 
     // A hidden tab has no one to show the data to and the backend has better
-    // things to do; pick the poll back up the instant it returns.
+    // things to do; pick the poll back up the instant it returns. Going
+    // hidden must cancel the armed timer too — the finally check below only
+    // blocks *re-arming*, so without this a hidden tab keeps polling.
     const onVisibility = () => {
-      if (!document.hidden) void poll();
+      if (document.hidden) {
+        clearTimeout(timerRef.current!);
+        return;
+      }
+      void poll();
     };
     document.addEventListener("visibilitychange", onVisibility);
 

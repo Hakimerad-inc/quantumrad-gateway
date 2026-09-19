@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import sync_version  # noqa: E402
 
+from mercure_gateway.spool.db import mem_database  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -41,6 +43,24 @@ def test_all_five_version_sources_are_in_sync() -> None:
 
     cargo = tomllib.loads((REPO / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     assert cargo["package"]["version"] == version
+
+
+def test_the_fastapi_app_reports_the_product_version() -> None:
+    """The sixth mirror is derived, not stored — assert it at runtime (P1-8).
+
+    ``create_app`` used to hardcode ``"0.1.0"``: invisible to sync_version
+    (no file to parse), yet it is the version an API consumer reads and the
+    one the SPA's generated types are generated against. Deriving it removes
+    the mirror; this test keeps the removal honest.
+    """
+    from mercure_gateway import __version__
+    from mercure_gateway.config import default_config
+    from mercure_gateway.spool import Spool
+    from mercure_gateway.web import create_app
+
+    app = create_app(default_config(), Spool(mem_database()))
+    assert app.version == __version__
+    assert app.openapi()["info"]["version"] == __version__
 
 
 def test_sync_version_check_mode_detects_drift() -> None:

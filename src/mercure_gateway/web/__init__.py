@@ -163,11 +163,16 @@ def create_app(
     metrics route, which is the only place a bounded-but-starving purge loop is
     visible (review P0-11).
     """
+    from mercure_gateway import __version__
     from mercure_gateway.web.routes import auth_router, router
 
+    # The version an API consumer reads (and the codegen input) is the
+    # product's, not a literal left over from the scaffold — a hardcoded
+    # "0.1.0" here is the one mirror sync_version.py could not see, and it
+    # was the one that shipped (review P1-8).
     app = FastAPI(
         title="QuantumRAD Gateway API",
-        version="0.1.0",
+        version=__version__,
         description="REST API for the QuantumRAD Gateway web admin panel",
     )
 

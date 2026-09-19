@@ -2,9 +2,16 @@
 """Keep every version field in sync with the canonical source (review M13).
 
 ``src/mercure_gateway/__init__.py`` declares ``__version__`` as the single
-source of truth; four other files duplicate it. This script rewrites them
+source of truth; five other places duplicate it. This script rewrites them
 from the source (default) or verifies they all agree (``--check``, exit 1 on
 drift — used by the guard test and locally before tagging a release).
+
+A sixth consumer is deliberately *not* a file: the FastAPI app's reported
+version used to be a hardcoded ``"0.1.0"``, which is the one mirror this
+script could never see — and it was the one an API consumer and the
+OpenAPI codegen actually read (review P1-8). ``create_app`` now derives it
+from ``__version__``, so it cannot drift; ``test_version_sync`` asserts that
+at runtime instead.
 
 Usage:
     uv run python scripts/sync_version.py            # rewrite drifters

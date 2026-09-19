@@ -25,6 +25,7 @@ from pydicom.uid import ExplicitVRLittleEndian
 from pynetdicom import AE, evt
 
 from mercure_gateway.reports.find import PDF_SOP_CLASS, SR_SOP_CLASS, ReportMatch
+from mercure_gateway.spool import validate_uid
 
 __all__ = ["ReportRetrieve", "ReportRetrieveError", "RetrievedReport"]
 
@@ -179,6 +180,12 @@ class ReportRetrieve:
 
     def _save(self, ds: Any, study_uid: str, sop_class: str, sop_uid: str) -> Path:
         """Persist *ds* under ``reports/{study_uid}/{sr|pdf}/{sop_uid}.dcm``."""
+        # P0-1: the UIDs come from the PACS response and compose the output
+        # path, so a malicious or malformed server can write outside
+        # reports_dir. Reject anything that is not a bare DICOM UID before it
+        # reaches the filesystem (same guard the C-STORE receiver uses).
+        study_uid = validate_uid(study_uid, what="StudyInstanceUID")
+        sop_uid = validate_uid(sop_uid, what="SOPInstanceUID")
         # A dataset arriving over the wire has NO file_meta — group 0002 is
         # file-format only and is never transmitted in DIMSE. The units tests
         # that covered this method handed it an in-memory dataset that had

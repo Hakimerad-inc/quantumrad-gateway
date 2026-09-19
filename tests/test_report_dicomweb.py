@@ -14,6 +14,7 @@ instances, WADO-RS to fetch them over HTTPS.  Behaviors:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -295,3 +296,76 @@ def test_factory_builds_from_query_source(tmp_path: Path) -> None:
     )
     assert callable(transport.find)
     assert callable(transport.retrieve)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Path-traversal guard (P0-1): the UIDs in a QIDO match are server-controlled
+# and compose the save path, so a malicious DICOMweb server can otherwise write
+# anywhere the process can. _save must reject them before touching the FS.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _empty_dataset() -> Any:
+    """A dataset the traversal tests never actually serialize.
+
+    ``_save`` must reject a malicious UID *before* it reaches ``save_as``, so
+    the payload need not be a valid, serializable DICOM object — if validation
+    works, ``save_as`` is never called.
+    """
+    from pydicom.dataset import Dataset
+
+    return Dataset()
+
+
+@pytest.mark.parametrize(
+    ("study_uid", "sop_instance_uid"),
+    [
+        ("../../etc", "1.2.3.4"),
+        ("1.2.3", "../../evil"),
+        ("1.2.3", ".."),
+        ("", "1.2.3.4"),
+        ("1.2.3", ""),
+    ],
+)
+def test_save_rejects_uids_that_escape_reports_dir(
+    tmp_path: Path, study_uid: str, sop_instance_uid: str
+) -> None:
+    """The WADO save path refuses UIDs that could traverse out of the sandbox."""
+    from mercure_gateway.reports.dicomweb import DICOMwebReportTransport
+    from mercure_gateway.reports.find import ReportMatch
+    from mercure_gateway.spool import InvalidUIDError
+
+    transport = DICOMwebReportTransport(
+        base_url="https://pacs.local:443/dicomweb", reports_dir=tmp_path
+    )
+    match = ReportMatch(
+        sop_class_uid=SR_SOP,
+        study_uid=study_uid,
+        series_uid="1.2.3.4",
+        sop_instance_uid=sop_instance_uid,
+    )
+
+    with pytest.raises(InvalidUIDError):
+        transport._save(_empty_dataset(), match)
+
+    assert not list(tmp_path.rglob("*.dcm"))
+
+
+def test_save_rejects_overlong_uid(tmp_path: Path) -> None:
+    """A UID longer than the 64-char DICOM limit is rejected, not truncated."""
+    from mercure_gateway.reports.dicomweb import DICOMwebReportTransport
+    from mercure_gateway.reports.find import ReportMatch
+    from mercure_gateway.spool import InvalidUIDError
+
+    transport = DICOMwebReportTransport(
+        base_url="https://pacs.local:443/dicomweb", reports_dir=tmp_path
+    )
+    match = ReportMatch(
+        sop_class_uid=SR_SOP,
+        study_uid="1." * 40,  # 79 chars
+        series_uid="1.2.3.4",
+        sop_instance_uid="1.2.3.4.5",
+    )
+
+    with pytest.raises(InvalidUIDError):
+        transport._save(_empty_dataset(), match)

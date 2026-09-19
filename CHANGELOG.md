@@ -15,6 +15,15 @@ recovery.
 
 ### Security
 
+- **Report save paths validate their UIDs (P0-1).** `reports/move.py` and
+  `reports/dicomweb.py` compose `reports/{study}/{sr|pdf}/{sop}.dcm` from UIDs
+  that arrive in the PACS's C-FIND or QIDO-RS response, and composed the output
+  path unchecked — a malicious or merely malformed server could write a file
+  anywhere the process could (CVSS 9.8). Both `_save` paths now run those UIDs
+  through the same `validate_uid` the C-STORE receiver uses, before anything
+  reaches the filesystem. The finding's other three Sprint-1 companions (P0-8,
+  P0-11, P0-2) were already landed on this branch by the work below; P0-1 had no
+  owner and is the last of the twelve.
 - **Config schema is now enforced (P0-4).** Unknown keys are rejected. An
   on-disk file carrying them is *self-healed* on boot: the offending keys are
   pruned, logged, and the original is preserved as

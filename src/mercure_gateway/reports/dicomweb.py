@@ -24,6 +24,7 @@ import requests
 from mercure_gateway.config import ReportQuerySource
 from mercure_gateway.reports.find import PDF_SOP_CLASS, SR_SOP_CLASS, ReportMatch
 from mercure_gateway.reports.move import RetrievedReport
+from mercure_gateway.spool import validate_uid
 
 __all__ = ["DICOMwebError", "DICOMwebReportTransport", "build_dicomweb_transport"]
 
@@ -176,10 +177,16 @@ class DICOMwebReportTransport:
 
     def _save(self, ds: Any, match: ReportMatch) -> Path:
         """Persist *ds* under ``reports/{study_uid}/{sr|pdf}/{sop_uid}.dcm``."""
+        # P0-1: the UIDs arrive from the DICOMweb server's JSON and compose the
+        # output path, so a malicious or malformed server can write outside
+        # reports_dir. Reject anything that is not a bare DICOM UID before it
+        # reaches the filesystem (same guard the C-STORE receiver uses).
+        study_uid = validate_uid(match.study_uid, what="StudyInstanceUID")
+        sop_instance_uid = validate_uid(match.sop_instance_uid, what="SOPInstanceUID")
         sub = "sr" if match.sop_class_uid == SR_SOP_CLASS else "pdf"
-        out_dir = self._reports_dir / match.study_uid / sub
+        out_dir = self._reports_dir / study_uid / sub
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{match.sop_instance_uid}.dcm"
+        path = out_dir / f"{sop_instance_uid}.dcm"
         ds.save_as(str(path), enforce_file_format=True)
         return path
 

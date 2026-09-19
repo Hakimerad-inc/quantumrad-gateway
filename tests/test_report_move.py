@@ -178,3 +178,62 @@ def test_configured_timeout_is_honoured(tmp_path) -> None:
         timeout=90.0,
     )
     assert retrieve.timeout == 90.0
+
+
+# ── Path-traversal guard (review P0-1) ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("study_uid", "sop_uid"),
+    [
+        # A PACS that answers a C-FIND with these would otherwise write the
+        # report outside reports_dir (P0-1, CVSS 9.8).
+        ("../../etc", "1.2.3"),
+        ("1.2.3", "../../evil"),
+        ("1.2.3", ".."),
+        ("", "1.2.3"),
+        ("1.2.3", ""),
+    ],
+)
+def test_save_rejects_uids_that_escape_reports_dir(
+    tmp_path: Path, study_uid: str, sop_uid: str
+) -> None:
+    """The C-MOVE save path refuses UIDs that could traverse out of the sandbox."""
+    from mercure_gateway.reports.move import ReportRetrieve
+    from mercure_gateway.spool import InvalidUIDError
+
+    ds = _make_instance("1.2.3", SR_SOP_CLASS, "1.2.3.4")
+    retrieve = ReportRetrieve(
+        host="127.0.0.1",
+        port=free_port(),
+        aet="PACS",
+        store_scp_port=free_port(),
+        store_scp_ae_title="GATEWAY",
+        reports_dir=tmp_path / "reports",
+    )
+
+    with pytest.raises(InvalidUIDError):
+        retrieve._save(ds, study_uid, SR_SOP_CLASS, sop_uid)
+
+    # Nothing was written anywhere under the sandbox root.
+    assert not (tmp_path / "reports").exists() or not list((tmp_path / "reports").rglob("*.dcm"))
+
+
+def test_save_rejects_overlong_uid(tmp_path: Path) -> None:
+    """A UID longer than the 64-char DICOM limit is rejected, not truncated."""
+    from mercure_gateway.reports.move import ReportRetrieve
+    from mercure_gateway.spool import InvalidUIDError
+
+    long_uid = "1." * 40  # 79 chars
+    ds = _make_instance("1.2.3", SR_SOP_CLASS, "1.2.3.4")
+    retrieve = ReportRetrieve(
+        host="127.0.0.1",
+        port=free_port(),
+        aet="PACS",
+        store_scp_port=free_port(),
+        store_scp_ae_title="GATEWAY",
+        reports_dir=tmp_path / "reports",
+    )
+
+    with pytest.raises(InvalidUIDError):
+        retrieve._save(ds, long_uid, SR_SOP_CLASS, "1.2.3.4")

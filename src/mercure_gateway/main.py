@@ -442,6 +442,61 @@ def _wire_head_anchorer(config: GatewayConfig, audit: Any) -> Any:
     return None
 
 
+def _start_anchor_verification(config: GatewayConfig, audit: Any) -> Any:
+    """Re-verify hub-signed audit anchors on a timer (review P0-10).
+
+    Returns the started :class:`~mercure_gateway.audit.anchoring.AnchorVerifier`
+    so the caller can ``stop()`` it at shutdown, or ``None`` when anchoring is
+    unsigned — without the hub's public key there is nothing to verify, and
+    chain *integrity* is already covered by ``/api/audit/verify``.
+
+    A verification failure is recorded as an audit event as well as logged: on
+    an unmanned box the event is what carries the finding to the hub, and a
+    tampered audit log cannot suppress the copy that already shipped.
+    """
+    hub = config.audit.hub_reporting
+    if not (hub.enabled and hub.bookkeeper_url and hub.anchor_public_key):
+        return None
+    from mercure_gateway.audit.anchoring import AnchorVerifier
+
+    def _on_failure(result: object) -> None:
+        errors = getattr(result, "errors", ())
+        logger.error(
+            "audit anchor verification FAILED: %d invalid signature line(s): %s",
+            len(errors),
+            "; ".join(
+                f"line {getattr(e, 'line_no', '?')}: {getattr(e, 'reason', '?')}"
+                for e in list(errors)[:5]
+            )
+            or "see the anchor file",
+        )
+        try:
+            audit.append(
+                "AUDIT_ANCHOR_FAILED",
+                detail={
+                    "errors": [
+                        {"line": getattr(e, "line_no", None), "reason": getattr(e, "reason", "")}
+                        for e in list(errors)[:10]
+                    ]
+                },
+            )
+        except Exception:  # noqa: BLE001 — a reporting failure must not hide the finding
+            logger.warning("could not record the AUDIT_ANCHOR_FAILED audit event")
+
+    verifier = AnchorVerifier(
+        _signed_anchor_path(config),
+        hub.anchor_public_key,
+        on_failure=_on_failure,
+    )
+    verifier.start()
+    logger.info(
+        "audit anchor verification scheduled every %.0fs against %s",
+        verifier.interval_sec,
+        _signed_anchor_path(config),
+    )
+    return verifier
+
+
 def _check_for_updates(config: GatewayConfig) -> None:
     """Run the signed-update check at startup (ADR-0006, review H2 followup).
 
@@ -512,20 +567,25 @@ def _start_hub_reporting(
     if not hub.api_key:
         logger.warning("audit.hub_reporting enabled but api_key is empty — hub reporting stays off")
         return None, None
+    # The status dict is handed to the streamer so the worker keeps "streaming"
+    # true to worker liveness, instead of the panel reading a boot-time
+    # snapshot that stays true while the bookkeeper has been down since start
+    # (review P0-10).
+    hub_status: dict[str, Any] = {
+        "registered": False,
+        "registering": True,
+        "streaming": False,
+        "bookkeeper_url": hub.bookkeeper_url,
+    }
     streamer = HubEventStreamer(
         hub.bookkeeper_url,
         hub.api_key,
         config.general.appliance_name,
         database=database,
+        status_dict=hub_status,
     )
     streamer.start()
     audit.set_sink(lambda event, detail, _user: streamer.feed(event, detail))
-    hub_status: dict[str, Any] = {
-        "registered": False,
-        "registering": True,
-        "streaming": streamer.is_running,
-        "bookkeeper_url": hub.bookkeeper_url,
-    }
     client = HubClient(
         hub.bookkeeper_url,
         hub.api_key,
@@ -548,6 +608,8 @@ def _run_web_admin(
     config_path: Path | None = None,
     hub_status: dict[str, Any] | None = None,
     disk_monitor: Any = None,
+    hub_streamer: Any = None,
+    anchor_verifier: Any = None,
 ) -> None:
     """Start the FastAPI web admin panel (blocking)."""
     import uvicorn
@@ -559,6 +621,11 @@ def _run_web_admin(
     app.state.forwarder = forwarder
     app.state.report_retriever = report_retriever
     app.state.hub_status = hub_status
+    # P0-10: the live streamer, so the metrics route reports delivery depth and
+    # failure counters instead of a boot-time "streaming=True" that a
+    # permanently-down bookkeeper never clears.
+    app.state.hub_streamer = hub_streamer
+    app.state.anchor_verifier = anchor_verifier
     # Destination health monitor (pipeline view): daemon thread, stopped when
     # uvicorn exits the blocking call below.
     from mercure_gateway.web.pipeline import DestinationHealthMonitor
@@ -655,6 +722,11 @@ def main(argv: list[str] | None = None) -> int:
     # bookkeeper holds a signing key (hub_reporting.anchor_public_key set),
     # the anchorer additionally obtains an Ed25519 signature per head.
     head_anchorer = _wire_head_anchorer(config, audit)
+
+    # P0-10: re-verify the hub's signatures over those anchors on a timer. The
+    # check had no production caller, so a rewritten audit chain was
+    # undetectable without an operator remembering to look.
+    anchor_verifier = _start_anchor_verification(config, audit)
 
     # Hub reporting (S08): streams every audit event to the bookkeeper and
     # registers the gateway in the background — boot never blocks on the hub.
@@ -760,6 +832,8 @@ def main(argv: list[str] | None = None) -> int:
                     config_path=args.config,
                     hub_status=hub_status,
                     disk_monitor=disk_monitor,
+                    hub_streamer=hub_streamer,
+                    anchor_verifier=anchor_verifier,
                 )
             except KeyboardInterrupt:
                 print("\nShutting down web admin...")
@@ -785,6 +859,8 @@ def main(argv: list[str] | None = None) -> int:
         if head_anchorer is not None:
             head_anchorer.flush(timeout=5.0)
             head_anchorer.stop()
+        if anchor_verifier is not None:
+            anchor_verifier.stop()
         spool.stop()
         # Graceful shutdown marker: its presence lets the next boot skip the
         # recovery scan (a crash/power-loss leaves no marker → scan runs).

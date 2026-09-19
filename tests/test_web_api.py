@@ -16,6 +16,7 @@ Endpoints tested (§7):
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -1228,3 +1229,80 @@ def test_put_config_accepts_a_pbkdf2_hash(client: TestClient) -> None:
     assert r.status_code == 200
     client.cookies.clear()
     assert client.post("/api/login", json={"password": "s3cret"}).status_code == 200
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Hub delivery observability (review P0-10): a bookkeeper that has been
+# down since boot must not read "streaming: healthy" to a scraper.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _wait_until(predicate: object, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():  # type: ignore[operator]
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"condition not met within {timeout}s")
+
+
+def test_metrics_hub_delivery_series_absent_when_hub_is_off(client: TestClient) -> None:
+    """No streamer wired -> the series still exist as zeros (never missing)."""
+    body = client.get("/api/system/metrics").text
+    assert "mercure_gateway_hub_outbox_depth 0" in body
+    assert "mercure_gateway_hub_delivering 0" in body
+    assert "mercure_gateway_hub_delivered_total 0" in body
+    assert "mercure_gateway_hub_delivery_failures_total 0" in body
+    assert "mercure_gateway_hub_events_evicted_total 0" in body
+    # Unsigned anchoring: nothing to verify is not a failure.
+    assert "mercure_gateway_audit_anchor_ok 1" in body
+    assert "mercure_gateway_audit_anchor_errors_total 0" in body
+
+
+def test_metrics_expose_a_bookkeeper_down_since_boot(app, client: TestClient) -> None:
+    """The P0-10 failure mode, made visible instead of latent.
+
+    ``hub_streaming`` reads healthy here (the worker thread is alive, retrying)
+    — outbox depth and the failure counter are what an unmanned box alerts on.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from mercure_gateway.hub_events import HubEventStreamer
+
+    failing = MagicMock()
+    failing.ok = False
+    failing.status_code = 401
+    with patch("requests.post", return_value=failing):
+        streamer = HubEventStreamer(
+            "https://hub.example", "key", "GW", max_batch_size=2
+        )
+        app.state.hub_streamer = streamer
+        streamer.start()
+        for _ in range(3):
+            streamer.feed("STUDY_RECEIVED", {"study_uid": "1.2.3.4"})
+        _wait_until(lambda: streamer.delivery_failures_total >= 3)
+        streamer.stop()  # deterministic: not mid-POST, counters preserved
+
+        body = client.get("/api/system/metrics").text
+
+    assert "mercure_gateway_hub_outbox_depth 3" in body
+    assert "mercure_gateway_hub_delivered_total 0" in body
+    assert streamer.delivery_failures_total >= 3
+    assert f"mercure_gateway_hub_delivery_failures_total {streamer.delivery_failures_total}" in body
+    assert "mercure_gateway_hub_delivering 0" in body
+
+
+def test_metrics_expose_anchor_verification_failure(app, client: TestClient) -> None:
+    """A rewritten audit chain surfaces as anchor_ok 0 in the scrape feed."""
+    from mercure_gateway.audit.anchoring import AnchorError, AnchorVerification
+
+    class _Verifier:
+        last_result = AnchorVerification(
+            ok=False, errors=(AnchorError(1, "signature does not verify"),)
+        )
+        failures_total = 1
+
+    app.state.anchor_verifier = _Verifier()  # type: ignore[assignment]
+    body = client.get("/api/system/metrics").text
+    assert "mercure_gateway_audit_anchor_ok 0" in body
+    assert "mercure_gateway_audit_anchor_errors_total 1" in body

@@ -65,6 +65,13 @@ class HubEventStreamer:
     ``hub_outbox`` table before being queued; delivered rows are deleted,
     failed rows keep their attempt counter, and pending rows are resumed on
     ``start()``.
+
+    Observability (review P0-10): the worker also publishes counters — events
+    delivered, delivery attempts that failed, events evicted from the bounded
+    queue — plus an in-flight flag.  Without them the only signal the panel
+    exposes is ``is_running``, which is *thread liveness*: it stays true while
+    the bookkeeper has been unreachable since boot, so a down hub looks
+    healthy to the only thing watching an unmanned box (the scraper).
     """
 
     def __init__(
@@ -77,6 +84,7 @@ class HubEventStreamer:
         max_queue_size: int = _DEFAULT_MAX_QUEUE,
         max_batch_size: int = _DEFAULT_MAX_BATCH,
         database: Database | None = None,
+        status_dict: dict[str, Any] | None = None,
     ) -> None:
         self._url = bookkeeper_url.rstrip("/")
         self._api_key = api_key
@@ -92,12 +100,23 @@ class HubEventStreamer:
         # those instead of a fixed constant below the queue bound.
         self._outbox_cap = max_queue_size + max_batch_size
         self._database = database
+        # The status dict the composition root hands the web panel; the worker
+        # keeps its "streaming" entry honest instead of leaving a boot-time
+        # snapshot that reads true forever (review P0-10).
+        self._status_dict = status_dict
         self._deque: deque[_Entry] = deque()
         self._inflight = 0
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
+        # Observability counters (review P0-10). Guarded by self._lock like
+        # the deque itself: the scraper reads them off the web thread while
+        # the worker mutates them.
+        self._delivered_total = 0
+        self._delivery_failures_total = 0
+        self._evicted_total = 0
+        self._delivering = False
 
     @property
     def queue_size(self) -> int:
@@ -107,8 +126,47 @@ class HubEventStreamer:
 
     @property
     def is_running(self) -> bool:
-        """True while the background delivery worker is active."""
+        """True while the background delivery worker thread is alive.
+
+        This is **thread liveness, not delivery health** — it stays true while
+        the bookkeeper has been unreachable since boot. Read
+        :attr:`is_delivering` and the failure counters for health.
+        """
         return self._running
+
+    @property
+    def is_delivering(self) -> bool:
+        """True while a batch POST to the bookkeeper is actually in flight."""
+        with self._lock:
+            return self._delivering
+
+    @property
+    def delivered_total(self) -> int:
+        """Audit events successfully delivered to the hub since process start."""
+        with self._lock:
+            return self._delivered_total
+
+    @property
+    def delivery_failures_total(self) -> int:
+        """Audit events whose delivery attempt failed (requeued or evicted).
+
+        Counted per *event*, not per batch: a 100-event batch that the
+        bookkeeper rejects is 100 failures against the event rate the gauge is
+        compared with.
+        """
+        with self._lock:
+            return self._delivery_failures_total
+
+    @property
+    def events_evicted_total(self) -> int:
+        """Events dropped from the bounded queue (overflow at feed or requeue)."""
+        with self._lock:
+            return self._evicted_total
+
+    def _publish_status(self) -> None:
+        """Reflect worker liveness into the panel's status dict."""
+        if self._status_dict is not None:
+            self._status_dict["streaming"] = self._running
 
     def start(self) -> None:
         """Start the background delivery worker (idempotent)."""
@@ -116,6 +174,7 @@ class HubEventStreamer:
             return
         self._resume_pending()
         self._running = True
+        self._publish_status()
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._worker, daemon=True, name="hub-event-streamer"
@@ -126,6 +185,7 @@ class HubEventStreamer:
     def stop(self, *, join_timeout: float = 5.0) -> None:
         """Stop the worker; pending events stay queued and (durable) on disk."""
         self._running = False
+        self._publish_status()
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=join_timeout)
@@ -169,6 +229,7 @@ class HubEventStreamer:
             evict_id: int | None = None
             if len(self._deque) >= self._max_queue:
                 evict_id = self._deque.popleft()[0]
+                self._evicted_total += 1
             self._deque.append((row_id, payload))
         if evict_id is not None and self._database is not None:
             try:
@@ -217,6 +278,7 @@ class HubEventStreamer:
                 dropped_ids: list[int | None] = [
                     self._deque.popleft()[0] for _ in range(overflow)
                 ]
+                self._evicted_total += len(dropped_ids)
                 logger.warning(
                     "outbox held %d pending events over the %d memory bound; "
                     "%d oldest dropped from the resume set",
@@ -235,6 +297,7 @@ class HubEventStreamer:
         """Drop durable rows for a successfully delivered batch."""
         with self._lock:
             self._inflight -= len(batch)
+            self._delivered_total += len(batch)
         ids = [row_id for row_id, _ in batch if row_id is not None]
         if not self._database or not ids:
             return
@@ -289,6 +352,7 @@ class HubEventStreamer:
                 if len(self._deque) >= self._max_queue:
                     dropped.append(self._deque.pop())
                 self._deque.appendleft((row_id, payload))
+            self._evicted_total += len(dropped)
         return dropped
 
     def _worker(self) -> None:
@@ -298,6 +362,12 @@ class HubEventStreamer:
             if not batch:
                 self._stop_event.wait(_POLL_SEC)
                 continue
+            # The in-flight flag is the difference between "the worker thread
+            # exists" and "a delivery is happening" — the scraper's signal that
+            # a permanently-unreachable bookkeeper is being *attempted*, not
+            # silently abandoned (review P0-10).
+            with self._lock:
+                self._delivering = True
             try:
                 resp = requests.post(
                     f"{self._url}/events",
@@ -317,6 +387,8 @@ class HubEventStreamer:
                     "hub event delivery failed (%s); %d event(s) requeued",
                     exc, len(batch),
                 )
+                with self._lock:
+                    self._delivery_failures_total += len(batch)
                 dropped = self._requeue_head(batch)
                 self._mark_failed(batch, exc)
                 self._prune(dropped)
@@ -325,3 +397,6 @@ class HubEventStreamer:
             else:
                 self._on_delivered(batch)
                 backoff = _BASE_BACKOFF_SEC
+            finally:
+                with self._lock:
+                    self._delivering = False

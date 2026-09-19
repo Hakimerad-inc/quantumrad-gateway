@@ -77,6 +77,9 @@ __all__ = [
     "AuditEvent",
     "ChainError",
     "anchor_head_to_file",
+    "AnchorError",
+    "AnchorVerification",
+    "AnchorVerifier",
     "SignedHeadAnchorer",
     "verify_anchor_signatures",
 ]
@@ -474,6 +477,9 @@ _LEGACY_LOCK = threading.Lock()
 # it from the package root must happen after this module defines it. Kept at
 # the bottom to avoid a circular import (anchoring imports from here).
 from mercure_gateway.audit.anchoring import (  # noqa: E402
+    AnchorError,
+    AnchorVerification,
+    AnchorVerifier,
     SignedHeadAnchorer,
     verify_anchor_signatures,
 )

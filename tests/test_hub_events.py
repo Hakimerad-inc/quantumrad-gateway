@@ -13,11 +13,22 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mercure_gateway.hub_events import HubEventStreamer
+
+
+def _wait_until(predicate: object, timeout: float = 5.0) -> None:
+    """Spin until *predicate* is true — the worker runs on its own thread."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():  # type: ignore[operator]
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"condition not met within {timeout}s")
 
 
 @pytest.fixture()
@@ -184,3 +195,103 @@ def test_concurrent_feed_does_not_crash(streamer: HubEventStreamer) -> None:
 
     streamer.stop()
     assert not errors, f"concurrent feed raised: {errors}"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Observability (review P0-10): a down bookkeeper must be *visible*
+# ══════════════════════════════════════════════════════════════════════
+
+
+@patch("requests.post")
+def test_counters_reflect_a_permanently_down_bookkeeper(mock_post: MagicMock) -> None:
+    """A bookkeeper that 401s forever raises failure/depth counters, not an error.
+
+    ``is_running`` alone reports healthy here — it is thread liveness, and the
+    worker thread is very much alive while it retries a hub that never answers.
+    The counters are what an unmanned box's scraper has to alert on.
+    """
+    resp = MagicMock()
+    resp.ok = False
+    resp.status_code = 401
+    resp.raise_for_status = MagicMock()
+    mock_post.return_value = resp
+
+    streamer = HubEventStreamer(
+        bookkeeper_url="https://hub.example.com",
+        api_key="test-key",
+        gateway_name="Gateway-A",
+        max_batch_size=5,
+    )
+    status: dict[str, Any] = {}
+    streamer._status_dict = status  # noqa: SLF001 — simulate the composition root's wiring
+    streamer.start()
+
+    for _ in range(4):
+        streamer.feed("STUDY_RECEIVED", {"study_uid": "1.2.3.4"})
+
+    _wait_until(lambda: streamer.delivery_failures_total >= 4, timeout=5.0)
+
+    assert streamer.delivery_failures_total >= 4
+    assert streamer.queue_size > 0, "events must stay queued while the hub is down"
+    assert streamer.delivered_total == 0
+    # is_running is the misleading signal here: the worker is very much alive
+    # while it retries a hub that never answers. The counters are the finding.
+    assert streamer.is_running is True
+    streamer.stop()
+
+
+def test_counters_reflect_a_healthy_bookkeeper() -> None:
+    """Delivered events are counted, and failures stay at zero."""
+    resp = MagicMock()
+    resp.ok = True
+    resp.status_code = 200
+    with patch("requests.post", return_value=resp):
+        streamer = HubEventStreamer(
+            bookkeeper_url="https://hub.example.com",
+            api_key="test-key",
+            gateway_name="Gateway-A",
+        )
+        streamer.start()
+        for _ in range(3):
+            streamer.feed("STUDY_RECEIVED", {"study_uid": "1.2.3.4"})
+        streamer.flush(timeout=2.0)
+        streamer.stop()
+
+    assert streamer.delivered_total == 3
+    assert streamer.delivery_failures_total == 0
+    assert streamer.events_evicted_total == 0
+    assert streamer.queue_size == 0
+
+
+def test_evictions_are_counted_when_the_queue_overflows() -> None:
+    """Overflow drops are visible — a silently dropping queue is a data loss."""
+    streamer = HubEventStreamer(
+        bookkeeper_url="https://hub.example.com",
+        api_key="test-key",
+        gateway_name="Gateway-A",
+        max_queue_size=3,
+    )
+    streamer.start()  # no requests.post patch -> delivery fails, backlog grows
+    try:
+        for _ in range(10):
+            streamer.feed("STUDY_RECEIVED", {"study_uid": "1.2.3.4"})
+        # The bounded deque dropped 7 of the 10 events.
+        assert streamer.events_evicted_total >= 7
+    finally:
+        streamer.stop()
+
+
+def test_status_dict_tracks_worker_lifecycle() -> None:
+    """'streaming' follows the worker, not a boot-time snapshot."""
+    status: dict[str, Any] = {"streaming": False}
+    streamer = HubEventStreamer(
+        bookkeeper_url="https://hub.example.com",
+        api_key="test-key",
+        gateway_name="Gateway-A",
+        status_dict=status,
+    )
+    assert status["streaming"] is False
+    streamer.start()
+    assert status["streaming"] is True
+    streamer.stop()
+    assert status["streaming"] is False

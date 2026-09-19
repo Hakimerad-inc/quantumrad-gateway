@@ -421,6 +421,85 @@ def system_metrics(request: Request) -> Response:
     )
     gauge("mercure_gateway_hub_streaming", "1 while audit events stream to the hub.", hub_streaming)
 
+    # Hub delivery health (review P0-10). hub_streaming above mirrors a
+    # boot-time status dict whose "streaming" entry is worker-thread
+    # liveness — true forever even when the bookkeeper has been unreachable
+    # since startup, so a down hub read healthy to the only thing watching an
+    # unmanned box. The streamer itself is the live source: queue depth, an
+    # in-flight flag driven by the delivery worker, and failure/eviction
+    # counters. Emitted as zeros when hub reporting is off so the series
+    # always exists — a missing gauge is indistinguishable from a healthy one.
+    hub_streamer = getattr(request.app.state, "hub_streamer", None)
+    hub_outbox_depth = 0
+    hub_delivering = 0
+    hub_delivered = 0
+    hub_failures = 0
+    hub_evicted = 0
+    if hub_streamer is not None:
+        hub_outbox_depth = hub_streamer.queue_size
+        hub_delivering = 1 if hub_streamer.is_delivering else 0
+        hub_delivered = hub_streamer.delivered_total
+        hub_failures = hub_streamer.delivery_failures_total
+        hub_evicted = hub_streamer.events_evicted_total
+    gauge(
+        "mercure_gateway_hub_outbox_depth",
+        "Audit events queued for hub delivery (queued + in flight).",
+        hub_outbox_depth,
+    )
+    gauge(
+        "mercure_gateway_hub_delivering",
+        "1 while a batch POST to the bookkeeper is in flight — distinguishes "
+        "an attempted delivery from an abandoned worker.",
+        hub_delivering,
+    )
+    gauge(
+        "mercure_gateway_hub_delivered_total",
+        "Audit events successfully delivered to the hub since process start.",
+        hub_delivered,
+        kind="counter",
+    )
+    gauge(
+        "mercure_gateway_hub_delivery_failures_total",
+        "Audit event delivery attempts that failed and were requeued or "
+        "evicted. Rising while outbox_depth stays nonzero = the bookkeeper is "
+        "not keeping up (or is down).",
+        hub_failures,
+        kind="counter",
+    )
+    gauge(
+        "mercure_gateway_hub_events_evicted_total",
+        "Audit events dropped from the bounded delivery queue.",
+        hub_evicted,
+        kind="counter",
+    )
+
+    # Hub-signed audit anchors, verified on a timer (review P0-10). The
+    # verifier holds the *last* pass — this is a cheap field read, never an
+    # on-demand verification (see the AuditLog.verify() note above). Absent
+    # verifier = unsigned anchoring, where chain integrity is covered by
+    # /api/audit/verify; report ok=1 rather than a misleading zero.
+    anchor_verifier = getattr(request.app.state, "anchor_verifier", None)
+    anchor_ok = 1
+    anchor_errors = 0
+    if anchor_verifier is not None:
+        last = anchor_verifier.last_result
+        anchor_ok = 1 if last is None or last.ok else 0
+        anchor_errors = anchor_verifier.failures_total
+    gauge(
+        "mercure_gateway_audit_anchor_ok",
+        "1 when the last scheduled hub-signature check of the audit anchors "
+        "passed (or anchoring is unsigned). 0 = signatures that do not "
+        "verify — investigate audit tampering.",
+        anchor_ok,
+    )
+    gauge(
+        "mercure_gateway_audit_anchor_errors_total",
+        "Anchor signature lines that failed scheduled verification since "
+        "process start.",
+        anchor_errors,
+        kind="counter",
+    )
+
     # Queue depth by lifecycle state (mirrors /queue/stats via Spool.count_states).
     counts = sp.count_states()
     labeled(

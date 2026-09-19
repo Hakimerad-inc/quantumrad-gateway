@@ -8,6 +8,10 @@ private key, and the gateway stores ``{head, ts, signature}`` in a local JSONL
 file.  The gateway never holds a signing key; :func:`verify_anchor_signatures`
 re-verifies every stored signature offline against the hub's public key.
 
+That check only means something if something *runs* it: it had no production
+caller at all, so a tampered chain was undetectable unless an operator thought
+to ask.  :class:`AnchorVerifier` puts it on a timer instead (review P0-10).
+
 Isolation (US-10): like :class:`~mercure_gateway.hub_events.HubEventStreamer`,
 posting never blocks the caller — the file anchor is written synchronously
 (cheap, local) and the network round-trip happens on a bounded daemon queue
@@ -35,7 +39,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from mercure_gateway.audit import anchor_head_to_file
 from mercure_gateway.update import b64decode_strict, load_ed25519_public_key
 
-__all__ = ["AnchorError", "SignedHeadAnchorer", "verify_anchor_signatures"]
+__all__ = [
+    "AnchorError",
+    "AnchorVerification",
+    "AnchorVerifier",
+    "SignedHeadAnchorer",
+    "verify_anchor_signatures",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +53,12 @@ _BASE_BACKOFF_SEC = 0.2
 _MAX_BACKOFF_SEC = 30.0
 _DEFAULT_MAX_QUEUE = 200
 _DEFAULT_TIMEOUT_SEC = 10.0
+# Anchor verification cadence (review P0-10): often enough that a tampered
+# audit log surfaces between scrape intervals, rarely enough that a large
+# anchor file is not read constantly. The first pass is deferred so a boot
+# with a cold cache is not charged for it.
+_DEFAULT_VERIFY_INTERVAL_SEC = 300.0
+_DEFAULT_VERIFY_INITIAL_DELAY_SEC = 5.0
 
 # Post function contract: mirrors requests.post(url, json=..., headers=...,
 # timeout=...). Injectable so tests can supply a hand-written fake.
@@ -280,3 +296,120 @@ def verify_anchor_signatures(
         except Exception:  # noqa: BLE001 — any verify failure is a report line
             errors.append(AnchorError(line_no, "signature does not verify"))
     return not errors, errors
+
+
+@dataclass(frozen=True)
+class AnchorVerification:
+    """One scheduled pass of :func:`verify_anchor_signatures` (review P0-10)."""
+
+    ok: bool
+    errors: tuple[AnchorError, ...]
+    # Signature verification is a *read*: an absent file is a gateway that has
+    # appended no chain head yet, not a tampered anchor.
+    file_absent: bool = False
+
+
+class AnchorVerifier:
+    """Re-verify stored hub signatures on a timer (review P0-10).
+
+    ``verify_anchor_signatures`` had no production caller at all — the audit
+    chain's authenticity was true only when an operator thought to run the
+    CLI script or hit ``/api/audit/verify`` (which replays the *internal* chain
+    hashes and so cannot detect a whole-chain rewrite; only the hub-held
+    signatures can).  On an unmanned clinical box that means a tampered audit
+    log is invisible forever.
+
+    This puts the check on a daemon thread at a fraction of the scrape
+    interval, so the failure shows up in the metrics feed an operator is
+    already alerting on.  The work is one local file read plus one Ed25519
+    verify per line — cheap, unlike ``AuditLog.verify()``, which the metrics
+    route deliberately avoids for DoS reasons; verification belongs on a
+    timer, never in the scrape path.
+    """
+
+    def __init__(
+        self,
+        anchor_path: Path,
+        public_key: str | bytes | Ed25519PublicKey,
+        *,
+        interval_sec: float = _DEFAULT_VERIFY_INTERVAL_SEC,
+        initial_delay_sec: float = _DEFAULT_VERIFY_INITIAL_DELAY_SEC,
+        on_failure: Callable[[AnchorVerification], None] | None = None,
+    ) -> None:
+        self._path = Path(anchor_path)
+        self._public_key = public_key
+        self._interval = interval_sec
+        self._initial_delay = initial_delay_sec
+        self._on_failure = on_failure
+        self._last: AnchorVerification | None = None
+        self._failures_total = 0
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # ── results the metrics route reads (never blocks, never raises) ─────
+
+    @property
+    def last_result(self) -> AnchorVerification | None:
+        """The most recent pass; None until the first one completes."""
+        return self._last
+
+    @property
+    def failures_total(self) -> int:
+        """Anchor lines that failed verification since process start."""
+        return self._failures_total
+
+    @property
+    def interval_sec(self) -> float:
+        """The cadence the timer runs at (logged once at boot)."""
+        return self._interval
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Start the background verification timer (idempotent)."""
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._work, name="audit-anchor-verifier", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, *, join_timeout: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=join_timeout)
+            self._thread = None
+
+    def verify_now(self) -> AnchorVerification:
+        """Run one verification pass synchronously; records and reports it.
+
+        Never raises: a verifier that takes down the caller would be worse
+        than a silent anchor, and every failure mode here is a *finding*.
+        """
+        try:
+            if not self._path.exists():
+                result = AnchorVerification(ok=True, errors=(), file_absent=True)
+            else:
+                ok, errors = verify_anchor_signatures(self._path, self._public_key)
+                result = AnchorVerification(ok=ok, errors=tuple(errors))
+        except Exception:  # noqa: BLE001 — a crash here must not kill the timer
+            logger.exception("audit anchor verification failed unexpectedly")
+            result = AnchorVerification(ok=False, errors=())
+        self._last = result
+        if not result.ok:
+            self._failures_total += len(result.errors) or 1
+            if self._on_failure is not None:
+                try:
+                    self._on_failure(result)
+                except Exception:  # noqa: BLE001 — reporting must not kill the timer
+                    logger.exception("anchor failure callback raised")
+        return result
+
+    def _work(self) -> None:
+        # Let the boot settle (and the first heads land) before the first read;
+        # afterwards the interval is the cadence an operator alerts on.
+        self._stop_event.wait(self._initial_delay)
+        while not self._stop_event.is_set():
+            self.verify_now()
+            self._stop_event.wait(self._interval)

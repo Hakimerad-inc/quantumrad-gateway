@@ -186,6 +186,25 @@ study metadata (PHI-free by construction). Key series:
 `mercure_gateway_disk_usage_percent` / `_disk_total_bytes` /
 `_disk_free_bytes` / `_disk_over_threshold`.
 
+**Hub delivery health** — `_hub_streaming` is worker *liveness*: it stays 1
+while the bookkeeper has been unreachable since boot, because the worker
+thread is alive and retrying. Alert on these instead:
+
+- `mercure_gateway_hub_outbox_depth` — audit events queued for delivery
+  (queued + in flight). Nonzero and not draining means the hub is not keeping
+  up (or is down).
+- `mercure_gateway_hub_delivering` — 1 while a batch POST is actually in
+  flight; distinguishes "attempting" from "abandoned".
+- `mercure_gateway_hub_delivered_total` / `_hub_delivery_failures_total` /
+  `_hub_events_evicted_total` — counters since process start. (All zero, and
+  the depth zero, when hub reporting is off.)
+
+**Audit anchor integrity** — `mercure_gateway_audit_anchor_ok` is 1 when the
+last scheduled verification of the hub's signatures over the audit chain
+heads passed (and 1, deliberately, when anchoring is unsigned — see below). A
+0 means stored signatures no longer verify: investigate audit tampering.
+`mercure_gateway_audit_anchor_errors_total` counts the offending lines.
+
 Scrape config (loopback default; with `web_ui.auth_enabled` the job needs the
 session Bearer token from the Setup wizard credentials):
 
@@ -211,15 +230,31 @@ groups:
         for: 10m
       - alert: GatewayBacklogGrowing
         expr: increase(mercure_gateway_queue_depth{state="QUEUED"}[30m]) > 50
+      - alert: GatewayHubNotDelivering
+        # _hub_streaming stays 1 while the bookkeeper is down (the worker
+        # thread is alive and retrying) — depth + failures are the real signal.
+        expr: mercure_gateway_hub_outbox_depth > 0
+        for: 10m
+      - alert: GatewayAuditAnchorBroken
+        expr: mercure_gateway_audit_anchor_ok == 0
+        for: 5m
       - alert: GatewayScrapeDead
         expr: up{job="mercure-gateway"} == 0
         for: 5m
 ```
 
-The audit-chain integrity gauge is deliberately **not** on the scrape path —
-`/api/audit/verify` replays the whole chain per call (fine operator-triggered,
-a self-DoS at 15 s scrape intervals). Schedule it as a low-frequency external
-check (e.g. cron + `curl … /api/audit/verify | jq -e .valid`).
+Audit integrity is checked in two complementary ways:
+
+- **Anchor authenticity** (`mercure_gateway_audit_anchor_ok`) is verified on a
+  timer every 5 minutes when `audit.hub_reporting.anchor_public_key` is set.
+  Only the hub-held Ed25519 signatures can detect a *whole-chain* rewrite —
+  the internal hash replay below recomputes, so an attacker who rewrites the
+  database recomputes those too. The timer, never the scrape path, does the
+  work: each pass is one local file read plus one verify per line.
+- **Chain integrity** (`/api/audit/verify`) replays every row per call — fine
+  operator-triggered, a self-DoS at 15 s scrape intervals, so it is
+  deliberately **not** on the scrape path. Schedule it as a low-frequency
+  external check (e.g. cron + `curl … /api/audit/verify | jq -e .valid`).
 
 ## Troubleshooting
 

@@ -42,6 +42,41 @@ def test_security_headers_present(client: TestClient) -> None:
     assert "content-security-policy" in headers
 
 
+def test_csp_content(client: TestClient) -> None:
+    """The CSP's directives are the ones the product depends on (P1-11).
+
+    ``test_security_headers_present`` only checks the header *exists*; a
+    directive removed or relaxed by accident would go unnoticed.  This pins
+    the content, in particular the two that were unenforced gaps:
+
+    - ``frame-src 'self' data:`` — report PDFs render in a ``data:`` iframe;
+      without it the viewer goes blank (``default-src 'self'`` blocks data:).
+    - ``object-src 'none'`` — removes the <embed>/<object> fallback, so the
+      iframe path above is the only one and must keep working.
+    """
+    r = client.get("/api/system/health")
+    assert r.status_code == 200
+    csp = dict(r.headers)["content-security-policy"]
+
+    def directive(name: str) -> str:
+        for part in csp.split("; "):
+            if part.split(" ")[0] == name:
+                return part
+        return ""
+
+    # The load-bearing directives, asserted as full directives (not just
+    # "appears somewhere in the string" — a substring check would let
+    # ``frame-src`` be mentioned in a comment-like context and still pass).
+    assert directive("default-src") == "default-src 'self'"
+    assert directive("script-src") == "script-src 'self'"
+    assert directive("frame-src") == "frame-src 'self' data:"
+    assert directive("object-src") == "object-src 'none'"
+    assert directive("frame-ancestors") == "frame-ancestors 'none'"
+    # The deliberate relaxation — inline styles are required by React; it is
+    # pinned here so a future "tighten the CSP" change is a visible decision.
+    assert directive("style-src") == "style-src 'self' 'unsafe-inline'"
+
+
 def test_hsts_only_over_tls() -> None:
     """HSTS appears when the request arrives over https (ADR-0007)."""
     cfg = default_config()

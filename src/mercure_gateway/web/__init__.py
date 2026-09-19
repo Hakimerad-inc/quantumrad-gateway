@@ -74,6 +74,13 @@ _SECURITY_HEADERS = {
         "img-src 'self' data:; "
         "connect-src 'self'; "
         "object-src 'none'; "
+        # Report PDFs render in an iframe as a ``data:`` URL (the report
+        # viewer builds one from the fetched bytes rather than serving a
+        # navigable same-origin document).  Without an explicit ``frame-src``
+        # the iframe falls back to ``default-src 'self'``, which blocks
+        # ``data:`` — and ``object-src 'none'`` removes the <embed> fallback —
+        # so the PDF path silently renders blank.
+        "frame-src 'self' data:; "
         "base-uri 'self'; "
         "frame-ancestors 'none'"
     ),

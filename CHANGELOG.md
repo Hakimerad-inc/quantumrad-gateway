@@ -124,9 +124,13 @@ recovery.
 - `just gen-api` runs on a clean checkout, and an `api-schema-drift` CI job
   fails on an un-regenerated `api-schema.ts` (P1-9) — the drift that let the
   SPA's `fetchConfig` type itself into `Record<string, unknown>`.
-- The throughput gate keeps the fast synthetic check as the CI default (P1-7
-  — the synthetic handler still increments a counter and does no I/O; the
-  real-I/O mode behind the `integration` marker is open).
+- The throughput gate keeps the fast synthetic check as the CI default (P1-7)
+  and gains a real-I/O mode (`just perf-gates-real`, `--real-io`): the handler
+  performs a real `fsync` plus a real TCP round trip per delivery, so a
+  regression in handler cost becomes visible. The synthetic handler still
+  does no I/O and measures the queue/claim/route path only — the two are
+  labelled distinctly in the output so the synthetic number is never read as
+  a delivery measurement.
 
 ### Documentation
 
@@ -139,7 +143,6 @@ recovery.
 
 Tracked so this entry stays honest about the state of the branch:
 
-- **P1-7** — the throughput gate's real-I/O mode (see CI above).
 - **P1-11** — CSP `frame-src 'self' data:` for the PDF rendering path.
 - **P1-20** — `AbortController` through the SPA fetch layer; the three bare
   `setInterval` pollers still stack.

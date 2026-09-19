@@ -176,6 +176,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --all-extras
+      # P1-7: the CI gate stays in synthetic mode. The handler in that mode
+      # does no I/O, so this measures the forwarder's queue/claim/route path
+      # only — deliberately, because that is the part whose regression is
+      # CI-detectable. The real-I/O mode (`just perf-gates-real`) pays for an
+      # fsync plus a TCP round trip per delivery, so its floor is
+      # machine-dependent and belongs on the integration path; it is covered
+      # here by tests/test_perf_gates.py instead of this gate.
       - name: Run perf gates
         run: uv run python scripts/check_perf_gates.py
 

@@ -45,8 +45,18 @@ test-web:
     cd web && npm run test
 
 # Performance gates (§5.6, K8) — the perf-gates CI job runs this same script.
+# Synthetic mode: it measures the forwarder's queue/claim/route bookkeeping
+# only, because the handler itself does no I/O (review P1-7). Fast, and the
+# right thing to run on every push.
 perf:
     uv run python scripts/check_perf_gates.py
+
+# The same gates through a handler that performs a real fsync plus a real TCP
+# round trip on every delivery. This is the mode that can see a regression in
+# handler cost; the synthetic one cannot. It is the integration path rather
+# than the CI gate because its floor depends on the host's disk and loopback.
+perf-gates-real:
+    uv run python scripts/check_perf_gates.py --real-io
 
 # Playwright E2E against a seeded gateway. Requires the SPA build first.
 e2e: build-web

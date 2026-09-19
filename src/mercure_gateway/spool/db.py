@@ -394,6 +394,92 @@ class Database:
             )
         return _rowid(cur)
 
+    def store_received_instance(
+        self,
+        *,
+        study_uid: str,
+        series_uid: str,
+        instance_uid: str,
+        file_path: str,
+        received_syntax: str,
+        stored_syntax: str,
+        num_bytes: int,
+        accession: str | None,
+        mrn: str | None,
+        patient_name: str | None,
+        modality: str | None,
+        new_instance: bool,
+    ) -> tuple[int, bool]:
+        """Record one received instance's provenance and study row, atomically.
+
+        Review P1-18: this used to be two separate ``BEGIN IMMEDIATE`` +
+        ``synchronous=FULL`` transactions per instance — the instance_meta
+        insert and the study upsert — with the instance's fsync barrier
+        between them. Merging them removes one full barrier from the receive
+        critical section (~26% of it, measured) with no durability loss: the
+        study row still does not claim RECEIVED until the file is fsynced,
+        because the caller does that before calling here.
+
+        Behaviour change, deliberate: provenance is no longer best-effort.
+        A meta failure used to be caught-and-logged while the receive still
+        succeeded, leaving a study row with no provenance. Now the whole
+        thing rolls back and the caller returns ``0xC120`` so the modality
+        retries. The only realistic failure is DB-level (disk full, corrupt
+        page) and "study row without provenance" is worse than a retry — the
+        storage reconciler deals with the orphaned file either way.
+
+        Returns ``(study_id, new_series)``. ``new_series`` is resolved *inside*
+        the transaction: the check must precede the instance_meta insert (M11
+        — otherwise the series already "exists" and num_series never
+        advances), and doing it under the write lock also closes the race
+        where two associations storing a study's first instance each saw "no
+        series yet" and double-counted.
+        """
+        with self.transaction() as conn:
+            new_series = (
+                conn.execute(
+                    "SELECT 1 FROM instance_meta "
+                    "WHERE study_uid = ? AND series_uid = ? LIMIT 1",
+                    (study_uid, series_uid),
+                ).fetchone()
+                is None
+            )
+            conn.execute(
+                """
+                INSERT INTO instance_meta (
+                    study_uid, series_uid, instance_uid, file_path,
+                    received_syntax, stored_syntax, num_bytes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(instance_uid) DO UPDATE SET
+                    file_path       = excluded.file_path,
+                    received_syntax = excluded.received_syntax,
+                    stored_syntax   = excluded.stored_syntax,
+                    num_bytes       = excluded.num_bytes
+                """,
+                (
+                    study_uid,
+                    series_uid,
+                    instance_uid,
+                    file_path,
+                    received_syntax,
+                    stored_syntax,
+                    num_bytes,
+                ),
+            )
+            # Re-enters the lock and joins this transaction rather than
+            # opening a second one (see transaction()), so the two writes
+            # commit or roll back together.
+            study_id = self.upsert_study_instance(
+                study_uid,
+                accession,
+                mrn,
+                patient_name,
+                modality,
+                new_instance=new_instance,
+                new_series=new_series,
+            )
+        return study_id, new_series
+
     def upsert_study_instance(
         self,
         study_uid: str,
@@ -971,20 +1057,6 @@ class Database:
         params.extend([limit, offset])
         with self._lock:
             return self._conn.execute(sql, params).fetchall()
-
-    def has_series(self, study_uid: str, series_uid: str) -> bool:
-        """True when *series_uid* already has a persisted instance row.
-
-        Single source of truth for new-series detection (review M11): the
-        previous in-memory set was lost on restart, so a re-sent instance of
-        an existing series inflated ``num_series``.
-        """
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM instance_meta WHERE study_uid = ? AND series_uid = ? LIMIT 1",
-                (study_uid, series_uid),
-            ).fetchone()
-        return row is not None
 
     def spool_num_bytes(self) -> int:
         """Total bytes of persisted DICOM instances (spool-size cap, review M3).

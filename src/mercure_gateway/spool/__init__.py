@@ -334,20 +334,11 @@ class Spool:
         path = out_dir / f"{instance_uid}.dcm"
         new_instance = not path.exists()
 
-        # New-series detection must run BEFORE _apply_transfer_syntax writes
-        # this instance's instance_meta row — otherwise the series we are
-        # about to create already "exists" and num_series never advances
-        # (review M11). It consults only prior, committed rows, so a duplicate
-        # instance of a known series still resolves to False correctly.
-        new_series = self._is_new_series(study_uid, series_uid)
-
-        self._apply_transfer_syntax(
-            dataset,
-            path,
-            study_uid=study_uid,
-            series_uid=series_uid,
-            instance_uid=instance_uid,
-        )
+        # Writes the file and the .tags sidecar only — no DB rows (review
+        # P1-18). New-series detection now happens inside the transaction
+        # below, where it is both ordered correctly against the instance_meta
+        # insert (M11) and atomic with it.
+        received_syntax, stored_syntax, num_bytes = self._apply_transfer_syntax(dataset, path)
 
         # Durability barrier. The instance bytes and the directory entries that
         # name them must reach stable storage BEFORE the row below says
@@ -356,14 +347,24 @@ class Spool:
         # C-STORE has already been acknowledged (PRD §3.4, review H1).
         self._fsync_instance(path, dirs=self._dirs_to_sync(out_dir, pre_existing))
 
-        study_id = self._db.upsert_study_instance(
+        # One transaction for the provenance row and the study upsert (review
+        # P1-18): two BEGIN IMMEDIATE + synchronous=FULL commits per instance
+        # became one. A failure here rolls both back and propagates, so the
+        # receiver returns 0xC120 and the modality retries rather than a study
+        # row landing without provenance.
+        study_id, _new_series = self._db.store_received_instance(
             study_uid=study_uid,
+            series_uid=series_uid,
+            instance_uid=instance_uid,
+            file_path=str(path),
+            received_syntax=received_syntax,
+            stored_syntax=stored_syntax,
+            num_bytes=num_bytes,
             accession=_tag(dataset, "AccessionNumber"),
             mrn=_tag(dataset, "PatientID"),
             patient_name=_tag(dataset, "PatientName"),
             modality=_tag(dataset, "Modality"),
             new_instance=new_instance,
-            new_series=new_series,
         )
         if new_instance:
             # A genuinely NEW instance re-opens the study (the upsert demoted
@@ -496,17 +497,6 @@ class Spool:
             # study stays RECEIVED and can be re-forwarded from the console.
             logger.exception("auto-enqueue failed for study %d", study_id)
 
-    def _is_new_series(self, study_uid: str, series_uid: str) -> bool:
-        """True the first time this series is persisted for *study_uid*.
-
-        Derived from ``instance_meta`` (review M11): the previous in-memory
-        set was lost on every restart, so a re-sent instance of an existing
-        series counted as a new series and inflated ``num_series``. The DB
-        query is a one-row indexed lookup on the receive hot path and is the
-        same data the storage reconciler already trusts.
-        """
-        return not self._db.has_series(study_uid, series_uid)
-
     # Syntaxes decompressed on receive when ``receiver.decompress_common``
     # is set (refinement §2.1: "common" = JPEG 2000 lossless, JPEG-LS, RLE,
     # JPEG lossless SV1). Rare/proprietary syntaxes are stored as-is.
@@ -521,13 +511,19 @@ class Spool:
     )
 
     def _apply_transfer_syntax(
-        self, dataset: Any, path: Path, *, study_uid: str, series_uid: str, instance_uid: str
-    ) -> None:
+        self, dataset: Any, path: Path
+    ) -> tuple[str, str, int]:
         """Persist *dataset* to *path*, honoring the decompression policy.
 
         Keeps the ORIGINAL transfer syntax in a private provenance element
         (creator ``mercure-gateway``) when the stored bytes differ from what
         was received — decompression must not lose provenance (S02-T3).
+
+        Returns ``(received_syntax, stored_syntax, num_bytes)`` — the
+        provenance facts the caller records in one transaction with the study
+        row (review P1-18). This method is now pure file I/O: it writes no
+        database rows, so a DB failure cannot leave the file on disk with a
+        half-recorded study.
         """
         from pydicom.dataset import FileMetaDataset
 
@@ -566,21 +562,7 @@ class Spool:
 
         write_tags_file(dataset, path)
 
-        # Per-instance provenance row (v3 schema, S02-T3): original vs stored
-        # transfer syntax and sidecar presence for the storage reconciler.
-        try:
-            self._db.insert_instance_meta(
-                study_uid=study_uid,
-                series_uid=series_uid,
-                instance_uid=instance_uid,
-                file_path=str(path),
-                received_syntax=received_syntax,
-                stored_syntax=stored_syntax,
-                num_bytes=path.stat().st_size,
-            )
-        except Exception:
-            # Provenance is best-effort; the instance itself is stored.
-            logger.exception("failed to record instance_meta for %s", instance_uid)
+        return received_syntax, stored_syntax, path.stat().st_size
 
     def enqueue(self, study_id: int, targets: list[Destination]) -> None:
         """Schedule a study for delivery to ``targets``.

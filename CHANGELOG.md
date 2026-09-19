@@ -106,14 +106,22 @@ recovery.
 
 ### Performance
 
-- **One fsync commit per received instance (P1-18)** instead of two — ~26% of
-  the receive critical section, with no durability loss. Provenance becomes
-  transactional rather than best-effort: a metadata failure rejects the
-  instance (`0xC120`) so the modality retries, rather than leaving a study row
-  with no provenance.
-- **Reads off the write connection (P1-19).** Pure-SELECT list methods move to
-  a per-thread read-only connection, so the web UI and the report poller no
-  longer take the receiver's write lock.
+- **One commit per received instance (P1-18)** instead of two — the provenance
+  row and the study upsert used to be separate `BEGIN IMMEDIATE` +
+  `synchronous=FULL` transactions with the instance's fsync barrier between
+  them; ~26% of the receive critical section, removed with no durability loss
+  (the study row still cannot say RECEIVED before the file is fsynced). New-
+  series detection moves *inside* the transaction, which closes a real race
+  the old out-of-transaction read had: two associations storing a series's
+  first instances could each see "no series yet" and double-count
+  `num_series`. Provenance becomes transactional rather than best-effort — a
+  metadata failure now rolls both writes back and rejects the instance
+  (`0xC120`) so the modality retries, instead of leaving a study row with no
+  provenance; the orphaned file is reconciled as before.
+- **Reads off the write connection (P1-19)** — designed, not yet implemented.
+  Pure-SELECT list methods would move to a per-thread read-only connection,
+  so the web UI and the report poller no longer take the receiver's write
+  lock.
 
 ### CI
 
@@ -146,8 +154,7 @@ Tracked so this entry stays honest about the state of the branch:
 - **P1-11** — CSP `frame-src 'self' data:` for the PDF rendering path.
 - **P1-20** — `AbortController` through the SPA fetch layer; the three bare
   `setInterval` pollers still stack.
-- **P1-18 / P1-19** — the two database changes above are designed, not yet
-  implemented.
+- **P1-19** — the read-connection change above.
 - **P1-22** — six documents still describe an auth-enabling path that does not
   exist (the PBKDF2 CLI/endpoint surfaces replaced it).
 

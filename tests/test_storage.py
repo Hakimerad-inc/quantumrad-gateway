@@ -13,8 +13,10 @@ Behaviors (PRD §3.4-1, §5.2-2, refinement §2.1):
 
 from __future__ import annotations
 
+import sqlite3
 import struct
 import sys
+import threading
 from pathlib import Path
 
 import pydicom
@@ -71,10 +73,15 @@ def rle_pixel_data(width: int = 8, height: int = 8) -> bytes:
     return header + segment
 
 
-def make_spool(tmp_path: Path, *, decompress_common: bool = True) -> Spool:
+def make_spool(
+    tmp_path: Path, *, decompress_common: bool = True, auto_enqueue_delay_sec: float = 5.0
+) -> Spool:
     cfg = default_config()
     cfg.storage.spool_dir = str(tmp_path / "spool")
     cfg.receiver.decompress_common = decompress_common
+    # A long delay keeps the auto-enqueue timer from firing mid-test and
+    # touching the study row after the assertions have read it.
+    cfg.receiver.auto_enqueue_delay_sec = auto_enqueue_delay_sec
     return Spool(mem_database(), cfg)
 
 
@@ -245,18 +252,20 @@ class TestStoreBeforeAcknowledgeDurability:
         events: list[str] = []
 
         real_fsync = spool._fsync_instance
-        real_upsert = spool._db.upsert_study_instance
+        real_store = spool._db.store_received_instance
 
         def fsync_spy(path: Path, *, dirs: list[Path]) -> None:
             events.append("fsync")
             real_fsync(path, dirs=dirs)
 
-        def upsert_spy(**kwargs: object) -> int:
+        def store_spy(**kwargs: object) -> tuple[int, bool]:
             events.append("commit")
-            return real_upsert(**kwargs)  # type: ignore[arg-type]
+            return real_store(**kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(spool, "_fsync_instance", fsync_spy)
-        monkeypatch.setattr(spool._db, "upsert_study_instance", upsert_spy)
+        # P1-18: the write boundary is now one transaction, not two. The
+        # barrier still has to fire before any of it commits.
+        monkeypatch.setattr(spool._db, "store_received_instance", store_spy)
 
         spool.store_instance(make_dataset())
 
@@ -315,8 +324,121 @@ class TestStoreBeforeAcknowledgeDurability:
         with pytest.raises(OSError):
             spool.store_instance(make_dataset())
 
-        # Nothing was committed: the study must not appear as received.
+
+class TestMergedReceiveTransaction:
+    """Review P1-18: one commit per received instance, atomic end to end.
+
+    The provenance row and the study upsert used to be two separate
+    ``BEGIN IMMEDIATE`` + ``synchronous=FULL`` transactions, with the
+    instance's fsync barrier between them — two full barriers on the receive
+    critical path for one instance. They are now one transaction.
+    """
+
+    def test_one_begin_for_the_whole_receive_write(self, tmp_path: Path) -> None:
+        spool = make_spool(tmp_path)
+
+        statements: list[str] = []
+        # sqlite3's trace callback sees every statement the connection issues,
+        # which is the only way to count transactions from the outside.
+        spool._db._conn.set_trace_callback(statements.append)
+
+        flags = {"inside": False}
+        begins: list[str] = []
+        real_store = spool._db.store_received_instance
+
+        def trace(sql: str) -> None:
+            if flags["inside"] and sql.startswith("BEGIN"):
+                begins.append(sql)
+            statements.append(sql)
+
+        def spy(**kwargs: object) -> tuple[int, bool]:
+            flags["inside"] = True
+            try:
+                return real_store(**kwargs)  # type: ignore[arg-type]
+            finally:
+                flags["inside"] = False
+
+        spool._db._conn.set_trace_callback(trace)
+        try:
+            spool._db.store_received_instance = spy  # type: ignore[method-assign]
+            spool.store_instance(make_dataset())
+        finally:
+            spool._db._conn.set_trace_callback(None)
+
+        # Two would mean the old double-commit; the nested upsert joins the
+        # outer transaction instead of opening its own (see Database.transaction).
+        assert len(begins) == 1, f"expected one BEGIN for the receive write, got {begins}"
+
+    def test_a_provenance_failure_rolls_back_the_study_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A study row must not exist without its provenance (review P1-18).
+
+        Provenance used to be best-effort: a meta failure was logged and the
+        receive still succeeded, leaving a study the database claims to have
+        with no instance provenance behind it. Now the whole transaction
+        rolls back and the caller fails the C-STORE so the modality retries.
+        """
+        spool = make_spool(tmp_path)
+        ds = make_dataset()
+
+        def boom(*args: object, **kwargs: object) -> int:
+            raise sqlite3.OperationalError("database disk image is malformed")
+
+        monkeypatch.setattr(spool._db, "upsert_study_instance", boom)
+
+        with pytest.raises(sqlite3.OperationalError):
+            spool.store_instance(ds)
+
+        # Neither row survived the rollback.
         assert spool._db.list_studies() == []
+        assert spool._db.list_instance_meta(str(ds.StudyInstanceUID)) == []
+
+        # The instance bytes were fsynced before the transaction and are still
+        # on disk — the storage reconciler's domain, not a silent loss.
+        stored = list((tmp_path / "spool").rglob("*.dcm"))
+        assert len(stored) == 1
+
+    def test_two_concurrent_first_instances_of_one_series_count_it_once(
+        self, tmp_path: Path
+    ) -> None:
+        """New-series detection inside the write lock cannot double-count.
+
+        The old code resolved "is this series new" with a read *outside* the
+        transaction, so two associations storing a series's first instances
+        could both see "no series yet" and each advance num_series — a study
+        of one series reporting two. Moving the check under ``BEGIN IMMEDIATE``
+        serializes it (and preserves M11's ordering against the instance_meta
+        insert).
+        """
+        spool = make_spool(tmp_path, auto_enqueue_delay_sec=600.0)
+        study_uid = "1.2.3.4.5"
+        series_uid = f"{study_uid}.1"
+        release = threading.Barrier(2, timeout=10)
+        errors: list[BaseException] = []
+
+        def store(instance: int) -> None:
+            ds = make_dataset(study_uid)
+            ds.SeriesInstanceUID = series_uid
+            ds.SOPInstanceUID = f"{series_uid}.{instance}"
+            try:
+                release.wait()
+                spool.store_instance(ds)
+            except BaseException as exc:  # noqa: BLE001 — reported, not swallowed
+                errors.append(exc)
+
+        threads = [threading.Thread(target=store, args=(i,)) for i in (1, 2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert errors == []
+        studies = spool._db.list_studies()
+        assert len(studies) == 1
+        row = studies[0]
+        assert row["num_series"] == 1, "one series stored by two associations must count once"
+        assert row["num_instances"] == 2
 
     def test_database_commits_are_durable_across_power_loss(self, tmp_path: Path) -> None:
         """WAL + synchronous=NORMAL would lose an acked commit on power loss.

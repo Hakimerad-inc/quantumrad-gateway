@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
-import os
 import signal
 import sys
 import threading
@@ -28,12 +27,15 @@ from typing import TYPE_CHECKING, Any
 from mercure_gateway import __version__
 from mercure_gateway.audit import AuditLog
 from mercure_gateway.config import (
+    _ALLOW_INSECURE_BIND_ENV,
+    _LOOPBACK_HOSTS,
     GatewayConfig,
     ReportQuerySource,
     apply_env_overrides,
     apply_usb_defaults,
     default_config,
     detect_usb_mode,
+    insecure_bind_reason,
     load_config,
     save_config,
 )
@@ -99,46 +101,76 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Web admin port (default: from config or 8080)",
     )
+    parser.add_argument(
+        "--set-web-password",
+        action="store_true",
+        help="Prompt for the admin panel password, store its hash, and exit. "
+        "The recovery path when nobody can log in — needs no API session.",
+    )
     return parser
 
 
-# Bind hosts that are single-user by definition (web/auth.py + admin guide §Authentication
-# treat loopback as the trusted default; everything else needs auth or the escape hatch).
-_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+# The bind policy lives in the config module so the write boundary applies the
+# same check; its constants are re-exported here for the existing callers.
 
 
 def _enforce_bind_security(config: GatewayConfig, environ: Mapping[str, str] | None = None) -> None:
     """Refuse to boot an unauthenticated admin panel on a non-loopback address.
 
-    Security control (admin guide §Authentication, web/auth.py's no-op-when-auth-
-    off argument rests on this): with ``web_ui.auth_enabled`` false the admin API
-    — PHI, credentials, receiver/forwarder start/stop — is open to whoever can
-    reach the bind address. The documented behavior is refusal; pre-D3b this only
-    logged a warning and bound anyway. Loopback (127.0.0.1, localhost, ::1) is
-    single-user by definition. Deliberate deployments (dev rigs, sidecar
-    frontends) opt out explicitly via ``MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1``,
-    which downgrades the refusal to a loud startup warning.
+    Thin wrapper over :func:`insecure_bind_reason` — the policy lives in the
+    config module so the write boundary (``PUT /api/config``) can apply the same
+    check to a *prospective* config before persisting it. Security control:
+    admin guide §Authentication, and web/auth.py's no-op-when-auth-off argument
+    rests on this.
     """
+    reason = insecure_bind_reason(config, environ)
+    if reason is not None:
+        raise SystemExit(reason)
     ui = config.web_ui
-    env = os.environ if environ is None else environ
-    if ui.auth_enabled or ui.host in _LOOPBACK_HOSTS:
-        return
-    if env.get("MERCURE_GATEWAY_ALLOW_INSECURE_BIND", "") == "1":
+    if not ui.auth_enabled and ui.host not in _LOOPBACK_HOSTS:
+        # ``None`` from the policy can only mean the escape hatch was taken.
         logger.warning(
             "web_ui.auth_enabled is false while binding to %s — the admin API "
             "(PHI, credentials, start/stop) is unauthenticated on the network. "
-            "Proceeding because MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1 is set; "
-            "enable auth or bind to 127.0.0.1 for anything else.",
+            "Proceeding because %s=1 is set; enable auth or bind to 127.0.0.1 "
+            "for anything else.",
             ui.host,
+            _ALLOW_INSECURE_BIND_ENV,
         )
-        return
-    raise SystemExit(
-        f"refusing to bind the web admin panel to {ui.host!r} while "
-        "web_ui.auth_enabled is false: the API (PHI, credentials, start/stop) "
-        "would be unauthenticated on the network. Enable web_ui auth (wizard → "
-        "Setup) or set web_ui.host to 127.0.0.1. Escape hatch for deliberate "
-        "deployments: MERCURE_GATEWAY_ALLOW_INSECURE_BIND=1."
+
+
+def _set_web_password(config_path: Path) -> int:
+    """Prompt for the admin password and store its hash (review P0-8).
+
+    The locked-out operator's only recovery: it needs no API session and no
+    running panel, just the config file. The plaintext is never written to
+    disk — only the hash — and auth is enabled by default so the password just
+    set is actually used. ``getpass`` reads from the tty, so the value never
+    appears in a shell history or on the command line.
+    """
+    import getpass
+
+    from mercure_gateway.web.auth import hash_password
+
+    config = load_config(config_path) if config_path.exists() else default_config()
+
+    while True:
+        pw = getpass.getpass("New admin password (min 8 chars): ")
+        if len(pw) >= 8:
+            break
+        print("Password too short — at least 8 characters.")
+    if getpass.getpass("Confirm: ") != pw:
+        print("Passwords do not match; nothing was changed.")
+        return 1
+
+    config.web_ui.auth_enabled = True
+    config.web_ui.auth_password_hash = hash_password(pw)
+    save_config(config, config_path)
+    print(
+        f"Admin password set in {config_path} (web_ui.auth_enabled=true). "
+        "Restart the gateway for it to take effect."
     )
+    return 0
 
 
 def _install_shutdown_signal_handlers(shutdown_done: threading.Event) -> None:
@@ -557,6 +589,9 @@ def main(argv: list[str] | None = None) -> int:
         save_config(default_config(), args.config)
         print(f"Wrote default configuration to {args.config}")
         return 0
+
+    if args.set_web_password:
+        return _set_web_password(args.config)
 
     config = default_config()
     if args.config.exists():

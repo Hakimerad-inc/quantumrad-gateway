@@ -42,6 +42,8 @@ function stubFetch() {
     if (url.endsWith('/api/wizard/validate/receiver')) return json({ errors: [] });
     if (url.endsWith('/api/wizard/validate/destinations')) return json({ errors: [] });
     if (url.endsWith('/api/wizard/validate/reports')) return json({ errors: [] });
+    if (url.endsWith('/api/wizard/validate/admin')) return json({ errors: [] });
+    if (url.endsWith('/api/web-ui/password')) return json({ status: 'ok' });
     if (url.endsWith('/api/config')) return json(RUNNING_CONFIG);
     return json({});
   });
@@ -73,6 +75,13 @@ async function saveAndCollect(): Promise<Record<string, unknown>> {
   await user.click(enableReports);
   const qsInput = screen.getByLabelText('Query Source (host:port)') as HTMLInputElement;
   await user.type(qsInput, '10.0.0.9:104');
+
+  await user.click(screen.getByText('Next'));
+  // Admin step: type a password — it must reach /api/web-ui/password, never
+  // the config PUT body (review P0-8).
+  await screen.findByText('Admin Password');
+  await user.type(screen.getByLabelText('Password'), 's3cret-s3cret');
+  await user.type(screen.getByLabelText('Confirm'), 's3cret-s3cret');
 
   await user.click(screen.getByText('Next'));
   await screen.findByText('Configuration Summary'); // summary step
@@ -117,5 +126,66 @@ describe('SetupWizard', () => {
     expect(saved.reports).toMatchObject({ enabled: true });
     // The wizard's "host:port" string must not overwrite the structured object.
     expect(saved.reports).toHaveProperty('query_source', REPORT_SOURCE);
+  });
+
+  it('posts the admin password to the dedicated endpoint, never into the config', async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<SetupWizard />);
+
+    await user.click(screen.getByText('Next'));
+    await screen.findByText('+ Add Destination');
+    await user.click(screen.getByText('Next'));
+    await screen.findByLabelText('Enable report retrieval');
+    await user.click(screen.getByText('Next'));
+    await screen.findByText('Admin Password');
+    await user.type(screen.getByLabelText('Password'), 's3cret-s3cret');
+    await user.type(screen.getByLabelText('Confirm'), 's3cret-s3cret');
+    await user.click(screen.getByText('Next'));
+
+    // The summary must not render the plaintext — it is in the DOM.
+    const summary = await screen.findByText('Configuration Summary');
+    expect(summary.parentElement?.textContent).not.toContain('s3cret-s3cret');
+
+    await user.click(screen.getByText('Save Configuration'));
+    expect(await screen.findByText('Configuration saved')).toBeInTheDocument();
+
+    // The password went to /api/web-ui/password as plaintext, once.
+    const pwPosts = fetchStub.mock.calls.filter(
+      ([url, init]) => url.toString().endsWith('/api/web-ui/password') && init?.method === 'POST',
+    );
+    expect(pwPosts).toHaveLength(1);
+    expect(JSON.parse(pwPosts[0]![1]!.body as string)).toEqual({
+      new_password: 's3cret-s3cret',
+    });
+
+    // …and never near the config body.
+    const putBody = JSON.parse(
+      fetchStub.mock.calls.find(([, init]) => init?.method === 'PUT')![1]!.body as string,
+    );
+    expect(JSON.stringify(putBody)).not.toContain('s3cret-s3cret');
+  });
+
+  it('skips the password post when the admin step is left blank', async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<SetupWizard />);
+
+    await user.click(screen.getByText('Next'));
+    await screen.findByText('+ Add Destination');
+    await user.click(screen.getByText('Next'));
+    await screen.findByLabelText('Enable report retrieval');
+    await user.click(screen.getByText('Next'));
+    await screen.findByText('Admin Password');
+    await user.click(screen.getByText('Next'));
+    await screen.findByText('Configuration Summary');
+    await user.click(screen.getByText('Save Configuration'));
+    expect(await screen.findByText('Configuration saved')).toBeInTheDocument();
+
+    expect(
+      fetchStub.mock.calls.some(([url]) => url.toString().endsWith('/api/web-ui/password')),
+    ).toBe(false);
   });
 });

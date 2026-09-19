@@ -412,3 +412,80 @@ def test_main_update_check_never_raises(tmp_path, monkeypatch):  # type: ignore[
 
     monkeypatch.setattr("mercure_gateway.update.Updater", lambda **kw: boom(**kw))
     assert main_mod._check_for_updates(cfg) is None  # no exception escaped
+
+
+def _fake_getpass(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> None:
+    """Answer getpass prompts in order; an extra prompt is a test bug."""
+    import getpass
+
+    it = iter(answers)
+
+    def fake(prompt: str = "") -> str:
+        try:
+            return next(it)
+        except StopIteration:
+            raise AssertionError(f"unexpected getpass prompt: {prompt!r}") from None
+
+    monkeypatch.setattr(getpass, "getpass", fake)
+
+
+def test_set_web_password_stores_a_hash_and_enables_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The locked-out operator's only recovery — no API session required.
+
+    The plaintext never touches disk: only the PBKDF2 hash is written, and the
+    value is read from the tty (never the command line or a shell history).
+    """
+    import mercure_gateway.main as main_mod
+
+    path = tmp_path / "gw.json"
+    _fake_getpass(monkeypatch, ["s3cret-s3cret", "s3cret-s3cret"])
+
+    rc = main_mod._set_web_password(path)
+
+    assert rc == 0
+    from mercure_gateway.config import load_config
+    from mercure_gateway.web.auth import verify_password
+
+    cfg = load_config(path)
+    assert cfg.web_ui.auth_enabled is True
+    assert verify_password("s3cret-s3cret", cfg.web_ui.auth_password_hash)
+    # The plaintext is not on disk.
+    assert "s3cret-s3cret" not in path.read_text()
+
+
+def test_set_web_password_rejects_a_mismatched_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mercure_gateway.main as main_mod
+
+    path = tmp_path / "gw.json"
+    _fake_getpass(monkeypatch, ["s3cret-s3cret", "nope"])
+    assert main_mod._set_web_password(path) == 1
+    assert not path.exists()
+
+
+def test_set_web_password_rejects_a_short_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mercure_gateway.main as main_mod
+
+    path = tmp_path / "gw.json"
+    # A too-short password is re-prompted, then cancelled by a mismatch.
+    _fake_getpass(monkeypatch, ["short", "s3cret-s3cret", "nope"])
+    assert main_mod._set_web_password(path) == 1
+    assert not path.exists()
+
+
+def test_set_web_password_cli_flag_reaches_the_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--set-web-password`` is wired into the entry point and exits 0."""
+    import mercure_gateway.main as main_mod
+
+    path = tmp_path / "gw.json"
+    _fake_getpass(monkeypatch, ["s3cret-s3cret", "s3cret-s3cret"])
+    rc = main_mod.main(["--config", str(path), "--set-web-password"])
+    assert rc == 0
+    assert path.exists()

@@ -21,6 +21,7 @@ from mercure_gateway.config.encryption import (
     load_master_password,
 )
 from mercure_gateway.keyring_store import KeyringCredentialStore
+from mercure_gateway.web.auth import hash_password
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +57,7 @@ def _secret_config() -> object:
         ),
     ]
     cfg.audit.hub_reporting.api_key = "HUBKEY"
-    cfg.web_ui.auth_password_hash = "HASH"
+    cfg.web_ui.auth_password_hash = hash_password("s3cret")
     return cfg
 
 
@@ -94,7 +95,7 @@ def test_encrypt_roundtrip_store_and_restore(tmp_path) -> None:
     assert "TOPSECRET" not in raw
     assert "XNATPASS" not in raw
     assert "HUBKEY" not in raw
-    assert "HASH" not in raw
+    assert "s3cret" not in raw
     # Placeholders stand in for the secret fields.
     assert ENC_PLACEHOLDER in raw
     # Encrypted blocks are stored under credentials.entries.
@@ -106,7 +107,7 @@ def test_encrypt_roundtrip_store_and_restore(tmp_path) -> None:
     assert loaded.destinations[0].passphrase == "PHRASE"
     assert loaded.destinations[1].password == "XNATPASS"
     assert loaded.audit.hub_reporting.api_key == "HUBKEY"
-    assert loaded.web_ui.auth_password_hash == "HASH"
+    assert loaded.web_ui.auth_password_hash == cfg.web_ui.auth_password_hash
 
 
 def test_no_key_path_stays_plaintext_backward_compatible(tmp_path) -> None:

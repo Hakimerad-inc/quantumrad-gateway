@@ -28,6 +28,7 @@ from mercure_gateway.config import DICOMDestination, default_config
 from mercure_gateway.spool import Spool, StudyState
 from mercure_gateway.spool.db import mem_database
 from mercure_gateway.web import create_app
+from mercure_gateway.web.auth import verify_password
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -555,6 +556,56 @@ def test_login_missing_password_rejected(client: TestClient) -> None:
     assert r.status_code == 422
 
 
+def test_password_change_sets_a_pbkdf2_hash_and_audits(client: TestClient) -> None:
+    """POST /api/web-ui/password is the only API surface that creates a hash."""
+    r = client.post(
+        "/api/web-ui/password", json={"new_password": "s3cret-s3cret"}
+    )
+    assert r.status_code == 200
+
+    cfg = client.app.state.config
+    assert cfg.web_ui.auth_password_hash.startswith("pbkdf2$")
+    # Auth is NOT enabled on the operator's behalf — the endpoint only sets the
+    # hash, so enabling it stays an explicit decision.
+    assert cfg.web_ui.auth_enabled is False
+
+    # The change is visible in the audit chain.
+    events = client.get("/api/audit?limit=10").json()
+    assert any(e["event"] == "WEB_UI_PASSWORD_CHANGED" for e in events)
+
+
+def test_password_change_requires_the_current_password_when_auth_is_on(
+    client: TestClient,
+) -> None:
+    """A hijacked or stale session cannot silently rotate the credential."""
+    from mercure_gateway.web.auth import hash_password
+
+    client.app.state.config.web_ui.auth_enabled = True
+    client.app.state.config.web_ui.auth_password_hash = hash_password("old-pw-1234")
+    # The endpoint is auth-gated once auth is on, so establish a session.
+    assert client.post("/api/login", json={"password": "old-pw-1234"}).status_code == 200
+
+    r = client.post(
+        "/api/web-ui/password",
+        json={"current_password": "wrong", "new_password": "new-pw-1234"},
+    )
+    assert r.status_code == 401
+    # The stored hash is unchanged.
+    assert verify_password("old-pw-1234", client.app.state.config.web_ui.auth_password_hash)
+
+    r = client.post(
+        "/api/web-ui/password",
+        json={"current_password": "old-pw-1234", "new_password": "new-pw-1234"},
+    )
+    assert r.status_code == 200
+    assert verify_password("new-pw-1234", client.app.state.config.web_ui.auth_password_hash)
+
+
+def test_password_change_rejects_a_short_password(client: TestClient) -> None:
+    r = client.post("/api/web-ui/password", json={"new_password": "short"})
+    assert r.status_code == 422
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Reports endpoints  (§7.3)
 # ══════════════════════════════════════════════════════════════════════
@@ -1026,3 +1077,109 @@ def test_import_config_heals_and_reports_unknown_keys(client: TestClient, tmp_pa
     ]
     # The healed state is what took effect.
     assert "ae_title" not in client.get("/api/config").json()["general"]
+
+
+# ── Bind security at the write boundary (review P0-3) ─────────────────────
+
+
+def test_put_config_rejects_an_insecure_bind(client: TestClient) -> None:
+    """A valid config that would open the admin API to the network is 409, not
+    saved: the document is valid, the running appliance's posture is what
+    conflicts with it (review P0-3).
+    """
+    current = client.get("/api/config").json()
+    current["web_ui"]["host"] = "0.0.0.0"
+    current["web_ui"]["auth_enabled"] = False
+    r = client.put("/api/config", json=current)
+
+    assert r.status_code == 409
+    assert "auth_enabled" in r.json()["detail"]
+    # Nothing was applied or persisted: the running config is unchanged.
+    assert client.get("/api/config").json()["web_ui"]["host"] == "127.0.0.1"
+
+
+def test_put_config_secure_bind_is_saved(client: TestClient) -> None:
+    """Auth on, or loopback, is no obstacle."""
+    current = client.get("/api/config").json()
+    current["web_ui"]["host"] = "0.0.0.0"
+    current["web_ui"]["auth_enabled"] = True
+    # A hash the validator accepts is required for auth to be enabled.
+    from mercure_gateway.web.auth import hash_password
+
+    current["web_ui"]["auth_password_hash"] = hash_password("s3cret")
+    r = client.put("/api/config", json=current)
+
+    assert r.status_code == 200
+    # Enabling auth locks out the cookieless client — log in to read it back.
+    assert client.post("/api/login", json={"password": "s3cret"}).status_code == 200
+    assert client.get("/api/config").json()["web_ui"]["host"] == "0.0.0.0"
+
+
+def test_put_config_insecure_rejection_is_audited(client: TestClient) -> None:
+    """The refused write is visible in the audit chain, not only the response."""
+    current = client.get("/api/config").json()
+    current["web_ui"]["host"] = "0.0.0.0"
+    current["web_ui"]["auth_enabled"] = False
+    client.put("/api/config", json=current)
+
+    events = client.get("/api/audit?limit=25").json()
+    assert isinstance(events, list)
+    assert any(e["event"] == "CONFIG_SECURITY_REJECTED" for e in events)
+
+
+def test_put_config_rejects_an_unrecognised_hash(client: TestClient) -> None:
+    """A mistyped hash is caught at save time, not at the login screen."""
+    current = client.get("/api/config").json()
+    current["web_ui"]["auth_enabled"] = True
+    current["web_ui"]["auth_password_hash"] = "HASH"
+
+    r = client.put("/api/config", json=current)
+
+    assert r.status_code == 400
+    assert "auth_password_hash" in r.text
+    # The bad value was not persisted: auth is still off and the hash still empty.
+    after = client.get("/api/config").json()["web_ui"]
+    assert after["auth_enabled"] is False
+    assert after["auth_password_hash"] == ""
+
+
+def test_put_config_rejects_auth_enabled_with_an_empty_hash(client: TestClient) -> None:
+    """The lockout combination is unreachable through the write boundary."""
+    current = client.get("/api/config").json()
+    current["web_ui"]["auth_enabled"] = True
+    current["web_ui"]["auth_password_hash"] = ""
+
+    r = client.put("/api/config", json=current)
+
+    assert r.status_code == 400
+    assert "auth_password_hash" in r.text
+    assert client.get("/api/config").json()["web_ui"]["auth_enabled"] is False
+
+
+def test_put_config_accepts_a_pbkdf2_hash(client: TestClient) -> None:
+    """A PBKDF2 hash round-trips through the write boundary and still verifies.
+
+    The read-back path redacts the hash to ``***``, so the proof that the stored
+    value survived is that a login with the plaintext succeeds — and that a
+    second GET → PUT round-trip (which carries only the sentinel) does not
+    clobber it.
+    """
+    from mercure_gateway.web.auth import hash_password
+
+    current = client.get("/api/config").json()
+    current["web_ui"]["auth_enabled"] = True
+    current["web_ui"]["auth_password_hash"] = hash_password("s3cret")
+
+    assert client.put("/api/config", json=current).status_code == 200
+
+    # The hash is redacted on read, never returned in plaintext.
+    assert client.post("/api/login", json={"password": "s3cret"}).status_code == 200
+    assert (
+        client.get("/api/config").json()["web_ui"]["auth_password_hash"] == "***"
+    )
+
+    # A no-op save round-trips the sentinel back to the stored hash.
+    r = client.put("/api/config", json=client.get("/api/config").json())
+    assert r.status_code == 200
+    client.cookies.clear()
+    assert client.post("/api/login", json={"password": "s3cret"}).status_code == 200

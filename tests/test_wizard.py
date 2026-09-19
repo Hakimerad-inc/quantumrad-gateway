@@ -33,7 +33,13 @@ def test_starts_on_first_step(wizard: SetupWizard) -> None:
 
 
 def test_step_order() -> None:
-    assert SetupWizard().steps == ["receiver", "destinations", "reports", "summary"]
+    assert SetupWizard().steps == [
+        "receiver",
+        "destinations",
+        "reports",
+        "admin",
+        "summary",
+    ]
 
 
 def test_next_advances(wizard: SetupWizard) -> None:
@@ -106,6 +112,29 @@ def test_reports_gate_optional(wizard: SetupWizard) -> None:
     assert errors == []
 
 
+def test_admin_gate_optional(wizard: SetupWizard) -> None:
+    """A blank password skips the step — the panel stays open, loopback-only."""
+    assert wizard.validate_step("admin", {"password": "", "confirm": ""}) == []
+    assert wizard.validate_step("admin", {}) == []
+
+
+def test_admin_gate_rejects_a_short_password(wizard: SetupWizard) -> None:
+    errors = wizard.validate_step("admin", {"password": "short", "confirm": "short"})
+    assert any("at least 8" in e for e in errors)
+
+
+def test_admin_gate_requires_a_matching_confirmation(wizard: SetupWizard) -> None:
+    errors = wizard.validate_step("admin", {"password": "s3cret-s3cret", "confirm": "nope"})
+    assert any("confirmation" in e for e in errors)
+
+
+def test_admin_gate_accepts_a_strong_pair(wizard: SetupWizard) -> None:
+    errors = wizard.validate_step(
+        "admin", {"password": "s3cret-s3cret", "confirm": "s3cret-s3cret"}
+    )
+    assert errors == []
+
+
 def test_cannot_complete_unknown_step(wizard: SetupWizard) -> None:
     with pytest.raises(KeyError):
         wizard.validate_step("nope", {})
@@ -127,6 +156,7 @@ def test_complete_when_all_steps_done(wizard: SetupWizard) -> None:
         {"destinations": [{"name": "hub", "host": "h", "port": 11112, "aet": "M"}]},
     )
     wizard.complete_step("reports", {"enabled": False})
+    wizard.complete_step("admin", {"password": "", "confirm": ""})
     wizard.complete_step("summary", {})
     assert wizard.is_complete()
 
@@ -136,6 +166,17 @@ def test_summary_requires_all(wizard: SetupWizard) -> None:
         "summary", {}
     )
     assert errors  # cannot reach summary with incomplete steps
+
+
+def test_summary_names_the_admin_step_when_missing(wizard: SetupWizard) -> None:
+    wizard.complete_step("receiver", {"ae_title": "GATEWAY", "port": 11112})
+    wizard.complete_step(
+        "destinations",
+        {"destinations": [{"name": "hub", "host": "h", "port": 11112, "aet": "M"}]},
+    )
+    wizard.complete_step("reports", {"enabled": False})
+    errors = wizard.validate_step("summary", {})
+    assert any("admin" in e for e in errors)
 
 
 def test_wizard_validate_api_endpoint() -> None:

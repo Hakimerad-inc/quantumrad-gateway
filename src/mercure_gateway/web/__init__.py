@@ -16,6 +16,7 @@ credentials are never combined with wildcard origins.
 
 from __future__ import annotations
 
+import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -175,6 +176,12 @@ def create_app(
     app.state.spool = spool
     app.state.config_path = str(config_path) if config_path else None
     app.state.disk_monitor = disk_monitor
+    # Session signing secret, minted per process and deliberately independent of
+    # the password hash: a config save that round-trips the hash must not log
+    # out every live operator (review P0-8). Single-worker uvicorn is the
+    # documented deployment; a second worker would mint its own secret and
+    # invalidate the other's cookies.
+    app.state.session_secret = secrets.token_hex(32)
     # Snapshot the config the running components were constructed with. The
     # receiver/forwarder hold their own config refs captured at construction,
     # so a saved change only takes effect after a process restart; comparing
@@ -182,6 +189,12 @@ def create_app(
     # restart pending", which survives a page reload (the client-side flag does
     # not — see SystemStatus.config_pending_restart).
     app.state.startup_config_json = config.model_dump_json()
+
+    # Login attempt tracker for the rate limiter (review P1-17). Per-app state
+    # so every TestClient gets a fresh bucket.
+    from mercure_gateway.web.ratelimit import attach_tracker
+
+    attach_tracker(app)
 
     # Security middleware FIRST (runs outermost): headers on every response,
     # CSRF origin check before the CORS handling.

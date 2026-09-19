@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_origin
 
@@ -31,10 +32,18 @@ from pydantic import (
     PrivateAttr,
     TypeAdapter,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
 logger = logging.getLogger(__name__)
+
+# Non-secret placeholder written to disk in place of an encrypted secret field.
+# Distinct from the ``***`` redaction sentinel used by the web API, and non-empty
+# so ``min_length=1`` secret fields (e.g. the XNAT password) still validate on
+# load. Defined here — next to the models that have to accept it — because
+# ``config/encryption.py`` imports this package and cannot be imported back.
+ENC_PLACEHOLDER = "__ENCRYPTED_AT_REST__"
 
 __all__ = [
     "AuditConfig",
@@ -63,6 +72,7 @@ __all__ = [
     "WebUIConfig",
     "XNATDestination",
     "apply_env_overrides",
+    "insecure_bind_reason",
     "apply_usb_defaults",
     "default_config",
     "detect_usb_mode",
@@ -474,7 +484,15 @@ class WebUIConfig(_StrictConfigModel):
     )
     auth_password_hash: str = Field(
         default="",
-        description="Bcrypt hash of the web UI password. Set via the setup wizard.",
+        description=(
+            "Hash of the web UI password. Created as "
+            "``pbkdf2$<iterations>$<salt hex>$<derived key hex>`` by the "
+            "``--set-web-password`` CLI, the setup wizard, or "
+            "``PUT /api/web-ui/password``; the legacy ``sha256$salt$hex`` form "
+            "from older installs still verifies. Empty means no password is "
+            "set — which must not be combined with auth_enabled (see "
+            "_auth_needs_a_hash), or the panel becomes unloggable."
+        ),
     )
     tls_cert_file: str = Field(
         default="",
@@ -495,6 +513,46 @@ class WebUIConfig(_StrictConfigModel):
         if bool(self.tls_cert_file) != bool(self.tls_key_file):
             raise ValueError("web_ui.tls_cert_file and web_ui.tls_key_file must be set together")
         return self
+
+    @model_validator(mode="after")
+    def _auth_needs_a_hash(self) -> WebUIConfig:
+        """Enabling auth with no hash set is an unrecoverable lockout (P0-8).
+
+        Nothing can log in — there is no password to type — and the panel is
+        the only way to fix it, so the appliance would need its config file
+        hand-edited. Reject the combination at the write boundary instead of
+        discovering it at the login screen.
+        """
+        if self.auth_enabled and not self.auth_password_hash:
+            raise ValueError(
+                "web_ui.auth_enabled is true but web_ui.auth_password_hash is "
+                "empty — set a password first (--set-web-password, the setup "
+                "wizard, or PUT /api/web-ui/password), or the panel cannot be "
+                "logged into."
+            )
+        return self
+
+    @field_validator("auth_password_hash")
+    @classmethod
+    def _hash_is_a_known_scheme(cls, value: str) -> str:
+        """Reject a garbage hash at save time, not at the login screen.
+
+        A free-text field that silently accepts anything means a mistyped hash
+        is discovered only when nobody can log in (P0-8). Empty is allowed — it
+        pairs with ``auth_enabled=false`` and is caught by ``_auth_needs_a_hash``.
+        ``__ENCRYPTED_AT_REST__`` is the storage placeholder written by
+        :func:`save_config`; it never reaches a login and is replaced by the
+        real hash when the file is read back.
+        """
+        if not value or value == ENC_PLACEHOLDER:
+            return value
+        if value.startswith(("pbkdf2$", "sha256$")) or value.startswith(("$2a$", "$2b$", "$2y$")):
+            return value
+        raise ValueError(
+            "web_ui.auth_password_hash is not a recognised hash — expected "
+            "pbkdf2$<iters>$<salt hex>$<key hex>, legacy sha256$salt$hex, or a "
+            "bcrypt $2b$ hash. Create one with --set-web-password."
+        )
 
 
 class CredentialEntry(_StrictConfigModel):
@@ -675,6 +733,47 @@ def _prune_extra_keys(payload: Any, errors: list[Any]) -> Any:
         if isinstance(node, dict) and leaf in node:
             del node[leaf]
     return pruned
+
+
+# Bind hosts that are single-user by definition (admin guide §Authentication,
+# and web/auth.py's no-op-when-auth-off argument rests on loopback being
+# trusted — everything else needs auth or the escape hatch below).
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+# Deliberate deployments (dev rigs, sidecar frontends behind their own auth)
+# opt out of the refusal. It downgrades a boot refusal to a loud warning and
+# silences the write-boundary 409 — the operator has stated the posture.
+_ALLOW_INSECURE_BIND_ENV = "MERCURE_GATEWAY_ALLOW_INSECURE_BIND"
+
+
+def insecure_bind_reason(
+    config: GatewayConfig, environ: Mapping[str, str] | None = None
+) -> str | None:
+    """Return why *config* would expose an unauthenticated admin API, or None.
+
+    With ``web_ui.auth_enabled`` false the admin API — PHI, credentials,
+    receiver/forwarder start/stop — is open to whoever can reach the bind
+    address. Loopback (127.0.0.1, localhost, ::1) is single-user by definition.
+    The escape hatch returns None as well; the caller decides whether that is a
+    boot refusal (main) or a warning.
+
+    Pure on purpose, so the boot check and the write boundary
+    (``PUT /api/config``) cannot drift apart: applying this to a *prospective*
+    config before it is persisted is what stops an operator from saving an
+    open panel onto a networked appliance one click at a time (review P0-3).
+    """
+    ui = config.web_ui
+    env = os.environ if environ is None else environ
+    if ui.auth_enabled or ui.host in _LOOPBACK_HOSTS:
+        return None
+    if env.get(_ALLOW_INSECURE_BIND_ENV, "") == "1":
+        return None
+    return (
+        f"web_ui.auth_enabled is false while binding to {ui.host!r}: the admin "
+        "API (PHI, credentials, start/stop) would be unauthenticated on the "
+        "network. Enable web_ui auth, set web_ui.host to 127.0.0.1, or set "
+        f"{_ALLOW_INSECURE_BIND_ENV}=1 for a deliberate deployment."
+    )
 
 
 def _prune_for_disk(payload: Any, locs: list[list[Any]]) -> Any:

@@ -208,3 +208,49 @@ def test_escape_hatch_only_bypasses_when_unset_still_refuses() -> None:
     """The hatch is opt-in per value — an empty env dict must still refuse."""
     with pytest.raises(SystemExit):
         _enforce_bind_security(_cfg_with_bind("0.0.0.0", False), environ={})
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Session lifetime (review P0-8)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _authed_client() -> TestClient:
+    """A client with auth enabled, already logged in as 's3cret'."""
+    from mercure_gateway.web.auth import hash_password
+
+    cfg = default_config()
+    cfg.web_ui.auth_enabled = True
+    cfg.web_ui.auth_password_hash = hash_password("s3cret")
+    client = TestClient(create_app(cfg, Spool(mem_database())))
+    assert client.post("/api/login", json={"password": "s3cret"}).status_code == 200
+    return client
+
+
+def test_session_survives_a_config_save_that_round_trips_the_hash() -> None:
+    """Saving config must not log out every live operator.
+
+    The session secret used to be derived from the password hash, so any save
+    that echoed it back invalidated every cookie in flight — including the
+    operator's own, mid-edit. It is now minted once per process.
+    """
+    client = _authed_client()
+    assert client.get("/api/system/status").status_code == 200
+
+    # A no-op round-trip: GET redacts the hash to '***', the PUT restores it.
+    current = client.get("/api/config").json()
+    r = client.put("/api/config", json=current)
+    assert r.status_code == 200
+
+    # The same session is still valid.
+    assert client.get("/api/system/status").status_code == 200
+
+
+def test_session_secret_is_per_process() -> None:
+    """Two apps do not share a signing secret (a restart logs everyone out)."""
+    a = _authed_client()
+    b = _authed_client()
+    token = a.cookies["mercure_session"]
+    # A cookie minted by app A does not authenticate against app B.
+    b.cookies["mercure_session"] = token
+    assert b.get("/api/system/status").status_code == 401

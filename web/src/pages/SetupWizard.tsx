@@ -2,12 +2,13 @@ import { useState, useCallback } from "react";
 import { fetchConfig, saveConfig, apiUrl } from "../api";
 import { IconCheck, IconX, IconChevronLeft, IconChevronRight } from "../ui/icons";
 
-const STEPS = ["receiver", "destinations", "reports", "summary"];
+const STEPS = ["receiver", "destinations", "reports", "admin", "summary"];
 
 const STEP_LABELS: Record<string, string> = {
   receiver: "Receiver Settings",
   destinations: "Destinations",
   reports: "Reports (Optional)",
+  admin: "Admin Password (Optional)",
   summary: "Summary",
 };
 
@@ -15,6 +16,8 @@ interface WizardData {
   receiver: { ae_title: string; port: number };
   destinations: Array<{ name: string; host: string; port: number; aet: string }>;
   reports: { enabled: boolean; query_source?: string };
+  // Plaintext only — never a hash. Posted to /api/web-ui/password on save.
+  admin: { password: string; confirm: string };
 }
 
 async function validateStep(step: string, data: unknown): Promise<string[]> {
@@ -47,6 +50,7 @@ export default function SetupWizardPage() {
     receiver: { ae_title: "GATEWAY", port: 11112 },
     destinations: [],
     reports: { enabled: false },
+    admin: { password: "", confirm: "" },
   });
   const [errors, setErrors] = useState<string[]>([]);
   const [echoStatus, setEchoStatus] = useState<Record<string, string>>({});
@@ -98,6 +102,21 @@ export default function SetupWizardPage() {
         enabled: data.reports.enabled,
       };
       await saveConfig(current);
+      // The admin password is never round-tripped through the config body —
+      // it is posted as plaintext to the dedicated endpoint, which hashes it
+      // server-side (review P0-8). Blank means "leave the panel open".
+      if (data.admin.password) {
+        const pwRes = await fetch(apiUrl("/api/web-ui/password"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ new_password: data.admin.password }),
+          credentials: "include",
+        });
+        if (!pwRes.ok) {
+          const detail = await pwRes.text();
+          throw new Error(`could not set the admin password: ${detail}`);
+        }
+      }
       setDone(true);
     } catch (err) {
       // Surface the failure in the step's error banner instead of failing
@@ -244,11 +263,53 @@ export default function SetupWizardPage() {
             </div>
           )}
 
+          {currentStep === "admin" && (
+            <div>
+              <div className="card-header">Admin Password</div>
+              <p style={{ color: "var(--muted)", marginTop: 0, fontSize: 13 }}>
+                Protect the web panel with a password. Leave blank to keep the panel
+                open — the gateway then binds to localhost only. The password is
+                hashed before it is stored and is never sent back.
+              </p>
+              <div className="field-row">
+                <label>
+                  <span className="label">Password</span>
+                  <input
+                    className="input"
+                    type="password"
+                    autoComplete="new-password"
+                    value={data.admin.password}
+                    onChange={(e) => setData((d) => ({ ...d, admin: { ...d.admin, password: e.target.value } }))}
+                  />
+                </label>
+                <label>
+                  <span className="label">Confirm</span>
+                  <input
+                    className="input"
+                    type="password"
+                    autoComplete="new-password"
+                    value={data.admin.confirm}
+                    onChange={(e) => setData((d) => ({ ...d, admin: { ...d.admin, confirm: e.target.value } }))}
+                  />
+                </label>
+              </div>
+            </div>
+          )}
+
           {currentStep === "summary" && (
             <div>
               <div className="card-header">Configuration Summary</div>
               <pre style={{ fontSize: 12 }}>
-                {JSON.stringify(data, null, 2)}
+                {/* The plaintext never reaches the DOM — a screenshot or a
+                    copy of this summary must not carry it (review P0-8). */}
+                {JSON.stringify(
+                  {
+                    ...data,
+                    admin: { password: data.admin.password ? "***" : "", confirm: "" },
+                  },
+                  null,
+                  2,
+                )}
               </pre>
             </div>
           )}

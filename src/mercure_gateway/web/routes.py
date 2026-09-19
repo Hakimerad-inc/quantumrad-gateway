@@ -21,15 +21,16 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.responses import Response
 
 from mercure_gateway import __version__
@@ -42,6 +43,9 @@ from mercure_gateway.redact import (
     redact_config,
 )
 from mercure_gateway.spool import Spool
+from mercure_gateway.web.auth import require_auth
+
+logger = logging.getLogger(__name__)
 
 # Sentinel written by :func:`redact_config` — a PUT carrying it means
 # "unchanged" and must restore the previously stored secret (review F4).
@@ -50,16 +54,19 @@ _REDACTED_SENTINEL = "***"
 
 class _Runnable(Protocol):
     """Minimal interface for receiver/forwarder start/stop."""
+
     @property
     def is_running(self) -> bool: ...
     def start(self) -> None: ...
     def stop(self) -> None: ...
+
 
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _spool(request: Request) -> Spool:
     """Return the shared Spool instance from app state."""
@@ -102,11 +109,29 @@ def login(request: Request, response: JSONResponse, payload: LoginRequest) -> di
 
     With ``web_ui.auth_enabled`` a wrong or missing password returns 401;
     with auth disabled any password is accepted (the API is open regardless)
-    so the SPA login flow works uniformly.
+    so the SPA login flow works uniformly. Either way the attempt is counted
+    by the rate limiter when auth is enabled — an open panel has nothing to
+    brute-force, a locked one must not be brute-forceable either.
     """
     from mercure_gateway.web.auth import login as _login
+    from mercure_gateway.web.ratelimit import enforce_rate_limit, record_result
+
+    tracker = enforce_rate_limit(request)
+
+    cfg: GatewayConfig = request.app.state.config
+    if cfg.web_ui.auth_enabled:
+        from mercure_gateway.web.auth import verify_password
+
+        stored = cfg.web_ui.auth_password_hash
+        ok = bool(payload.password) and bool(stored) and verify_password(
+            payload.password, stored
+        )
+        if not ok:
+            record_result(tracker, request, success=False)
+            raise HTTPException(status_code=401, detail="invalid credentials")
 
     _login(request, response, payload.password or None)
+    record_result(tracker, request, success=cfg.web_ui.auth_enabled)
     return {"status": "ok"}
 
 
@@ -119,9 +144,90 @@ def logout(request: Request, response: JSONResponse) -> dict[str, str]:
     return {"status": "ok"}
 
 
+class PasswordChangeRequest(BaseModel):
+    """Rotate the admin password.
+
+    ``current_password`` is required whenever auth is already enabled: without
+    it, a hijacked or stale session could silently rotate the credential and
+    extend its own access (review P0-8).
+    """
+
+    current_password: str | None = None
+    new_password: str = Field(min_length=8)
+
+
+@auth_router.post("/web-ui/password", dependencies=[Depends(require_auth)])
+def change_password(request: Request, payload: PasswordChangeRequest) -> dict[str, str]:
+    """Set the admin password hash.
+
+    This is the only API surface that creates a hash, and it never round-trips
+    one: the new password arrives in plaintext over the (loopback or TLS)
+    panel, is hashed server-side, and only the hash is stored. The session that
+    made the change stays valid — the signing secret is not derived from the
+    hash.
+
+    ``require_auth`` is a no-op while auth is disabled, which is exactly the
+    first-boot setup-wizard case; on a running appliance auth-off implies a
+    loopback bind (the composition root refuses anything else), so the endpoint
+    is no more exposed than the rest of the open panel. It deliberately does
+    **not** enable auth on the operator's behalf — silently turning auth on
+    would be a lockout in the hands of anyone who can reach the panel.
+    """
+    from mercure_gateway.web.auth import hash_password, verify_password
+    from mercure_gateway.web.ratelimit import enforce_rate_limit, record_result
+
+    cfg = _config(request)
+    ui = cfg.web_ui
+
+    # Rate-limited exactly like login: this endpoint verifies a credential.
+    tracker = enforce_rate_limit(request)
+
+    if ui.auth_enabled:
+        stored = ui.auth_password_hash
+        if not stored or not payload.current_password or not verify_password(
+            payload.current_password, stored
+        ):
+            record_result(tracker, request, success=False)
+            raise HTTPException(
+                status_code=401, detail="the current password is incorrect"
+            )
+
+    record_result(tracker, request, success=ui.auth_enabled)
+
+    # Mutate a copy so a validation failure cannot leave a half-changed model.
+    updated = cfg.model_copy(deep=True)
+    updated.web_ui.auth_password_hash = hash_password(payload.new_password)
+
+    from mercure_gateway.config import insecure_bind_reason
+
+    reason = insecure_bind_reason(updated)
+    if reason is not None:
+        _audit_config_rejection(request, reason)
+        raise HTTPException(status_code=409, detail=reason)
+
+    config_path: object = getattr(request.app.state, "config_path", None)
+    if config_path:
+        from mercure_gateway.config import save_config
+
+        save_config(updated, str(config_path))
+    request.app.state.config = updated
+
+    from mercure_gateway.audit import AuditLog
+
+    try:
+        client_host = request.client.host if request.client else "?"
+        AuditLog(_spool(request).database).append(
+            "WEB_UI_PASSWORD_CHANGED", detail={"host": client_host}
+        )
+    except Exception:  # noqa: BLE001 — a failed audit row must not undo the change
+        logger.warning("could not record the WEB_UI_PASSWORD_CHANGED audit event")
+    return {"status": "ok"}
+
+
 # ---------------------------------------------------------------------------
 # System endpoints  (§7.5)
 # ---------------------------------------------------------------------------
+
 
 class SystemStatus(BaseModel):
     receiver: str = "stopped"
@@ -285,12 +391,21 @@ def system_metrics(request: Request) -> Response:
     receiver = _get_state(request, "receiver")
     forwarder = _get_state(request, "forwarder")
     retriever = _get_state(request, "report_retriever")
-    gauge("mercure_gateway_receiver_running", "1 while the DICOM SCP accepts associations.",
-          1 if receiver and receiver.is_running else 0)
-    gauge("mercure_gateway_forwarder_running", "1 while the forwarding workers run.",
-          1 if forwarder and forwarder.is_running else 0)
-    gauge("mercure_gateway_report_retriever_running", "1 while report polling is active.",
-          1 if retriever and retriever.is_running else 0)
+    gauge(
+        "mercure_gateway_receiver_running",
+        "1 while the DICOM SCP accepts associations.",
+        1 if receiver and receiver.is_running else 0,
+    )
+    gauge(
+        "mercure_gateway_forwarder_running",
+        "1 while the forwarding workers run.",
+        1 if forwarder and forwarder.is_running else 0,
+    )
+    gauge(
+        "mercure_gateway_report_retriever_running",
+        "1 while report polling is active.",
+        1 if retriever and retriever.is_running else 0,
+    )
 
     # Hub streaming (mirrors /system/status hub fields; absent hub -> 0).
     hub_status: object = getattr(request.app.state, "hub_status", None)
@@ -310,8 +425,10 @@ def system_metrics(request: Request) -> Response:
     labeled(
         "mercure_gateway_queue_depth",
         "Studies in each spool lifecycle state.",
-        [(f'state="{state}"', counts.get(state, 0)) for state in
-         ("RECEIVED", "QUEUED", "SENDING", "SENT", "ERROR", "FAILED")],
+        [
+            (f'state="{state}"', counts.get(state, 0))
+            for state in ("RECEIVED", "QUEUED", "SENDING", "SENT", "ERROR", "FAILED")
+        ],
     )
 
     # Spool filesystem capacity (mirrors /system/disk). The spool dir may not
@@ -351,8 +468,11 @@ def system_metrics(request: Request) -> Response:
             "mercure_gateway_disk_free_bytes",
         ):
             gauge(name, "Spool filesystem capacity (unmeasurable — 0).", 0)
-        gauge("mercure_gateway_disk_over_threshold",
-              "1 once usage >= the configured warning threshold.", 0)
+        gauge(
+            "mercure_gateway_disk_over_threshold",
+            "1 once usage >= the configured warning threshold.",
+            0,
+        )
 
     # Purge loop bounds (review P0-11). The loops are capped so a spool growing
     # faster than it can purge does not pin the DB write lock; these counters
@@ -409,6 +529,7 @@ def system_stop(request: Request) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Windows service management  (PRD §13 Q3, S07-T9)
 # ---------------------------------------------------------------------------
+
 
 class ServiceStatusModel(BaseModel):
     """Windows service install/run state for the admin panel."""
@@ -478,6 +599,7 @@ def service_action(action: str, request: Request) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Queue / Studies endpoints  (§7.2)
 # ---------------------------------------------------------------------------
+
 
 class QueueStats(BaseModel):
     total: int = 0
@@ -659,9 +781,7 @@ def list_destinations(request: Request) -> list[dict[str, Any]]:
 @router.get("/destinations/{name}/studies")
 def destination_studies(request: Request, name: str) -> list[dict[str, Any]]:
     """Latest studies routed to one destination (pipeline drill-down)."""
-    return [
-        _row_to_dict(r) for r in _spool(request).list_recent_routes(name, limit=20)
-    ]
+    return [_row_to_dict(r) for r in _spool(request).list_recent_routes(name, limit=20)]
 
 
 @router.get("/studies/{study_id}/detail")
@@ -794,12 +914,30 @@ def update_config(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
     the body is validated into a :class:`GatewayConfig` and saved to the
     ``config_path`` configured on app state.  When no path is configured the
     update is validated and applied in memory only.
+
+    A config that would bind an unauthenticated admin panel to a network
+    address is rejected with 409 (review P0-3): the document is *valid*, the
+    running appliance's posture is what conflicts with it, and refusing to
+    persist is the only response that stops an open panel from being saved one
+    click at a time. The check runs after validation so the operator sees the
+    most specific error first.
     """
     restored = _restore_redacted_secrets(payload, _config(request))
     try:
         updated = GatewayConfig.model_validate(restored)
     except Exception as exc:  # noqa: BLE001 — surface validation as 400
         raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
+
+    from mercure_gateway.config import insecure_bind_reason
+
+    reason = insecure_bind_reason(updated)
+    if reason is not None:
+        # The appliance refuses to run like this, so the config is not applied
+        # and is not persisted. Emitting the rejection makes the attempt
+        # visible in the audit chain rather than only in the access log.
+        _audit_config_rejection(request, reason)
+        raise HTTPException(status_code=409, detail=reason)
+
     config_path: object = getattr(request.app.state, "config_path", None)
     if config_path:
         from mercure_gateway.config import save_config
@@ -818,6 +956,23 @@ def update_config(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
         # do). Lint never blocks a save that validated.
         "warnings": [w.as_dict() for w in lint_config(updated)],
     }
+
+
+def _audit_config_rejection(request: Request, reason: str) -> None:
+    """Record a rejected config write in the audit chain, best-effort.
+
+    The web layer has no AuditLog of its own — the composition root's carries
+    the head anchorer and the hub sink — so this writes through the spool's
+    database directly, as ``/api/audit/verify`` already does. The event is
+    chain-valid; it simply is not re-anchored or streamed from here. A failure
+    here must not change the 409 the operator just received, so it is swallowed
+    after logging.
+    """
+    try:
+        audit = AuditLog(_spool(request).database)
+        audit.append("CONFIG_SECURITY_REJECTED", detail={"reason": reason})
+    except Exception:  # noqa: BLE001 — never mask the 409
+        logger.warning("could not record the CONFIG_SECURITY_REJECTED audit event")
 
 
 @router.get("/config/warnings")
@@ -914,15 +1069,14 @@ async def import_config(request: Request) -> dict[str, Any]:
         # Healed keys are reported rather than silently swallowed: the imported
         # file differs from the appliance's schema and the operator should know
         # which settings did not survive the round trip.
-        "ignored_keys": [
-            ".".join(str(part) for part in loc) for loc in healed
-        ],
+        "ignored_keys": [".".join(str(part) for part in loc) for loc in healed],
     }
 
 
 # ---------------------------------------------------------------------------
 # Reports endpoints  (§7.3)
 # ---------------------------------------------------------------------------
+
 
 def _report_retriever(request: Request) -> Any:
     """Return the shared ReportRetriever from app state (may be None in tests)."""
@@ -1064,6 +1218,7 @@ def get_report_content(request: Request, report_id: int) -> dict[str, Any]:
 # Audit endpoints  (§7.4)
 # ---------------------------------------------------------------------------
 
+
 @router.get("/audit")
 def list_audit(
     request: Request,
@@ -1123,6 +1278,7 @@ def export_audit(
 # Connectivity echo  (§7.5 — wizard step validation, Flow A-7)
 # ---------------------------------------------------------------------------
 
+
 class EchoTarget(BaseModel):
     name: str = ""
     host: str = ""
@@ -1163,6 +1319,7 @@ def echo_probe(payload: EchoTarget) -> dict[str, Any]:
 # Setup wizard  (§7.5 — guided first-run, US-08)
 # ---------------------------------------------------------------------------
 
+
 @router.post("/wizard/validate/{step}")
 def wizard_validate(step: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Validate one wizard step's data (US-08 AC: per-step validation).
@@ -1182,6 +1339,7 @@ def wizard_validate(step: str, payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Operations log  (§7.6 — admin log viewer)
 # ---------------------------------------------------------------------------
+
 
 @router.get("/logs")
 def get_logs(
@@ -1212,6 +1370,7 @@ def get_logs(
 # ---------------------------------------------------------------------------
 # Diagnostics bundle export  (§7, S09-T5)
 # ---------------------------------------------------------------------------
+
 
 @router.get("/diagnostics/export")
 def diagnostics_export(request: Request) -> JSONResponse:
@@ -1278,6 +1437,7 @@ def diagnostics_export(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 # Operator console v0  (§2.2 Flow B — read-only dashboard)
 # ---------------------------------------------------------------------------
+
 
 @router.get("/console/dashboard")
 def console_dashboard(request: Request) -> dict[str, Any]:

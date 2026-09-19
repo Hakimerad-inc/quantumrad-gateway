@@ -2,13 +2,19 @@
 
 Guides a non-technical user through initial gateway configuration in the SPA:
 
-    receiver → destinations → reports → summary
+    receiver → destinations → reports → admin → summary
 
 Each step has a **validation gate**; a step cannot be completed until its data
 passes.  The wizard can only be saved (``is_complete()``) once every step is
 complete.  This module holds the pure state-machine logic; the SPA drives it
 over ``GET/POST /api/wizard`` and the C-ECHO service (``web/echo.py``) powers
 the per-step connectivity validation.
+
+The ``admin`` step collects the panel password as **plaintext** — the SPA never
+holds or round-trips a hash — and posts it to ``POST /api/web-ui/password``,
+which hashes it server-side. It is optional: a blank password skips the step,
+leaving the panel open (the composition root still refuses an auth-off bind on
+anything but loopback).
 """
 
 from __future__ import annotations
@@ -17,7 +23,9 @@ from typing import Any
 
 __all__ = ["SetupWizard"]
 
-_STEPS = ["receiver", "destinations", "reports", "summary"]
+_STEPS = ["receiver", "destinations", "reports", "admin", "summary"]
+
+_MIN_PASSWORD_LEN = 8
 
 
 class SetupWizard:
@@ -58,6 +66,8 @@ class SetupWizard:
             return self._validate_destinations(data)
         if step == "reports":
             return self._validate_reports(data)
+        if step == "admin":
+            return self._validate_admin(data)
         if step == "summary":
             return self._validate_summary(data)
         return []
@@ -117,6 +127,19 @@ class SetupWizard:
         if not query_source:
             return ["query_source is required when reports are enabled"]
         return []
+
+    @staticmethod
+    def _validate_admin(data: dict[str, Any]) -> list[str]:
+        # Optional step — an empty password leaves the panel open (loopback).
+        password = str(data.get("password") or "")
+        if not password:
+            return []
+        errors: list[str] = []
+        if len(password) < _MIN_PASSWORD_LEN:
+            errors.append(f"password must be at least {_MIN_PASSWORD_LEN} characters")
+        if str(data.get("confirm") or "") != password:
+            errors.append("the password and its confirmation do not match")
+        return errors
 
     def _validate_summary(self, data: dict[str, Any]) -> list[str]:
         required = [s for s in self.steps if s != "summary"]

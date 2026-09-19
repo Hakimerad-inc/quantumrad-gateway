@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 
-from mercure_gateway.config import CredentialEntry, GatewayConfig
+from mercure_gateway.config import ENC_PLACEHOLDER, CredentialEntry, GatewayConfig
 from mercure_gateway.credentials import CredentialVault, WrongPasswordError
 from mercure_gateway.keyring_store import KeyringCredentialStore
 
@@ -32,11 +32,6 @@ __all__ = [
     "encrypt_config_for_storage",
     "load_master_password",
 ]
-
-# Non-secret placeholder written to disk in place of an encrypted secret field.
-# Distinct from the ``***`` redaction sentinel used by the web API, and non-empty
-# so ``min_length=1`` secret fields (e.g. XNAT password) still validate on load.
-ENC_PLACEHOLDER = "__ENCRYPTED_AT_REST__"
 
 # Per-destination-type map of (model field, CredentialEntry encrypted slot).
 _SECRET_FIELDS: dict[str, list[tuple[str, str]]] = {

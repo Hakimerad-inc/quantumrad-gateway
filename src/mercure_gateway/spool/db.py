@@ -23,15 +23,19 @@ here are plain. See the ``audit`` module docstring for the encryption note.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
+import logging
 import os
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 5
 
@@ -178,11 +182,19 @@ def _rowid(cursor: sqlite3.Cursor) -> int:
 
 
 class Database:
-    """Thread-safe wrapper over a single SQLite connection for spool + audit.
+    """Thread-safe wrapper over a SQLite connection for spool + audit.
 
-    All public methods serialize on an internal re-entrant lock (receiver,
-    forwarder and web threads share this instance). Multi-statement invariants
-    run inside :meth:`transaction` (``BEGIN IMMEDIATE``), so they are atomic.
+    Writes and read-for-write queries serialize on one connection guarded by an
+    internal re-entrant lock (receiver, forwarder and web threads share this
+    instance). Multi-statement invariants run inside :meth:`transaction`
+    (``BEGIN IMMEDIATE``), so they are atomic.
+
+    Pure-SELECT list and aggregate queries go to a per-thread **read-only**
+    connection instead (:meth:`_read_connection, P1-19): a WAL reader sees the
+    last committed snapshot without taking the write lock, so the web UI and
+    the report poller do not contend with the receive path. Methods that must
+    see uncommitted state, or that feed a write decision in the same
+    transaction, stay on the write connection.
     """
 
     def __init__(self, path: str | Path | None = None, *, encrypt_key: str | None = None) -> None:
@@ -190,6 +202,11 @@ class Database:
         self._lock = threading.RLock()
         self._encrypt_key = encrypt_key
         self._conn = self._connect()
+        # Per-thread read-only connections (P1-19). None until first use; see
+        # _read_connection for why they exist and how they degrade.
+        self._read_local = threading.local()
+        self._read_conns: list[sqlite3.Connection] = []
+        self._read_disabled = False
 
     @property
     def path(self) -> str:
@@ -209,6 +226,75 @@ class Database:
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    def _open_read_connection(self) -> sqlite3.Connection:
+        """Open one read-only connection (called once per thread).
+
+        ``mode=ro`` refuses to create the file and refuses to write, both of
+        which are what makes the routing safe. A WAL reader needs the ``-shm``
+        sidecar, so on a configuration where that cannot be opened this fails
+        outright — the caller degrades to the write connection rather than
+        raising, because the routing is an optimisation and every query routed
+        here is correct on either connection.
+        """
+        uri = Path(self._path).resolve().as_uri() + "?mode=ro"
+        try:
+            # check_same_thread=False: the connection is only ever touched by
+            # the thread that created it (it is stored in threading.local), so
+            # the same-thread guard buys nothing and would stop close() from
+            # shutting down a reader opened by a worker thread.
+            conn = sqlite3.connect(uri, uri=True, isolation_level=None, check_same_thread=False)
+        except sqlite3.OperationalError as exc:
+            self._read_disabled = True
+            logger.warning(
+                "read-only database connection unavailable (%s); list queries "
+                "share the write connection and take its lock", exc
+            )
+            return self._conn
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
+        # Belt and braces: a query routed to the reader that turns out not to
+        # be a SELECT fails here, loudly, instead of committing on a second
+        # connection the write lock never covered.
+        with contextlib.suppress(sqlite3.OperationalError):
+            conn.execute("PRAGMA query_only = ON")
+        with self._lock:
+            self._read_conns.append(conn)
+        return conn
+
+    def _read_connection(self) -> sqlite3.Connection:
+        """The connection a pure-SELECT list method should use.
+
+        One write connection plus one process-wide RLock serializes the
+        receiver, the forwarder, the web threads and the report poller — a slow
+        page-1 query from the admin UI stalls a C-STORE receive. In WAL mode a
+        read-only connection sees the last committed snapshot *without* taking
+        the write lock, so routing the list/aggregate queries here is what
+        breaks that contention (P1-19).
+
+        Three things deliberately do not use it: ``:memory:`` databases (a
+        second connection would see an empty database, not the in-memory one),
+        reads that must see uncommitted state or that feed a write decision in
+        the same transaction (they take the write connection's lock for a
+        reason), and anything inside :meth:`transaction`.
+        """
+        if self._path == ":memory:" or self._read_disabled:
+            return self._conn
+        conn = getattr(self._read_local, "conn", None)
+        if conn is None:
+            conn = self._open_read_connection()
+            self._read_local.conn = conn
+        return conn
+
+    def _read(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+        """Run a read-only query on the per-thread reader (P1-19)."""
+        return self._read_connection().execute(sql, params).fetchall()
+
+    def _read_one(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
+        """Run a read-only query returning at most one row (P1-19)."""
+        return cast(
+            sqlite3.Row | None, self._read_connection().execute(sql, params).fetchone()
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -343,8 +429,12 @@ class Database:
         return int(row[0]) if row is not None else 0
 
     def close(self) -> None:
-        """Close the underlying SQLite connection."""
+        """Close the write connection and any per-thread readers."""
         with self._lock:
+            for conn in self._read_conns:
+                conn.close()
+            self._read_conns.clear()
+            self._read_local = threading.local()
             self._conn.close()
 
     def connection(self) -> sqlite3.Connection:
@@ -652,8 +742,7 @@ class Database:
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
-        with self._lock:
-            return self._conn.execute(sql, params).fetchall()
+        return self._read(sql, params)
 
     def list_studies_with_route_counts(
         self,
@@ -687,15 +776,13 @@ class Database:
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
-        with self._lock:
-            return self._conn.execute(sql, params).fetchall()
+        return self._read(sql, params)
 
     def count_states(self) -> dict[str, int]:
         """Count studies grouped by lifecycle state (SQL aggregate)."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT state, COUNT(*) AS n FROM studies GROUP BY state"
-            ).fetchall()
+        rows = self._read(
+            "SELECT state, COUNT(*) AS n FROM studies GROUP BY state"
+        )
         return {row["state"]: int(row["n"]) for row in rows}
 
     def count_studies(self, state: str | None = None, modality: str | None = None) -> int:
@@ -715,8 +802,7 @@ class Database:
             params.append(modality)
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
-        with self._lock:
-            row = self._conn.execute(sql, params).fetchone()
+        row = self._read_one(sql, params)
         return int(row["n"]) if row else 0
 
     # --- task_routing ----------------------------------------------------
@@ -763,35 +849,33 @@ class Database:
         One row per (target_name, target_type, status) with live counts and
         the most recent activity timestamp — feeds the destination nodes.
         """
-        with self._lock:
-            return self._conn.execute(
-                """
-                SELECT target_name, target_type, status,
-                       COUNT(*) AS n, MAX(updated_at) AS last_activity
-                FROM task_routing
-                GROUP BY target_name, target_type, status
-                """
-            ).fetchall()
+        return self._read(
+            """
+            SELECT target_name, target_type, status,
+                   COUNT(*) AS n, MAX(updated_at) AS last_activity
+            FROM task_routing
+            GROUP BY target_name, target_type, status
+            """
+        )
 
     def list_recent_routes(self, target_name: str, *, limit: int = 20) -> list[sqlite3.Row]:
         """Latest studies routed to one destination (pipeline drill-down).
 
         Joins the study row for display fields; newest route activity first.
         """
-        with self._lock:
-            return self._conn.execute(
-                """
-                SELECT r.id AS route_id, r.study_id, r.target_type, r.status,
-                       r.attempts, r.last_error, r.updated_at,
-                       s.study_uid, s.accession, s.patient_name, s.modality
-                FROM task_routing AS r
-                JOIN studies AS s ON s.id = r.study_id
-                WHERE r.target_name = ?
-                ORDER BY r.updated_at DESC, r.id DESC
-                LIMIT ?
-                """,
-                (target_name, limit),
-            ).fetchall()
+        return self._read(
+            """
+            SELECT r.id AS route_id, r.study_id, r.target_type, r.status,
+                   r.attempts, r.last_error, r.updated_at,
+                   s.study_uid, s.accession, s.patient_name, s.modality
+            FROM task_routing AS r
+            JOIN studies AS s ON s.id = r.study_id
+            WHERE r.target_name = ?
+            ORDER BY r.updated_at DESC, r.id DESC
+            LIMIT ?
+            """,
+            (target_name, limit),
+        )
 
     def list_audit_for_study(self, study_uid: str, *, limit: int = 50) -> list[sqlite3.Row]:
         """Audit events touching *study_uid*, newest first.
@@ -803,15 +887,14 @@ class Database:
         before the column existed (v4 databases) are backfilled by
         :meth:`_migrate_audit_study_uid` at open time.
         """
-        with self._lock:
-            return self._conn.execute(
-                """
-                SELECT id, ts, event, detail, user, hash, study_uid FROM audit_events
-                WHERE study_uid = ?
-                ORDER BY id DESC LIMIT ?
-                """,
-                (study_uid, limit),
-            ).fetchall()
+        return self._read(
+            """
+            SELECT id, ts, event, detail, user, hash, study_uid FROM audit_events
+            WHERE study_uid = ?
+            ORDER BY id DESC LIMIT ?
+            """,
+            (study_uid, limit),
+        )
 
     def _has_waiting_tasks(self) -> bool:
         """Cheap read: is there any waiting task at all?"""
@@ -1055,8 +1138,7 @@ class Database:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        with self._lock:
-            return self._conn.execute(sql, params).fetchall()
+        return self._read(sql, params)
 
     def spool_num_bytes(self) -> int:
         """Total bytes of persisted DICOM instances (spool-size cap, review M3).
@@ -1067,27 +1149,25 @@ class Database:
         rows are removed together with it, keeping the total in sync with the
         DB-tracked spool contents.
         """
-        with self._lock:
-            row = self._conn.execute(
-                """
-                SELECT COALESCE(SUM(m.num_bytes), 0) AS total
-                FROM instance_meta AS m
-                JOIN studies AS s ON s.study_uid = m.study_uid
-                """
-            ).fetchone()
+        row = self._read_one(
+            """
+            SELECT COALESCE(SUM(m.num_bytes), 0) AS total
+            FROM instance_meta AS m
+            JOIN studies AS s ON s.study_uid = m.study_uid
+            """
+        )
         return int(row["total"]) if row is not None else 0
 
     def list_instance_meta(self, study_uid: str) -> list[sqlite3.Row]:
         """Return per-instance storage rows for *study_uid* (oldest first)."""
-        with self._lock:
-            return self._conn.execute(
-                """
-                SELECT id, study_uid, series_uid, instance_uid, file_path,
-                       received_syntax, stored_syntax, num_bytes, received_at
-                FROM instance_meta WHERE study_uid = ? ORDER BY id
-                """,
-                (study_uid,),
-            ).fetchall()
+        return self._read(
+            """
+            SELECT id, study_uid, series_uid, instance_uid, file_path,
+                   received_syntax, stored_syntax, num_bytes, received_at
+            FROM instance_meta WHERE study_uid = ? ORDER BY id
+            """,
+            (study_uid,),
+        )
 
     def insert_instance_meta(
         self,
@@ -1175,8 +1255,7 @@ class Database:
             params.append(event)
         sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        with self._lock:
-            return self._conn.execute(sql, params).fetchall()
+        return self._read(sql, params)
 
     def iter_audit_events(self) -> Iterator[sqlite3.Row]:
         """Yield all audit events in append order (oldest first)."""
@@ -1249,19 +1328,15 @@ class Database:
 
     def load_pending_hub_events(self, *, limit: int = _OUTBOX_MAX_ROWS) -> list[sqlite3.Row]:
         """Return undelivered hub events in insertion order (oldest first)."""
-        with self._lock:
-            return self._conn.execute(
-                "SELECT id, payload, attempts, last_error FROM hub_outbox "
-                "ORDER BY id ASC LIMIT ?",
-                (limit,),
-            ).fetchall()
+        return self._read(
+            "SELECT id, payload, attempts, last_error FROM hub_outbox "
+            "ORDER BY id ASC LIMIT ?",
+            (limit,),
+        )
 
     def count_pending_hub_events(self) -> int:
         """Number of undelivered hub events still in the outbox."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM hub_outbox"
-            ).fetchone()
+        row = self._read_one("SELECT COUNT(*) AS n FROM hub_outbox")
         return int(row["n"]) if row and row["n"] is not None else 0
 
 

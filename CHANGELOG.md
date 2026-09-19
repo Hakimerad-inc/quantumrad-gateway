@@ -118,10 +118,18 @@ recovery.
   metadata failure now rolls both writes back and rejects the instance
   (`0xC120`) so the modality retries, instead of leaving a study row with no
   provenance; the orphaned file is reconciled as before.
-- **Reads off the write connection (P1-19)** — designed, not yet implemented.
-  Pure-SELECT list methods would move to a per-thread read-only connection,
-  so the web UI and the report poller no longer take the receiver's write
-  lock.
+- **Reads off the write connection (P1-19).** Pure-SELECT list and aggregate
+  queries (`list_studies`, `count_states`, `list_audit_events`, `list_reports`,
+  `spool_num_bytes`, the hub pending-event readers) now run on a per-thread
+  read-only connection, so the web UI and the report poller no longer take the
+  receiver's write lock. In WAL mode a reader sees the last committed snapshot
+  without acquiring it. The carve-outs stay on the write connection on
+  purpose: `get_routes` and the other reads that feed a write decision in the
+  same transaction, and `iter_audit_events` (one shared cursor). `:memory:`
+  test databases are unaffected. If a read-only WAL connection cannot be
+  opened on some configuration (it needs the `-shm` sidecar), the routing
+  degrades to the write connection with one warning instead of raising — the
+  queries are correct on either connection, the split is an optimisation.
 
 ### CI
 
@@ -173,7 +181,6 @@ recovery.
 
 Tracked so this entry stays honest about the state of the branch:
 
-- **P1-19** — the read-connection change above.
 - **P1-22** — six documents still describe an auth-enabling path that does not
   exist (the PBKDF2 CLI/endpoint surfaces replaced it).
 

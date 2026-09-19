@@ -670,6 +670,29 @@ class GatewayConfig(_StrictConfigModel):
     usb_mode: USBModeConfig = Field(default_factory=USBModeConfig)
 
     @model_validator(mode="after")
+    def _reject_duplicate_destination_names(self) -> GatewayConfig:
+        """Duplicate destination names are not a valid config (review P1-2).
+
+        Routing tables, the credential-entry map, and the '***' sentinel
+        restoration in the web API all key destinations by name; two entries
+        sharing one silently collapse into whichever sorts first, which is how
+        a renamed destination ends up persisting *another* destination's
+        secret. Lint flagged it as a warning; the failure mode is a wrong
+        credential on disk, so it is rejected here instead.
+        """
+        names = [d.name for d in self.destinations]
+        seen: set[str] = set()
+        for name in names:
+            if name in seen:
+                raise ValueError(
+                    f"Destination name {name!r} is used more than once — names must "
+                    "be unique (routing, credentials, and the web API's redaction "
+                    "restore all address destinations by name)."
+                )
+            seen.add(name)
+        return self
+
+    @model_validator(mode="after")
     def _warn_on_stale_forwarding_rule_targets(self) -> GatewayConfig:
         """Warn (not reject) when a forwarding rule names no destination.
 

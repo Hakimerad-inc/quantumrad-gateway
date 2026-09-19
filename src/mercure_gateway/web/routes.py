@@ -869,28 +869,38 @@ def _restore_redacted_secrets(payload: dict[str, Any], current: GatewayConfig) -
     every edit. Without this restoration the sentinel would be persisted as
     the real credential (destroying it — review F4).
 
-    Destinations are matched to their stored counterpart by name, falling back
-    to list position when the name misses. The fallback matters because the
-    Destinations page exposes rename as a first-class action: renaming
-    "lab-sftp" to "lab-sftp-2" leaves the secret field carrying the sentinel
-    under a name the by-name lookup cannot match, which would otherwise persist
-    the literal ``"***"`` and break the destination after the next restart.
-    Position is only consulted when a sentinel is actually present — i.e. the
-    operator did not touch the field — so the fallback cannot overwrite a
-    deliberately entered credential.
+    Destinations are matched to their stored counterpart **by name only**. A
+    positional fallback used to cover an in-place rename, but position is not
+    identity: any UI sort or filter reorders the saved body, so a renamed
+    destination could inherit the *wrong* stored secret — a silent credential
+    cross-wire that survives to the next restart (review P1-2). A sentinel that
+    names nothing stored is now a hard 400 naming the destination; the operator
+    re-enters the credential rather than getting a wrong one for free.
     """
     data: dict[str, Any] = json.loads(json.dumps(payload))  # deep copy
     current_data: dict[str, Any] = json.loads(current.model_dump_json())
 
     current_dests = {d.get("name"): d for d in current_data.get("destinations", [])}
-    current_dest_list = list(current_data.get("destinations", []))
     for index, destination in enumerate(data.get("destinations", [])):
-        prev = current_dests.get(destination.get("name"))
+        name = destination.get("name")
+        prev = current_dests.get(name)
         if prev is None:
-            # A rename in place keeps the sentinel under a new name; the stored
-            # counterpart is the destination at the same position.
-            prev = current_dest_list[index] if index < len(current_dest_list) else None
-        if prev is None:
+            # Nothing stored under this name — a rename, an addition, or a
+            # foreign file. Any sentinel here cannot be restored; report it
+            # instead of persisting the literal or guessing by position.
+            unrestorable = [
+                key
+                for key in DESTINATION_SECRET_FIELDS
+                if destination.get(key) == _REDACTED_SENTINEL
+            ]
+            if unrestorable:
+                raise RedactedSecretUnrestorableError(
+                    f"destinations[{index}].{unrestorable[0]}",
+                    f"Destination {name!r} has a redacted {unrestorable[0]} but no "
+                    f"destination named {name!r} exists in the stored config — "
+                    "re-enter the credential (a rename cannot carry a secret by "
+                    "position, and the literal value would not be accepted).",
+                )
             continue
         for key in DESTINATION_SECRET_FIELDS:
             if destination.get(key) == _REDACTED_SENTINEL and prev.get(key):
@@ -952,7 +962,10 @@ def update_config(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
     click at a time. The check runs after validation so the operator sees the
     most specific error first.
     """
-    restored = _restore_redacted_secrets(payload, _config(request))
+    try:
+        restored = _restore_redacted_secrets(payload, _config(request))
+    except RedactedSecretUnrestorableError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
     try:
         updated = GatewayConfig.model_validate(restored)
     except Exception as exc:  # noqa: BLE001 — surface validation as 400
@@ -1090,8 +1103,13 @@ async def import_config(request: Request) -> dict[str, Any]:
             detail=f"Unsupported config_version: {config_version}. Expected '1.0'.",
         )
 
-    # Restore redacted secrets from current config (same logic as PUT /config)
-    restored = _restore_redacted_secrets(payload, _config(request))
+    # Restore redacted secrets from current config (same logic as PUT /config).
+    # A foreign file carrying '***' sentinels names nothing stored here, so
+    # this 400s naming the field rather than persisting the literal.
+    try:
+        restored = _restore_redacted_secrets(payload, _config(request))
+    except RedactedSecretUnrestorableError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
 
     # Validate full config. Unlike PUT /config this is a foreign file — it may
     # come from another appliance build or an editor — so it gets the same

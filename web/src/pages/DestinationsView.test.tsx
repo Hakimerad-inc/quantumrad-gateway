@@ -377,4 +377,35 @@ describe('DestinationsView', () => {
     await user.click(screen.getByText('Save Changes'));
     expect(await screen.findByText(/Input should be greater than 0/)).toBeInTheDocument();
   });
+
+  it('a rename carrying an untouched secret is refused with a message, not saved', async () => {
+    // Rename is a first-class action, but a secret the operator never touched
+    // is still the '***' sentinel — and a sentinel under a name nothing is
+    // stored under cannot be restored. Position used to cover this; position is
+    // not identity once the list is sorted or filtered, so the server now 400s
+    // naming the destination and the page must show that detail (review P1-2).
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/config') && init?.method === 'PUT') {
+          return json(
+            {
+              detail:
+                "Destination 'sftp-lab-2' has a redacted password but no destination named 'sftp-lab-2' exists — re-enter the credential.",
+            },
+            400,
+          );
+        }
+        return json(CONFIG_WITH_SECRET);
+      }),
+    );
+    render(<DestinationsView />);
+    const name = await screen.findByDisplayValue('sftp-lab');
+    await user.clear(name);
+    await user.type(name, 'sftp-lab-2');
+    await user.click(screen.getByText('Save Changes'));
+    expect(await screen.findByText(/re-enter the credential/)).toBeInTheDocument();
+  });
 });

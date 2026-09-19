@@ -427,17 +427,48 @@ def test_put_config_roundtrip_preserves_secrets(
     assert load_config(config_path).destinations[0].password == "REAL-PW"  # type: ignore[union-attr]
 
 
-def test_put_config_rename_preserves_secrets(
+def test_put_config_rename_with_sentinel_is_rejected(
     client: TestClient, app, spool: Spool, tmp_path
 ) -> None:
-    """Renaming a destination must not destroy its stored credential.
+    """Renaming a destination while its secret is still the '***' sentinel is
+    a 400 naming the destination (review P1-2).
 
-    The Destinations page exposes rename as a first-class action. The secret
-    field still carries the '***' sentinel (the operator never touched it), but
-    under a name the by-name restore lookup cannot match — so the sentinel would
-    be persisted as the literal password and the destination would break after
-    the next restart with no indication why.
+    The Destinations page exposes rename as a first-class action. Position used
+    to restore the secret, but position is not identity — any UI sort or filter
+    reorders the saved body, so the same payload could inherit the *wrong*
+    stored credential. Now the operator re-enters the credential; the literal
+    sentinel is never persisted.
     """
+    from mercure_gateway.config import SFTPDestination
+
+    config_path = tmp_path / "gw.json"
+    app.state.config_path = str(config_path)
+
+    real = default_config()
+    real.destinations = [
+        SFTPDestination(
+            name="nas", type="sftp", host="nas", port=22, username="u", password="REAL-PW"
+        )
+    ]
+    app.state.config = real
+
+    redacted = client.get("/api/config").json()
+    redacted["destinations"][0]["name"] = "nas-2"
+
+    r = client.put("/api/config", json=redacted)
+    assert r.status_code == 400
+    assert "nas-2" in r.json()["detail"]
+    assert "re-enter" in r.json()["detail"]
+
+    # Nothing was persisted, and the running config is untouched.
+    assert not config_path.exists()
+    assert _config_dest_password(app.state.config, 0) == "REAL-PW"
+
+
+def test_put_config_rename_with_reentered_secret_succeeds(
+    client: TestClient, app, spool: Spool, tmp_path
+) -> None:
+    """The documented resolution: rename and re-type the credential."""
     import json as _json
 
     from mercure_gateway.config import SFTPDestination, load_config
@@ -454,16 +485,19 @@ def test_put_config_rename_preserves_secrets(
     app.state.config = real
 
     redacted = client.get("/api/config").json()
-    # Rename in place; the password is still the untouched sentinel.
     redacted["destinations"][0]["name"] = "nas-2"
+    redacted["destinations"][0]["password"] = "REAL-PW"
 
     r = client.put("/api/config", json=redacted)
     assert r.status_code == 200
 
     saved = _json.loads(config_path.read_text())
     assert saved["destinations"][0]["name"] == "nas-2"
-    assert saved["destinations"][0]["password"] == "REAL-PW"
     assert load_config(config_path).destinations[0].password == "REAL-PW"  # type: ignore[union-attr]
+
+
+def _config_dest_password(config: object, index: int) -> str:
+    return getattr(config.destinations[index], "password", "")  # type: ignore[no-any-return]
 
 
 def test_update_config_rejects_invalid(client: TestClient) -> None:

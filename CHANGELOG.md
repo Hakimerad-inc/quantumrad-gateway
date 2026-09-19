@@ -176,13 +176,20 @@ recovery.
   existed; an operator could not tell what a release changed.
 - `docs/dev/release-runbook.md` gained §5 (non-destructive re-dispatch) and
   §6 (the real rollback procedure).
+- The remaining stale auth documents are corrected (P1-22): the config
+  examples in the PRD and the refinement spec no longer say the password hash
+  is bcrypt set via the setup wizard (it is `pbkdf2$...` via
+  `--set-web-password`, and the wizard posts plaintext to
+  `/api/web-ui/password`, never a hash), and
+  `docs/guides/secrets-and-env-overrides.md` no longer recommends `htpasswd`
+  for a hash the scheme does not use. The sprint logs still record
+  bcrypt/sha256 as the state of that sprint — that is what happened, and the
+  CHANGELOG is the live record.
 
 ### Still open for GA (not yet landed)
 
-Tracked so this entry stays honest about the state of the branch:
-
-- **P1-22** — six documents still describe an auth-enabling path that does not
-  exist (the PBKDF2 CLI/endpoint surfaces replaced it).
+None. Every P0 and P1 finding from the comprehensive review has landed on this
+branch.
 
 ## v1.1.0-rc3 — 2026-09-17
 

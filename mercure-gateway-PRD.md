@@ -384,7 +384,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
     "host": "127.0.0.1",
     "port": 8080,
     "auth_enabled": false,               // enable for shared machines
-    "auth_password_hash": ""             // bcrypt hash; set via setup wizard
+    "auth_password_hash": ""             // pbkdf2$iters$salt$key; --set-web-password
   },
   "credentials": {                       // NEW: encrypted credential storage
     "encrypted": true,                   // AES-256-GCM encrypted blocks

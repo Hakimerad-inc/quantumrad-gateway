@@ -345,7 +345,7 @@ CREATE TABLE forwarding_config (
   "host": "127.0.0.1",
   "port": 8080,
   "auth_enabled": false,          // localhost-only by default; enable for shared machines
-  "auth_password_hash": ""        // bcrypt hash; set via setup wizard
+  "auth_password_hash": ""        // pbkdf2$iters$salt$key; set with --set-web-password
 }
 ```
 

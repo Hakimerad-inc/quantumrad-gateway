@@ -57,10 +57,19 @@ MERCURE_GATEWAY_AUDIT_HUB_REPORTING_API_KEY=top-secret-key
 MERCURE_GATEWAY_AUDIT_HUB_REPORTING_BOOKKEEPER_URL=https://hub.example.com
 MERCURE_GATEWAY_AUDIT_HUB_REPORTING_ENABLED=true
 
-# Web admin login password hash (bcrypt/sha256$salt$hash).
-# Generate with the setup wizard, or: htpasswd -bnBC 10 "" 'password' | cut -d: -f2
+# Web admin login: enable auth and supply the password hash. New hashes are
+# pbkdf2$<iters>$<salt hex>$<key hex> (stdlib only — see web/auth.py; the old
+# bcrypt branch is gone because bcrypt is not a declared dependency and a hash
+# created where it was importable could become unverifiable later, permanently
+# locking out the panel). Legacy sha256$salt$hex hashes still verify.
+#
+# The supported way to set one is the CLI, which prompts and stores the hash:
+#     mercure-gateway --set-web-password
+# For an env override you need a pre-computed hash, e.g. from a Python one-liner
+# using the product's own function:
+#     python -c "from mercure_gateway.web.auth import hash_password as h; print(h('pw'))"
 MERCURE_GATEWAY_WEB_UI_AUTH_ENABLED=true
-MERCURE_GATEWAY_WEB_UI_AUTH_PASSWORD_HASH=sha256$salt$hash
+MERCURE_GATEWAY_WEB_UI_AUTH_PASSWORD_HASH=pbkdf2$200000$salthex$keyhex
 
 # Master password for the at-rest config vault.
 # MERCURE_MASTER_PASSWORD_FILE=/run/secrets/gateway-master-pw   (preferred: file)

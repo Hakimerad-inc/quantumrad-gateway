@@ -160,7 +160,7 @@ def _is_newer(manifest_version: str, current_version: str) -> bool:
 
 @dataclass
 class UpdateResult:
-    """Outcome of a check/apply/rollback operation."""
+    """Outcome of a check/apply operation."""
 
     available: bool = False
     manifest: UpdateManifest | None = None
@@ -173,7 +173,9 @@ class Updater:
 
     ``current_version`` tracks the running version.  ``pending_update`` holds
     a downloaded-but-not-yet-applied archive (staged by :meth:`apply_update`)
-    so a restart can complete the swap.  ``rollback()`` clears it.
+    so a restart can complete the swap.  There is no in-process rollback: the
+    updater is forward-only, and undoing a bad update means reinstalling the
+    previous signed installer (see docs/dev/release-runbook.md §6).
     """
 
     def __init__(
@@ -299,7 +301,12 @@ class Updater:
         logger.info("update %s staged for apply", manifest.version)
         return UpdateResult(ok=True)
 
-    def rollback(self) -> UpdateResult:
-        """Clear a staged update; the running version is unchanged."""
-        self.pending_update = None
-        return UpdateResult(ok=True, available=False)
+    # Review P1-14: there is no in-process rollback, and there never was a
+    # caller for one. The Tauri updater is forward-only — a staged archive is
+    # swapped at the next restart, and the running binary cannot un-swap
+    # itself. A method named rollback() that no production caller reaches is
+    # worse than no method: an operator who reads the class docstring and
+    # plans around it has planned around something that was never wired.
+    # The real procedure is reinstalling the previous signed installer — see
+    # docs/dev/release-runbook.md §6 (spool data and config survive; the
+    # sidecar and the data are separate trees).

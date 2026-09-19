@@ -82,14 +82,16 @@ sidecar, build + sign the Tauri bundles (real pubkey +
 from secrets), and upload artifacts. The **release** job creates the GitHub
 release (`gh release create --generate-notes`), merges BOTH platforms into one
 `latest.json` (with `pub_date` defaulted to UTC-now — pin
-`RELEASE_PUB_DATE` via workflow_dispatch only if you need a fixed stamp), and
-uploads installers + `.sig` sidecars + `latest.json`.
+`RELEASE_PUB_DATE` via workflow_dispatch only if you need a fixed stamp),
+generates the CycloneDX SBOM for the frozen sidecar, computes sha256 checksums
+of every artifact, and uploads installers + `.sig` sidecars + `latest.json` +
+`sbom.json` + `SHA256SUMS`, printing the checksums into the release body.
 
 ## 3. Post-release verification
 
 ```bash
 gh release view v1.1.0-rc1 --json assets -q '.assets[].name'
-# expect: installer(s) per OS, matching .sig files, latest.json
+# expect: installer(s) per OS, matching .sig files, latest.json, sbom.json, SHA256SUMS
 curl -fsSL https://github.com/Hakimerad-inc/quantumrad-gateway/releases/download/v1.1.0-rc1/latest.json | jq .platforms
 # expect: BOTH windows-x86_64 and linux-x86_64 keys, non-empty signatures, valid pub_date
 ```
@@ -97,6 +99,18 @@ curl -fsSL https://github.com/Hakimerad-inc/quantumrad-gateway/releases/download
 - Install the artifact on a clean VM (rc-checklist §3 rows) and exercise
   check-for-updates: the installed version should see no newer release; then
   publish `v1.1.0` and confirm the updater offers it (signature enforced).
+- **Integrity rehearsal:** the release body lists every artifact's sha256.
+  Download one installer plus `SHA256SUMS` into the same directory and run
+  `sha256sum -c SHA256SUMS` — this is the only channel that proves a download
+  against a value readable *before* fetching anything (a signature proves
+  "this key signed this artifact", not "you got what was published").
+- **Dependency audit:** `sbom.json` is the CycloneDX 1.5 document for the
+  frozen Python sidecar. Feed it to a scanner (`cyclonedx` CLI, Dependency
+  Track, `syft`) to answer "which versions are in this appliance?" without
+  diffing the repo at the tag. Its scope is the *resolved build input*
+  (`uv export --frozen`), not a byte-exact bundle inventory — see the honest
+  scope note in `scripts/export_sbom.py`. PyInstaller's build-time deps
+  (`altgraph`, `macholib`, …) appear there and do not ship.
 - **Tamper rehearsal (no Windows needed):** `update_url` is operator
   configurable (`config.update.update_url`) — point a test install at a local
   `python3 -m http.server` serving a hand-edited `latest.json` whose signature
@@ -113,7 +127,62 @@ curl -fsSL https://github.com/Hakimerad-inc/quantumrad-gateway/releases/download
 - AppImage bundling downloads linuxdeploy at build time — a flaky network can
   fail `package-linux`; the deb leg is authoritative for the size gate.
 
-## 5. After a successful RC
+## 5. Re-dispatching a failed leg (non-destructive)
+
+`workflow_dispatch` from main with the `tag` input re-runs the *current*
+pipeline against an already-pushed (immutable) tag. This is how a failed
+release leg is recovered.
+
+The upload step is deliberately **not** `--clobber` (review P1-15): overwriting
+a published artifact would also overwrite its `.sig`, so a fresh signature over
+a *different* artifact would still verify against the same compiled-in pubkey —
+trust would degrade to "the signing key was never misused". So:
+
+- A re-dispatch that finds an asset it wants to upload **fails loudly** with an
+  `::error` naming the release. It does not silently replace anything.
+- To recover: delete the stale asset(s) on the release page by hand, then
+  re-dispatch. Never re-publish over a signed artifact.
+- Non-conflicting assets still upload, so a partial failure (e.g. only the
+  Windows leg succeeded first time) does not need a full re-run.
+- `latest.json` is regenerated each dispatch; re-dispatching both legs keeps it
+  consistent. If only one leg re-ran, verify §3's `jq .platforms` shows both
+  keys afterwards.
+
+## 6. Rolling back a bad update
+
+The gateway has **no in-process rollback** (review P1-14). The Tauri updater is
+forward-only: a staged archive is swapped at the next restart and the running
+binary cannot un-swap itself. `Updater.rollback()` existed until rc3 and had
+zero production callers — it is deleted rather than left as reachable-looking
+dead code an operator might plan around.
+
+The real procedure, for a release that turned out to be broken after shipping:
+
+1. **Stop the gateway** (`systemctl --user stop mercure-gateway`, or quit the
+   desktop app).
+2. **Reinstall the previous signed installer** for the platform — the one from
+   the release you are rolling back to. The installer replaces the program
+   tree only.
+3. **Data and config survive**: the spool database, `operations.log`, the audit
+   chain, `mercure-gateway.json`, and the credential store all live outside the
+   program tree (see `docs/guides/backup-restore.md` for the paths). Nothing in
+   step 2 touches them.
+4. **Restart** and confirm the reported version in the web panel's footer or
+   `GET /api/system/info`.
+5. **Prevent re-application**: the desktop shell checks for updates on a
+   schedule. If the broken release is still `latest`, point
+   `config.update.update_url` at a manifest for the good version, or disable
+   update checks (`config.update.enabled = false`) for a version-pinned
+   deployment until the broken release is superseded.
+6. **Tell the fleet**: if the broken release reached installed appliances, the
+   fix is a *new* signed release (which the updater will accept as an upgrade),
+   not a rollback instruction — installed updaters will keep offering whatever
+   `latest.json` says.
+
+`systemd Restart=always` does not help here: it restarts a *crashing* binary,
+which is the wrong tool when the binary is new and wrong rather than dead.
+
+## 7. After a successful RC
 
 Update the sprint board (S09-T7 evidence line), `docs/qa/rc1-checklist.md`
 header (date/captain), and note any §3 UAT results. The GA cut repeats §1–§3

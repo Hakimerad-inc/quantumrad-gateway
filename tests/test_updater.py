@@ -1,8 +1,8 @@
 """S09-T4 (RED): Auto-update implementation (PRD §2.3, Q5, ADR-0006).
 
 Tauri Updater flow: fetch update manifest, verify Ed25519 signature,
-download update, apply, and rollback on failure.  The Python side
-handles signature verification and update lifecycle state.
+download update, and apply.  The Python side handles signature verification
+and update lifecycle state.
 
 Signature verification is real cryptography (review H2). These tests build an
 actual Ed25519 keypair rather than asserting the old placeholder, which
@@ -265,7 +265,7 @@ def test_malformed_public_key_is_loud() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Apply / rollback lifecycle
+# Apply lifecycle
 # ══════════════════════════════════════════════════════════════════════
 
 @patch("requests.get")
@@ -340,9 +340,13 @@ def test_apply_update_rejects_manifest_without_signature(
     assert "signature" in (result.error or "").lower()
 
 
-def test_rollback_records_previous_version(updater: Updater) -> None:
-    """rollback() restores the previous version record."""
-    result = updater.rollback()
+def test_the_updater_exposes_no_rollback_path() -> None:
+    """P1-14: rollback() is gone, because it never had a production caller.
 
-    assert result.ok is True
-    assert updater.current_version == "1.0.0"
+    The Tauri updater is forward-only. Keeping a reachable-looking method
+    that no caller reached let an operator plan around a rollback that would
+    never happen. Undoing a bad update is a reinstall of the previous signed
+    installer — see docs/dev/release-runbook.md §6.
+    """
+
+    assert not hasattr(updater, "rollback")

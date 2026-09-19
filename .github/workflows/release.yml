@@ -184,6 +184,42 @@ jobs:
               json.dump(manifest, fh, indent=2)
           print(json.dumps(manifest, indent=2))
           PY
+      # P1-13: publish the dependency story of the frozen sidecar with the
+      # release. uv.lock is committed but never attached, so an operator (or
+      # a scanner) asking "which versions are in this appliance?" had to
+      # diff the repo at the tag and reconstruct it. This is the resolved
+      # build input — see scripts/export_sbom.py for the honest scope note.
+      - name: Generate the CycloneDX SBOM for the frozen sidecar
+        run: uv run python scripts/export_sbom.py --output dist/sbom.json
+      # P1-15: the checksums are the out-of-band integrity channel. latest.json
+      # deliberately carries no checksum_sha256 (see the note above), and a
+      # signature only proves "this key signed this artifact" — it does not
+      # help an operator who wants to confirm a download against a value they
+      # read *before* fetching anything. The release body is that channel, so
+      # the same sums are printed into it AND attached as SHA256SUMS.
+      - name: Compute sha256 checksums of every published artifact
+        shell: bash
+        run: |
+          cd dist
+          find . -type f ! -name SHA256SUMS | sed 's|^\./||' | sort | tee /tmp/files.txt
+          xargs -a /tmp/files.txt sha256sum | tee SHA256SUMS
+          # The body is assembled from a file so nothing in the auto-generated
+          # notes (commit text, backticks) can be re-evaluated by the shell.
+          {
+            gh release view "$RELEASE_REF" --json body -q .body 2>/dev/null || true
+            echo
+            echo "## Integrity"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+            echo
+            echo "Verify with \`sha256sum -c SHA256SUMS\` in the release's download dir."
+            echo "The frozen backend's CycloneDX SBOM is attached as sbom.json."
+          } > /tmp/notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
       - name: Create or reuse release, upload everything
         shell: bash
         env:
@@ -192,7 +228,19 @@ jobs:
         run: |
           gh release create "$RELEASE_REF" --generate-notes \
             || echo "release $RELEASE_REF already exists — reusing"
-          gh release upload "$RELEASE_REF" --clobber \
-            $(find dist -type f ! -name '*.sig') \
-            $(find dist -type f -name '*.sig') \
-            latest.json
+          # P1-15: NO --clobber. A re-dispatched run used to overwrite an
+          # artifact *and* its .sig together, so a fresh signature over a
+          # different artifact still verified against the same compiled-in
+          # pubkey — trust degraded to "the key was never misused". Now a
+          # conflicting asset fails this step loudly; delete the stale asset
+          # by hand and re-dispatch. Non-conflicting assets still upload, so
+          # a partial failure does not need a full re-run either.
+          set +e
+          gh release upload "$RELEASE_REF" $(find dist -type f)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::one or more assets already exist on $RELEASE_REF and were NOT overwritten. Delete the stale asset(s) on the release page, then re-dispatch — never re-publish over a signed artifact."
+            exit 1
+          fi
+          gh release edit "$RELEASE_REF" --notes-file /tmp/notes.md

@@ -83,6 +83,30 @@ environment emits `.sig` sidecars next to the artifacts; the release
 workflow assembles `latest.json` from them (see
 `.github/workflows/release.yml`).
 
+### Release provenance (review P1-13 / P1-15)
+
+A signed installer answers "did the key holder publish this?" but not "which
+dependencies are in this appliance?" or "did I actually download what was
+published?" Two artifacts close those gaps and are attached to every release:
+
+- **`sbom.json`** — a CycloneDX 1.5 SBOM for the frozen Python sidecar, built
+  by `scripts/export_sbom.py` from `uv export --frozen`. The root project is
+  the `application` component; each pinned dependency is a `library` with its
+  sha256 digests and a `purl`. Scope is the *resolved build input*, not a
+  bundle inventory: PyInstaller collects the subset the backend imports, and
+  its build-time deps appear in the SBOM but do not ship. A byte-exact
+  contents list is a `pyinstaller --report` follow-up, deliberately out of
+  scope here.
+- **`SHA256SUMS`** — sha256 of every published artifact, also printed into the
+  release body. This is the out-of-band integrity channel: it is readable
+  from the release page *before* fetching anything, which a signature is not
+  (a signature only proves "this key signed this artifact", and `latest.json`
+  deliberately carries no `checksum_sha256` of its own).
+
+The generator is stdlib-only and parses `uv export`'s requirements-text
+grammar directly — an SBOM generator in the signing pipeline is the wrong
+place to take on a new third-party dependency.
+
 ## CI packaging jobs
 
 `package-windows` and `package-linux` both:

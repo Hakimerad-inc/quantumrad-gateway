@@ -89,6 +89,16 @@ build-web:
 build-backend:
     uv run python scripts/package_backend.py
 
+# Refresh a locally-frozen sidecar so it matches this tree. A stale snapshot
+# is invisible from the outside — it boots, answers health checks, and runs
+# an older backend. The committed one was 1.1.0-rc1 and predates
+# _enforce_bind_security, so an installer built from it would have booted an
+# unauthenticated admin panel on the LAN (review P0-2). Run this after
+# `git pull` before `cargo tauri build`.
+refresh-sidecar:
+    uv run python scripts/package_backend.py --keep-dist
+    @echo "frozen sidecar refreshed; PROVENANCE.json written beside it"
+
 # Regenerate the SPA's API types from the backend OpenAPI schema, after any
 # change to a pydantic model or a route signature. Forgetting this leaves the
 # frontend compiling against a backend that no longer has that shape.

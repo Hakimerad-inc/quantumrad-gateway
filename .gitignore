@@ -82,6 +82,12 @@ C:\\mercure-gateway\\
 # Frozen backend sidecar (PyInstaller onedir, built by scripts/package_backend.py)
 src-tauri/binaries/
 
+# The master-password sidecar written when an appliance has no keyring
+# (config/encryption.py). It is a live secret — a 0600 file holding the key to
+# every encrypted secret in the config beside it. Never commit; the repo-root
+# config that triggers it is itself local scratch.
+*.master-password
+
 # Local tooling artifacts — session screenshots, browser-automation logs,
 # per-user Claude settings. Never project source.
 .claude/settings.json

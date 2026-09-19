@@ -52,6 +52,24 @@ jobs:
         run: diff -u src/types/api-schema.ts /tmp/api-schema-check.ts
         working-directory: web
 
+  # A locally-frozen sidecar (src-tauri/binaries/, gitignored) is a snapshot of
+  # a past tree and nothing else compares it to the current one. The committed
+  # one was 1.1.0-rc1 and predated _enforce_bind_security, so an installer
+  # built from it would have served an unauthenticated admin panel on the LAN
+  # instead of refusing (review P0-2). Absent is fine — CI freezes its own —
+  # present-but-stale is the failure this catches.
+  sidecar-staleness:
+    name: frozen sidecar staleness check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - run: uv run pytest tests/test_package_backend.py -q
+
   dependency-audit:
     name: dependency audit (pip-audit + npm + cargo)
     runs-on: ubuntu-latest
@@ -258,18 +276,33 @@ jobs:
       - name: Smoke test frozen backend
         shell: pwsh
         run: |
+          # The frozen binary must be the backend this CI just built, not a
+          # stale snapshot. A version mismatch here is the rc1 failure mode:
+          # the bundle boots and answers health checks while running an older
+          # backend — the committed snapshot predated the bind-security fix,
+          # so an installer from it would have served an unauthenticated admin
+          # panel on the LAN instead of refusing to (review P0-2).
+          $expected = (uv run python -c "import re,sys;print(re.search(r'^__version__ = \"(.+)\"',open('src/mercure_gateway/__init__.py').read(),re.M).group(1))").Trim()
           $proc = Start-Process -FilePath "src-tauri/binaries/mercure-gateway/mercure-gateway.exe" -ArgumentList "--web","--port","8099" -PassThru -NoNewWindow
           $ok = $false
           foreach ($i in 1..30) {
             Start-Sleep -Seconds 1
             try {
               $r = Invoke-WebRequest -Uri "http://127.0.0.1:8099/api/system/health" -UseBasicParsing -TimeoutSec 2
-              if ($r.Content -match '"ok"') { $ok = $true; break }
+              if ($r.Content -match '"ok"') {
+                $ok = $true
+                $health = $r.Content
+                break
+              }
             } catch { }
           }
           if (-not $ok) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Write-Host "::error::frozen backend health check failed"; exit 1 }
           Stop-Process -Id $proc.Id -Force
-          Write-Host "Frozen backend smoke PASS"
+          if (-not ($health -match [regex]::Escape($expected))) {
+            Write-Host "::error::frozen backend reports a stale version (expected $expected, got $health)"
+            exit 1
+          }
+          Write-Host "Frozen backend smoke PASS (version $expected)"
 
   package-linux:
     name: Linux packaging (AppImage + deb)

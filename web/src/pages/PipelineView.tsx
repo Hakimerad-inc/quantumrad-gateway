@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useCallback, useRef } from "react";
 import type {
   PipelineSnapshot,
   DestinationNode,
@@ -12,9 +12,11 @@ import {
   fetchStudyDetail,
   fetchStudyTimeline,
   retryStudy,
+  isAbortError,
 } from "../api";
 import { PipeNode, PipeEdge, Defs, destinationDot, destinationLines, HealthBadge } from "../ui/flow";
 import { IconRefresh, IconChevronLeft } from "../ui/icons";
+import { usePoll } from "../ui/usePoll";
 
 const POLL_MS = 2000;
 
@@ -39,9 +41,9 @@ export default function PipelineView() {
   const prevReceived = useRef<number | null>(null);
   const [inboundFlow, setInboundFlow] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const s = await fetchPipeline();
+      const s = await fetchPipeline(signal ? { signal } : {});
       setSnap(s);
       setError(null);
       if (prevReceived.current !== null && s.receiver_counts.received_last_hour > prevReceived.current) {
@@ -50,43 +52,43 @@ export default function PipelineView() {
       }
       prevReceived.current = s.receiver_counts.received_last_hour;
     } catch (e) {
+      // A superseded or unmounted fetch is not an error — the poller aborts
+      // it deliberately (P1-20).
+      if (isAbortError(e)) return;
       setError(String(e));
     }
   }, []);
 
-  useEffect(function loadSnapshotOnMount() {
-    load();
-  }, [load]);
+  // Self-rescheduling poll: cannot stack, aborts a superseded in-flight
+  // fetch, and stops while the tab is hidden (P1-20).
+  const refresh = usePoll(load, { intervalMs: POLL_MS, enabled: auto });
 
-  useEffect(function pollSnapshotWhileLive() {
-    if (!auto) return;
-    const id = setInterval(load, POLL_MS);
-    return () => clearInterval(id);
-  }, [auto, load]);
-
-  useEffect(function pollSelectionDetail() {
-    if (selection === null) return;
-    let cancelled = false;
-    const loadSelection = async () => {
-      try {
-        if (selection.kind === "destination") {
-          setDestStudies(await fetchDestinationStudies(selection.name));
-        } else {
-          const detail = await fetchStudyDetail(selection.id);
-          const tl = await fetchStudyTimeline(selection.id);
-          if (!cancelled) {
+  usePoll(
+    useCallback(
+      async (signal?: AbortSignal) => {
+        if (selection === null) return;
+        const init = signal ? { signal } : {};
+        try {
+          if (selection.kind === "destination") {
+            setDestStudies(await fetchDestinationStudies(selection.name, init));
+          } else {
+            const detail = await fetchStudyDetail(selection.id, init);
+            const tl = await fetchStudyTimeline(selection.id, init);
+            // Both or nothing: a selection change mid-fetch aborts the pair,
+            // so one panel half can't outlive the selection it belongs to.
+            if (signal?.aborted) return;
             setStudyDetail(detail);
             setTimeline(tl);
           }
+        } catch (e) {
+          if (isAbortError(e)) return;
+          /* selection panel refresh is best-effort; core snapshot shows errors */
         }
-      } catch {
-        /* selection panel refresh is best-effort; core snapshot shows errors */
-      }
-    };
-    loadSelection();
-    const id = setInterval(loadSelection, POLL_MS * 2);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [selection]);
+      },
+      [selection],
+    ),
+    { intervalMs: POLL_MS * 2, enabled: selection !== null, deps: [selection] },
+  );
 
   const clearSelection = () => {
     setSelection(null);
@@ -132,7 +134,7 @@ export default function PipelineView() {
           <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
           Live (2s)
         </label>
-        <button className="btn" onClick={load}><IconRefresh size={13} /> Refresh</button>
+        <button className="btn" onClick={refresh}><IconRefresh size={13} /> Refresh</button>
         <span className="hint">
           {snap ? `updated ${snap.generated_at.slice(11, 19)}Z` : "loading…"}
         </span>

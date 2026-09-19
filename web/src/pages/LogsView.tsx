@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
-import { fetchLogs } from "../api";
+import { useState, useCallback } from "react";
+import { fetchLogs, isAbortError } from "../api";
+import { usePoll } from "../ui/usePoll";
 
 export default function LogsView() {
   const [lines, setLines] = useState<string[]>([]);
@@ -8,27 +9,28 @@ export default function LogsView() {
   const [auto, setAuto] = useState(true);
   const [error, setError] = useState("");
 
-  const load = useCallback(async () => {
-    try {
-      const r = await fetchLogs(limit);
-      setLines(r.lines);
-      setTotal(r.total_available);
-      setError("");
-    } catch (e) {
-      // Keep the last good lines on screen; surface why refresh failed (M8).
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [limit]);
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const r = await fetchLogs(limit, signal ? { signal } : {});
+        setLines(r.lines);
+        setTotal(r.total_available);
+        setError("");
+      } catch (e) {
+        // A superseded or unmounted fetch is not a failure to report — the
+        // poller aborts it deliberately (P1-20).
+        if (isAbortError(e)) return;
+        // Keep the last good lines on screen; surface why refresh failed (M8).
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [limit],
+  );
 
-  useEffect(function loadLogsOnLimitChange() {
-    load();
-  }, [load]);
-
-  useEffect(function pollLogsWhileAuto() {
-    if (!auto) return;
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
-  }, [auto, load]);
+  // Self-rescheduling poll: cannot stack, aborts a superseded in-flight
+  // fetch, and stops while the tab is hidden (P1-20). A `limit` change
+  // refetches immediately.
+  const refresh = usePoll(load, { intervalMs: 5000, enabled: auto, deps: [limit] });
 
   return (
     <div>
@@ -48,7 +50,7 @@ export default function LogsView() {
             <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
             Auto-refresh (5s)
           </label>
-          <button className="btn" onClick={load}>Refresh</button>
+          <button className="btn" onClick={refresh}>Refresh</button>
           <span className="hint" style={{ marginLeft: "auto" }}>
             showing last {lines.length} of {total} lines
           </span>

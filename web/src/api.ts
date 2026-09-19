@@ -96,14 +96,24 @@ export function apiUrl(path: string): string {
 async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
   // Credentials are always sent so the session cookie travels with every
   // request — required for the cross-origin (Tauri → 127.0.0.1:8080) case and
-  // harmless for same-origin.
+  // harmless for same-origin. `init` may carry `signal` so callers can
+  // cancel a superseded request (see usePoll, review P1-20).
   return fetch(apiUrl(url), { ...init, credentials: "include" });
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const res = await apiFetch(url);
+async function getJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const res = await apiFetch(url, init);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
+}
+
+// A fetch cancelled by an AbortController — usePoll aborts when a newer call
+// supersedes it, the tab goes hidden, or the component unmounts. Consumers
+// must treat this as "no result", not a fetch failure: otherwise a fast
+// refresh would report the request it deliberately cancelled as an error
+// banner (review P1-20).
+export function isAbortError(e: unknown): boolean {
+  return e instanceof DOMException && e.name === "AbortError";
 }
 
 export function fetchStudies(
@@ -130,8 +140,11 @@ export function fetchDiskStatus(): Promise<DiskStatus> {
   return getJson<DiskStatus>("/api/system/disk");
 }
 
-export async function postJson(url: string): Promise<{ status: string } | null> {
-  const res = await apiFetch(url, { method: "POST" });
+export async function postJson(
+  url: string,
+  init: RequestInit = {},
+): Promise<{ status: string } | null> {
+  const res = await apiFetch(url, { method: "POST", ...init });
   if (!res.ok) return null;
   return (await res.json()) as { status: string };
 }
@@ -165,8 +178,8 @@ export async function refreshReport(reportId: number): Promise<{ status: string 
 
 // ── Admin tabs (S06-T4) ──────────────────────────────────────────────
 
-export function fetchLogs(limit = 200): Promise<LogsResponse> {
-  return getJson<LogsResponse>(`/api/logs?limit=${limit}`);
+export function fetchLogs(limit = 200, init: RequestInit = {}): Promise<LogsResponse> {
+  return getJson<LogsResponse>(`/api/logs?limit=${limit}`, init);
 }
 
 export function fetchAudit(limit = 200): Promise<AuditEvent[]> {
@@ -247,20 +260,23 @@ export function fetchConfigWarnings(): Promise<ConfigWarningsResult> {
 
 // ── Pipeline flow view ───────────────────────────────────────────────
 
-export function fetchPipeline(): Promise<PipelineSnapshot> {
-  return getJson<PipelineSnapshot>("/api/pipeline");
+export function fetchPipeline(init: RequestInit = {}): Promise<PipelineSnapshot> {
+  return getJson<PipelineSnapshot>("/api/pipeline", init);
 }
 
-export function fetchDestinationStudies(name: string): Promise<DestinationRouteRow[]> {
-  return getJson<DestinationRouteRow[]>(`/api/destinations/${encodeURIComponent(name)}/studies`);
+export function fetchDestinationStudies(
+  name: string,
+  init: RequestInit = {},
+): Promise<DestinationRouteRow[]> {
+  return getJson<DestinationRouteRow[]>(`/api/destinations/${encodeURIComponent(name)}/studies`, init);
 }
 
-export function fetchStudyDetail(studyId: number): Promise<StudyDetail> {
-  return getJson<StudyDetail>(`/api/studies/${studyId}/detail`);
+export function fetchStudyDetail(studyId: number, init: RequestInit = {}): Promise<StudyDetail> {
+  return getJson<StudyDetail>(`/api/studies/${studyId}/detail`, init);
 }
 
-export function fetchStudyTimeline(studyId: number): Promise<TimelineEvent[]> {
-  return getJson<TimelineEvent[]>(`/api/studies/${studyId}/timeline`);
+export function fetchStudyTimeline(studyId: number, init: RequestInit = {}): Promise<TimelineEvent[]> {
+  return getJson<TimelineEvent[]>(`/api/studies/${studyId}/timeline`, init);
 }
 
 // ── Windows service management (S07-T9) ──────────────────────────────

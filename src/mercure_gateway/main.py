@@ -139,6 +139,20 @@ def _enforce_bind_security(config: GatewayConfig, environ: Mapping[str, str] | N
         )
 
 
+def _warn_if_secrets_are_plaintext(config: GatewayConfig) -> None:
+    """Warn at boot when secrets will be written to disk in cleartext (P1-1).
+
+    Encryption at rest is the default; cleartext is now an explicit opt-out
+    (``credentials.encrypted=false`` or ``MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS=1``).
+    Both are legitimate for a sealed appliance or a dev box, so this never
+    blocks boot — but it is said out loud, once, at the top of the log.
+    """
+    from mercure_gateway.config.lint import lint_secrets
+
+    for warning in lint_secrets(config):
+        logger.warning("%s", warning.message)
+
+
 def _set_web_password(config_path: Path) -> int:
     """Prompt for the admin password and store its hash (review P0-8).
 
@@ -618,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     _enforce_bind_security(config)
+    _warn_if_secrets_are_plaintext(config)
     # Signed-update check (ADR-0006): fail-closed, log-only, never blocks boot.
     _check_for_updates(config)
 

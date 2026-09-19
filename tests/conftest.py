@@ -37,6 +37,19 @@ def pytest_configure(config: pytest.Config) -> None:
         )
 
 
+@pytest.fixture(autouse=True)
+def _plaintext_secrets_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests opt out of at-rest encryption unless they are testing it.
+
+    A default install now generates a config master password on first boot
+    (review P1-1) and persists it — to the OS keyring on a desktop, or a 0600
+    sidecar file on a headless box. Neither belongs in an unrelated unit test,
+    so the suite takes the documented opt-out. test_config_encryption.py
+    delenv's this where it needs the real behaviour.
+    """
+    monkeypatch.setenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", "1")
+
+
 class FakeReceiver:
     """In-memory receiver stub for tests."""
 

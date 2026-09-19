@@ -699,13 +699,26 @@ def default_config() -> GatewayConfig:
     return GatewayConfig()
 
 
-def _resolve_master_password(master_password: str | None) -> str | None:
-    """Return *master_password* if given, else resolve it from the environment."""
+def _resolve_master_password(
+    master_password: str | None,
+    config_path: str | Path | None = None,
+    *,
+    encryption_enabled: bool = True,
+) -> str | None:
+    """Return *master_password* if given, else resolve or generate one.
+
+    A default install has nothing configured, and an unmastered config writes
+    every secret to disk in cleartext (review P1-1) — so an appliance that
+    wants encryption at rest gets a key on first boot instead. See
+    :func:`mercure_gateway.config.encryption.resolve_or_create_master_password`.
+    """
     if master_password is not None:
         return master_password
-    from .encryption import load_master_password
+    from .encryption import resolve_or_create_master_password
 
-    return load_master_password()
+    return resolve_or_create_master_password(
+        config_path, encryption_enabled=encryption_enabled
+    )
 
 
 def _prune_extra_keys(payload: Any, errors: list[Any]) -> Any:
@@ -874,7 +887,9 @@ def load_config(path: str | Path, *, master_password: str | None = None) -> Gate
             path.with_name(path.name + ".unknown-keys.bak").write_text(raw, encoding="utf-8")
             path.write_text(pruned, encoding="utf-8")
 
-    mp = _resolve_master_password(master_password)
+    mp = _resolve_master_password(
+        master_password, path, encryption_enabled=config.credentials.encrypted
+    )
     if mp is not None or config.credentials.encrypted:
         from .encryption import decrypt_config_from_storage
 
@@ -887,12 +902,17 @@ def save_config(
 ) -> None:
     """Serialize ``config`` to ``path`` as pretty-printed JSON.
 
-    When encryption at rest is enabled (``credentials.encrypted``) and a master
-    password is available, secrets are encrypted into ``credentials.entries`` and
-    replaced on disk by a non-secret placeholder.  Without a master password the
-    config is written in cleartext (dev/test behaviour).
+    When encryption at rest is enabled (``credentials.encrypted`` — the default)
+    the secrets are encrypted into ``credentials.entries`` and replaced on disk
+    by a non-secret placeholder. The master password comes from the caller, the
+    environment, the OS keyring, or a 0600 sidecar — an appliance that wants
+    encryption at rest gets a key on first boot rather than writing secrets in
+    cleartext (review P1-1). Cleartext is an explicit opt-out:
+    ``MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS=1``.
     """
-    mp = _resolve_master_password(master_password)
+    mp = _resolve_master_password(
+        master_password, path, encryption_enabled=config.credentials.encrypted
+    )
     to_write = config
     if mp is not None and config.credentials.encrypted:
         from .encryption import encrypt_config_for_storage

@@ -15,6 +15,7 @@ from mercure_gateway.config import (
     load_config,
     save_config,
 )
+from mercure_gateway.config import encryption as enc
 from mercure_gateway.config.encryption import (
     ENC_PLACEHOLDER,
     ConfigEncryptionError,
@@ -26,12 +27,14 @@ from mercure_gateway.web.auth import hash_password
 
 @pytest.fixture(autouse=True)
 def _no_os_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disable the OS keyring path so these tests always exercise the vault fallback."""
+    """Disable the OS keyring path so these tests always exercise the vault or
+    sidecar fallback — no test should ever create a real keyring entry."""
     monkeypatch.setattr(
         KeyringCredentialStore,
         "available",
         property(lambda _self: False),
     )
+    monkeypatch.setattr(enc, "_keyring_available", lambda: False)
 
 
 def _secret_config() -> object:
@@ -110,19 +113,146 @@ def test_encrypt_roundtrip_store_and_restore(tmp_path) -> None:
     assert loaded.web_ui.auth_password_hash == cfg.web_ui.auth_password_hash
 
 
-def test_no_key_path_stays_plaintext_backward_compatible(tmp_path) -> None:
+def test_plaintext_is_an_explicit_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """With MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS=1 the legacy cleartext
+    round-trip is preserved exactly (dev, tests, a sealed read-only appliance)."""
+    monkeypatch.setenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", "1")
     cfg = _secret_config()
     path = tmp_path / "gw.json"
 
-    # No master password: behaves exactly as before (cleartext, no entries).
     save_config(cfg, path)
     raw = path.read_text(encoding="utf-8")
     assert "TOPSECRET" in raw
     assert '"entries": {}' in raw or '"entries":{}' in raw
+    # No sidecar is written when plaintext is deliberately chosen.
+    assert not (tmp_path / "gw.json.master-password").exists()
 
     loaded = load_config(path)
     assert loaded.destinations[0].password == "TOPSECRET"
     assert loaded.audit.hub_reporting.api_key == "HUBKEY"
+
+
+def test_encryption_off_in_config_stays_plaintext(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """credentials.encrypted=false is the config-level opt-out."""
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
+    cfg = _secret_config()
+    cfg.credentials.encrypted = False
+    path = tmp_path / "gw.json"
+
+    save_config(cfg, path)
+    assert "TOPSECRET" in path.read_text(encoding="utf-8")
+
+
+def test_appliance_generates_a_sidecar_key_on_first_boot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A headless box (no keyring) still never writes a cleartext secret.
+
+    A key is generated on first boot and persisted to a 0600 file beside the
+    config so the *next* boot can read its own config back.
+    """
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
+    monkeypatch.delenv("MERCURE_MASTER_PASSWORD", raising=False)
+    monkeypatch.delenv("MERCURE_MASTER_PASSWORD_FILE", raising=False)
+
+    cfg = _secret_config()
+    path = tmp_path / "gw.json"
+
+    save_config(cfg, path)
+
+    raw = path.read_text(encoding="utf-8")
+    assert "TOPSECRET" not in raw
+    assert "XNATPASS" not in raw
+    assert ENC_PLACEHOLDER in raw
+    assert "AES256GCM:" in raw
+
+    sidecar = tmp_path / "gw.json.master-password"
+    assert sidecar.exists()
+    assert oct(sidecar.stat().st_mode)[-3:] == "600"
+    key = sidecar.read_text(encoding="utf-8").strip()
+    assert key
+
+    # The boot after this one reads the config back with no env var set.
+    loaded = load_config(path)
+    assert loaded.destinations[0].password == "TOPSECRET"
+    assert loaded.destinations[0].private_key == "KEYBLOB"
+    assert loaded.destinations[1].password == "XNATPASS"
+    assert loaded.audit.hub_reporting.api_key == "HUBKEY"
+
+
+def test_sidecar_key_is_reused_across_boots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A second boot picks up the existing sidecar rather than regenerating —
+    regenerating would orphan every secret already on disk."""
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
+    monkeypatch.delenv("MERCURE_MASTER_PASSWORD", raising=False)
+    monkeypatch.delenv("MERCURE_MASTER_PASSWORD_FILE", raising=False)
+
+    cfg = _secret_config()
+    path = tmp_path / "gw.json"
+    save_config(cfg, path)
+    sidecar = tmp_path / "gw.json.master-password"
+    first = sidecar.read_text(encoding="utf-8").strip()
+
+    save_config(_secret_config(), path)
+    assert sidecar.read_text(encoding="utf-8").strip() == first
+
+
+def test_keyring_supplies_the_key_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A desktop with a usable keyring stores the master password there — no
+    sidecar file, and no secret on disk."""
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
+    monkeypatch.delenv("MERCURE_MASTER_PASSWORD", raising=False)
+    monkeypatch.delenv("MERCURE_MASTER_PASSWORD_FILE", raising=False)
+
+    store: dict[str, str] = {}
+
+    def _get_password(service: str, name: str) -> str | None:
+        return store.get(f"{service}:{name}")
+
+    def _set_password(service: str, name: str, value: str) -> None:
+        store[f"{service}:{name}"] = value
+
+    monkeypatch.setattr(enc, "_keyring_available", lambda: True)
+    import keyring as keyring_mod
+
+    monkeypatch.setattr(keyring_mod, "get_password", _get_password)
+    monkeypatch.setattr(keyring_mod, "set_password", _set_password)
+    from mercure_gateway.keyring_store import _SERVICE
+
+    cfg = _secret_config()
+    path = tmp_path / "gw.json"
+    save_config(cfg, path)
+
+    assert "TOPSECRET" not in path.read_text(encoding="utf-8")
+    assert not (tmp_path / "gw.json.master-password").exists()
+    key = store.get(f"{_SERVICE}:config-master-password")
+    assert key is not None
+
+    # A fresh process with the same keyring reads the config back.
+    loaded = load_config(path)
+    assert loaded.destinations[0].password == "TOPSECRET"
+
+
+def test_no_config_path_and_no_key_falls_back_to_plaintext_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """In-memory config with no path to write a sidecar to warns rather than
+    raising — but it still says so out loud."""
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
+    monkeypatch.delenv("MERCURE_MASTER_PASSWORD", raising=False)
+    monkeypatch.delenv("MERCURE_MASTER_PASSWORD_FILE", raising=False)
+
+    with caplog.at_level("WARNING"):
+        from mercure_gateway.config.encryption import resolve_or_create_master_password
+
+        assert resolve_or_create_master_password(None, encryption_enabled=True) is None
+    assert "cleartext" in caplog.text.lower()
 
 
 def test_encrypted_file_without_key_raises(tmp_path) -> None:

@@ -19,11 +19,16 @@ or ``MERCURE_MASTER_PASSWORD_FILE``) so it never has to live in the config file.
 
 from __future__ import annotations
 
+import logging
 import os
+import secrets
+from pathlib import Path
 
 from mercure_gateway.config import ENC_PLACEHOLDER, CredentialEntry, GatewayConfig
 from mercure_gateway.credentials import CredentialVault, WrongPasswordError
 from mercure_gateway.keyring_store import KeyringCredentialStore
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ConfigEncryptionError",
@@ -48,9 +53,33 @@ _SECRET_FIELDS: dict[str, list[tuple[str, str]]] = {
 _HUB_ENTRY = "__hub_reporting__"
 _WEBUI_ENTRY = "__web_ui__"
 
+# The master password entry name in the OS keyring.
+_KEYRING_ENTRY = "config-master-password"
+
+# Set MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS=1 to opt out of encryption at
+# rest entirely (dev, tests, a sealed read-only appliance). Not a secret.
+_ALLOW_PLAINTEXT_ENV = "MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS"
+
+# Fallback for a host with no usable keyring backend (headless, no DBus/secret
+# service): a 0600 file beside the config. Worse than the keyring — it is
+# recoverable by anyone who can read the appliance's filesystem, which is
+# already game-over for the secrets in the config — still not cleartext.
+_SIDECAR_SUFFIX = ".master-password"
+
 
 class ConfigEncryptionError(Exception):
     """Raised when an encrypted config cannot be read without its master password."""
+
+
+def _keyring_available() -> bool:
+    """Whether an OS keyring backend is usable (mirrors KeyringCredentialStore)."""
+    try:
+        import keyring
+        from keyring.backends.fail import Keyring as FailKeyring
+
+        return not isinstance(keyring.get_keyring(), FailKeyring)
+    except Exception:  # noqa: BLE001 — any backend failure ⇒ unavailable
+        return False
 
 
 def load_master_password() -> str | None:
@@ -71,6 +100,107 @@ def load_master_password() -> str | None:
         except OSError:
             return None
     return None
+
+
+def resolve_or_create_master_password(
+    config_path: str | Path | None, *, encryption_enabled: bool
+) -> str | None:
+    """Return the master password, generating one if the appliance has none.
+
+    On a default install nothing sets ``MERCURE_MASTER_PASSWORD`` — the env var
+    is a deployment-time choice nobody made — so every destination password and
+    the admin hash were written to disk in cleartext, on a USB appliance that
+    gets handed around a hospital (review P1-1).
+
+    An appliance that wants encryption at rest (the default) therefore gets a
+    key on first boot: generated, and persisted so the *next* boot can still
+    read its own config. Order of preference:
+
+    1. an explicit master password (env, env file, or caller);
+    2. the keyring entry written by a previous boot;
+    3. a freshly generated entry in the OS keyring;
+    4. a freshly generated 0600 sidecar file beside the config, when no
+       keyring backend exists (logged by path — the operator may need it to
+       move the config to another host).
+
+    Cleartext is now an explicit opt-in: ``MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS=1``,
+    warned about at startup and by the config linter. ``encryption_enabled``
+    false (``credentials.encrypted`` off) is the config-level opt-out and also
+    returns None.
+    """
+    explicit = load_master_password()
+    if explicit:
+        return explicit
+    if not encryption_enabled or os.environ.get(_ALLOW_PLAINTEXT_ENV, "") == "1":
+        return None
+
+    if _keyring_available():
+        import keyring
+
+        from mercure_gateway.keyring_store import _SERVICE
+
+        try:
+            existing = keyring.get_password(_SERVICE, _KEYRING_ENTRY)
+            if existing:
+                return existing
+            generated = secrets.token_urlsafe(32)
+            keyring.set_password(_SERVICE, _KEYRING_ENTRY, generated)
+            logger.info(
+                "no config master password was configured; generated one and "
+                "stored it in the OS keyring (%s:%s) so secrets are not written "
+                "in cleartext. Set MERCURE_MASTER_PASSWORD to choose your own.",
+                _SERVICE,
+                _KEYRING_ENTRY,
+            )
+            return generated
+        except Exception:  # noqa: BLE001 — a broken keyring falls back to the file
+            logger.warning("the OS keyring is unusable; falling back to a sidecar file")
+
+    if config_path is None:
+        logger.warning(
+            "no config master password and no config path to store one in — "
+            "secrets will be written in cleartext. Set %s or MERCURE_MASTER_PASSWORD.",
+            _ALLOW_PLAINTEXT_ENV,
+        )
+        return None
+
+    import errno
+
+    sidecar = Path(str(config_path)).with_name(
+        Path(str(config_path)).name + _SIDECAR_SUFFIX
+    )
+    try:
+        if sidecar.exists():
+            existing = sidecar.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        generated = secrets.token_urlsafe(32)
+        # Write with O_EXCL so a race with another process cannot truncate an
+        # existing file; 0600 because the content is the key to every secret.
+        fd = os.open(
+            sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(generated)
+        logger.warning(
+            "no OS keyring is available; wrote the config master password to "
+            "%s (mode 0600). Keep this file with the config — without it the "
+            "stored secrets cannot be read back.",
+            sidecar,
+        )
+        return generated
+    except OSError as exc:
+        if exc.errno == errno.EEXIST:
+            # Created concurrently between the exists() check and the open.
+            existing = sidecar.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        logger.warning(
+            "could not persist a config master password (%s); secrets will be "
+            "written in cleartext",
+            exc,
+        )
+        return None
 
 
 def _slot_attr(slot: str) -> str:

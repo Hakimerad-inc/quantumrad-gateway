@@ -7,6 +7,7 @@ a config, it reports findings with a path the editor can highlight.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from mercure_gateway.config import (
     DICOMDestination,
@@ -27,11 +28,15 @@ def _cfg(**overrides: object) -> GatewayConfig:
     [
         "lint_forwarding_rules",
         "lint_destinations",
+        "lint_secrets",
         "lint_config_version",
     ],
 )
-def test_lint_clean_config_has_no_warnings(check: str) -> None:
+def test_lint_clean_config_has_no_warnings(
+    check: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A default config with one healthy destination lints clean."""
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
     from mercure_gateway.config import lint as lint_module
 
     cfg = _cfg(destinations=[DICOMDestination(name="pacs", host="h", port=104, aet_target="A")])
@@ -111,22 +116,26 @@ def test_all_disabled_destinations_warn() -> None:
     assert "disabled" in warning.message
 
 
-def test_no_destinations_at_all_is_not_a_warning() -> None:
+def test_no_destinations_at_all_is_not_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty destination list is the pre-wizard state, not a misconfiguration."""
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
     assert lint_config(GatewayConfig()) == []
 
 
-def test_duplicate_destination_names_are_flagged() -> None:
-    """Names key the routing tables; a duplicate silently collapses."""
-    cfg = _cfg(
-        destinations=[
-            DICOMDestination(name="pacs", host="a", port=104, aet_target="A"),
-            DICOMDestination(name="pacs", host="b", port=104, aet_target="B"),
-        ],
-    )
-    dup = [w for w in lint_config(cfg) if "already used" in w.message]
-    assert len(dup) == 1
-    assert dup[0].path == "destinations[1].name"
+def test_duplicate_destination_names_are_rejected() -> None:
+    """Names key the routing tables and the web API's secret restore; a
+    duplicate silently collapses and can persist the *wrong* credential
+    (review P1-2), so it is a validation error, not a lint note."""
+    import pytest
+
+    with pytest.raises(ValidationError) as exc_info:
+        _cfg(
+            destinations=[
+                DICOMDestination(name="pacs", host="a", port=104, aet_target="A"),
+                DICOMDestination(name="pacs", host="b", port=104, aet_target="B"),
+            ],
+        )
+    assert "pacs" in str(exc_info.value)
 
 
 def test_future_config_version_is_informational() -> None:
@@ -135,6 +144,32 @@ def test_future_config_version_is_informational() -> None:
     (warning,) = [w for w in lint_config(cfg) if w.path == "config_version"]
     assert warning.severity == "info"
     assert "2.0" in warning.message
+
+
+def test_encryption_disabled_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """credentials.encrypted=false writes every secret in cleartext (P1-1).
+
+    A legitimate choice for a sealed appliance, so lint never rejects it —
+    but it must be visible in the panel, not just in an env var nobody set.
+    """
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
+    cfg = _cfg()
+    cfg.credentials.encrypted = False
+    (warning,) = [w for w in lint_config(cfg) if w.path == "credentials.encrypted"]
+    assert "cleartext" in warning.message
+    assert warning.severity == "warning"
+
+
+def test_plaintext_env_override_is_flagged_as_informational(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The env opt-out applies to the whole process — say so where the operator
+    is looking, since it overrides the setting above regardless of its value."""
+    monkeypatch.setenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", "1")
+    cfg = _cfg()
+    (warning,) = [w for w in lint_config(cfg) if w.path == "credentials"]
+    assert "MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS" in warning.message
+    assert warning.severity == "info"
 
 
 def test_warnings_serialize_for_the_api() -> None:

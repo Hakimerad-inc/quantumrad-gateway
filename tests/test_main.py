@@ -414,6 +414,33 @@ def test_main_update_check_never_raises(tmp_path, monkeypatch):  # type: ignore[
     assert main_mod._check_for_updates(cfg) is None  # no exception escaped
 
 
+def test_boot_warns_when_secrets_will_be_plaintext(monkeypatch, caplog):  # type: ignore[no-untyped-def]
+    """A cleartext-opt-out appliance says so at the top of the boot log (P1-1).
+
+    Never blocks — a sealed read-only appliance is a legitimate opt-out — but
+    an operator reading the log must not have to guess it from an env var.
+    """
+    import logging
+
+    import mercure_gateway.main as main_mod
+
+    monkeypatch.setenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", "1")
+    with caplog.at_level(logging.WARNING):
+        main_mod._warn_if_secrets_are_plaintext(default_config())
+    assert any("cleartext" in r.message.lower() for r in caplog.records)
+
+
+def test_boot_is_silent_when_encryption_is_on(monkeypatch, caplog):  # type: ignore[no-untyped-def]
+    import logging
+
+    import mercure_gateway.main as main_mod
+
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
+    with caplog.at_level(logging.WARNING):
+        main_mod._warn_if_secrets_are_plaintext(default_config())
+    assert not any("cleartext" in r.message.lower() for r in caplog.records)
+
+
 def _fake_getpass(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> None:
     """Answer getpass prompts in order; an extra prompt is a test bug."""
     import getpass

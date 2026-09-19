@@ -13,6 +13,7 @@ cross-field and semantic mistakes.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from mercure_gateway.config import GatewayConfig
@@ -46,6 +47,7 @@ def lint_config(cfg: GatewayConfig) -> list[ConfigWarning]:
     return [
         *lint_forwarding_rules(cfg),
         *lint_destinations(cfg),
+        *lint_secrets(cfg),
         *lint_config_version(cfg),
     ]
 
@@ -108,10 +110,14 @@ def lint_forwarding_rules(cfg: GatewayConfig) -> list[ConfigWarning]:
 def lint_destinations(cfg: GatewayConfig) -> list[ConfigWarning]:
     """Structural destination mistakes that pass validation but bite later.
 
-    - A *disabled* destination is fine (operator intent), but one that is the
-      *only* destination and disabled means nothing can be delivered, which is
-      worth a nudge: the queue will fill with RECEIVED studies.
-    - Duplicate names silently collapse in routing tables keyed by name.
+    A *disabled* destination is fine (operator intent), but one that is the
+    *only* destination and disabled means nothing can be delivered, which is
+    worth a nudge: the queue will fill with RECEIVED studies.
+
+    Duplicate names used to be a lint warning here; they are now a validation
+    error on ``GatewayConfig`` (review P1-2) — a duplicate collapses the
+    by-name lookup the web API's '***' restore depends on, which can persist
+    the wrong destination's secret.
     """
     warnings: list[ConfigWarning] = []
     enabled = [d for d in cfg.destinations if d.enabled]
@@ -127,23 +133,46 @@ def lint_destinations(cfg: GatewayConfig) -> list[ConfigWarning]:
                 ),
             )
         )
-
-    seen: dict[str, int] = {}
-    for i, d in enumerate(cfg.destinations):
-        if d.name in seen:
-            warnings.append(
-                ConfigWarning(
-                    path=f"destinations[{i}].name",
-                    message=(
-                        f"Destination name {d.name!r} is already used at "
-                        f"destinations[{seen[d.name]}]. Names must be unique — "
-                        "routing and forwarding rules address destinations by name."
-                    ),
-                )
-            )
-        else:
-            seen[d.name] = i
     return warnings
+
+
+def lint_secrets(cfg: GatewayConfig) -> list[ConfigWarning]:
+    """Secrets that will be written to disk in cleartext (review P1-1).
+
+    The appliance encrypts at rest by default and generates its own key on
+    first boot. Both opt-outs are legitimate for a sealed read-only appliance
+    or a dev box, and neither is a validation error — but they are exactly the
+    kind of thing an operator wants to see stated in the panel rather than
+    have to reason about from an environment variable they did not set.
+    """
+    warnings: list[ConfigWarning] = []
+    if not cfg.credentials.encrypted:
+        warnings.append(
+            ConfigWarning(
+                path="credentials.encrypted",
+                message=(
+                    "Encryption at rest is disabled in this config — destination "
+                    "passwords and the admin password hash are stored in cleartext "
+                    "in the config file."
+                ),
+            )
+        )
+    if os.environ.get(_ALLOW_PLAINTEXT_ENV, "") == "1":
+        warnings.append(
+            ConfigWarning(
+                path="credentials",
+                message=(
+                    "MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS=1 is set in this "
+                    "process's environment, so secrets are written in cleartext "
+                    "regardless of the setting above."
+                ),
+                severity="info",
+            )
+        )
+    return warnings
+
+
+_ALLOW_PLAINTEXT_ENV = "MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS"
 
 
 def lint_config_version(cfg: GatewayConfig) -> list[ConfigWarning]:

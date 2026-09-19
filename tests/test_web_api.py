@@ -962,9 +962,13 @@ def test_run_web_admin_plain_http_without_tls(monkeypatch: pytest.MonkeyPatch) -
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_get_config_warnings_clean(client: TestClient) -> None:
+def test_get_config_warnings_clean(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """A healthy running config reports no warnings."""
     from mercure_gateway.config import DICOMDestination
+
+    # The suite defaults to cleartext secrets (conftest), which lints as an
+    # intentional info note — not a warning this test is about.
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
 
     cfg = default_config()
     cfg.destinations = [DICOMDestination(name="pacs", host="h", port=104, aet_target="A")]
@@ -975,8 +979,12 @@ def test_get_config_warnings_clean(client: TestClient) -> None:
     assert r.json()["warnings"] == []
 
 
-def test_get_config_warnings_reports_stale_rule(client: TestClient) -> None:
+def test_get_config_warnings_reports_stale_rule(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The stale-rule finding reaches the panel, not just the log."""
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
+
     from mercure_gateway.config import DICOMDestination, ForwardingRule
 
     cfg = default_config()
@@ -994,7 +1002,9 @@ def test_get_config_warnings_reports_stale_rule(client: TestClient) -> None:
     assert "ghost" in warnings[0]["message"]
 
 
-def test_get_config_warnings_reports_an_unparsable_rule(client: TestClient) -> None:
+def test_get_config_warnings_reports_an_unparsable_rule(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A rule that cannot parse makes routing fail open, so the panel says so.
 
     The spool ignores a rule it cannot parse, which is the right call at
@@ -1005,6 +1015,7 @@ def test_get_config_warnings_reports_an_unparsable_rule(client: TestClient) -> N
     """
     from mercure_gateway.config import DICOMDestination, ForwardingRule
 
+    monkeypatch.delenv("MERCURE_GATEWAY_ALLOW_PLAINTEXT_SECRETS", raising=False)
     cfg = default_config()
     cfg.destinations = [DICOMDestination(name="pacs", host="h", port=104, aet_target="A")]
     cfg.forwarding_rules = [ForwardingRule(rule="no-equals-here", targets=["pacs"])]

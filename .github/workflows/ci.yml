@@ -119,7 +119,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --all-extras
-      - run: uv run pytest
+        # integration tests open real sockets (the perf gate's --real mode
+        # delivers ~100 associations to a local SCP); they flap on a loaded
+        # shared runner and belong to the nightly/integration path, not the
+        # per-push matrix (review P1-7).
+      - run: uv run pytest -m "not integration"
 
   build-spa:
     name: build web SPA
@@ -176,13 +180,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --all-extras
-      # P1-7: the CI gate stays in synthetic mode. The handler in that mode
-      # does no I/O, so this measures the forwarder's queue/claim/route path
-      # only — deliberately, because that is the part whose regression is
-      # CI-detectable. The real-I/O mode (`just perf-gates-real`) pays for an
-      # fsync plus a TCP round trip per delivery, so its floor is
-      # machine-dependent and belongs on the integration path; it is covered
-      # here by tests/test_perf_gates.py instead of this gate.
+      # P1-7: the CI gate stays in synthetic mode. That mode's scripted
+      # handler does no I/O, so it measures the forwarder's queue/claim/route
+      # path only — deliberately, because that part's regression is
+      # CI-detectable. --real delivers the same batch through the real
+      # DICOMHandler to a live C-STORE SCP (the two numbers differ by ~300×),
+      # but a socket-bound measurement flaps on a loaded shared runner. It
+      # belongs on the integration path: `just perf-gates-real`, and the
+      # integration-marked tests the test job deselects below.
       - name: Run perf gates
         run: uv run python scripts/check_perf_gates.py
 
@@ -242,7 +247,9 @@ jobs:
           python-version: "3.12"
       - run: uv sync --all-extras
       - name: Run tests with coverage
-        run: uv run pytest --cov=mercure_gateway --cov-fail-under=80
+        # Same integration deselection as the test job — the coverage gate
+        # must not go green by counting the socket-bound path it skipped.
+        run: uv run pytest -m "not integration" --cov=mercure_gateway --cov-fail-under=80
 
   package-windows:
     name: Windows packaging (S06-T9)

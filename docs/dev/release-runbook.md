@@ -158,23 +158,29 @@ dead code an operator might plan around.
 
 The real procedure, for a release that turned out to be broken after shipping:
 
-1. **Stop the gateway** (`systemctl --user stop mercure-gateway`, or quit the
+1. **Unpublish the broken release first.** Delete the release (or the
+   `latest.json` manifest pointing at it) so installed updaters stop
+   offering it. This is the only step that protects boxes that have not
+   updated yet — everything below is per-box, and has to be repeated for
+   every appliance. On GitHub: `gh release delete <tag>` and, if the tag
+   itself is what `update_url` resolves to, delete or re-point the tag.
+2. **Stop the gateway** (`systemctl --user stop mercure-gateway`, or quit the
    desktop app).
-2. **Reinstall the previous signed installer** for the platform — the one from
+3. **Reinstall the previous signed installer** for the platform — the one from
    the release you are rolling back to. The installer replaces the program
    tree only.
-3. **Data and config survive**: the spool database, `operations.log`, the audit
+4. **Data and config survive**: the spool database, `operations.log`, the audit
    chain, `mercure-gateway.json`, and the credential store all live outside the
    program tree (see `docs/guides/backup-restore.md` for the paths). Nothing in
-   step 2 touches them.
-4. **Restart** and confirm the reported version in the web panel's footer or
+   step 3 touches them.
+5. **Restart** and confirm the reported version in the web panel's footer or
    `GET /api/system/info`.
-5. **Prevent re-application**: the desktop shell checks for updates on a
+6. **Prevent re-application**: the desktop shell checks for updates on a
    schedule. If the broken release is still `latest`, point
    `config.update.update_url` at a manifest for the good version, or disable
    update checks (`config.update.enabled = false`) for a version-pinned
    deployment until the broken release is superseded.
-6. **Tell the fleet**: if the broken release reached installed appliances, the
+7. **Tell the fleet**: if the broken release reached installed appliances, the
    fix is a *new* signed release (which the updater will accept as an upgrade),
    not a rollback instruction — installed updaters will keep offering whatever
    `latest.json` says.

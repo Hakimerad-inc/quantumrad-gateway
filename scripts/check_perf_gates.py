@@ -5,27 +5,39 @@ Measures the time from claim to the first delivery attempt (US-03 ≤2 s
 "begin") and the concurrent forwarding throughput (K8).  These gates run in
 CI and fail the build on regression.
 
-Two modes (review P1-7):
+Two modes (review P1-7 — the throughput gate used to measure a fake):
 
-- **synthetic** (default) — a scripted handler that records the claim time.
-  Fast; this is what CI runs on every push. It measures the forwarder's
-  queue/claim/route machinery only: the handler itself does *no* I/O, so a
-  regression in handler cost is invisible to it.
-- **real** (``--real-io``) — the handler performs actual disk and socket I/O
-  per delivery: a real ``fsync`` on a written file plus a real TCP round-trip
-  to a loopback server. This is the mode that can see handler regressions.
-  It is the integration path (``just perf-gates-real``), not the per-push CI
-  gate, because it is slower and its floor is machine-dependent.
+* default (``python scripts/check_perf_gates.py``) — the scripted fake
+  handler increments a counter and returns ``ok=True`` with **no I/O**.
+  Fast and stable enough for every push, and it still catches a regression
+  in claim latency or queue drain — but it proves nothing about real
+  throughput: 5 items/s of counter increments is a statement about a while
+  loop, not about the forwarder.
+* ``--real`` — the same batch delivered by the real :class:`DICOMHandler`
+  through an actual TCP socket to a local C-STORE SCP, reading real DICOM
+  files off a real (temp) spool.  This is the gate that means something;
+  it is marked ``slow``/``integration`` in ``tests/test_perf_gates.py`` and
+  runs on the integration path, not on every push.
 
-The K8 floor in the synthetic mode is deliberately a *sanity* floor, not a
-performance target. Measured on real ext4 (review P1-4): 25 concurrent
-associations yield 0.69 inst/s each at 1338 ms median latency — 25× the
-offered load buys 1.24× throughput. The receiver, not the forwarder, is the
-binding constraint; this gate guards the forwarder's own bookkeeping.
+The CI default is deliberately the fast mode: on a loaded free-tier runner
+a socket-bound measurement has enough variance to flap, and a flaky gate is
+worse than a narrow one.  ``--real`` is the number to watch on a quiet
+machine and in the nightly / integration run.
+
+Measured 2026-09-19 (dev ext4, quiet box, 3 runs): synthetic 2442 items/s
+vs real 8.1–8.6 items/s — roughly **300×** apart.  The fake measurement was
+not a loose approximation of throughput; it was measuring something else
+entirely.  That gap is the whole point of P1-7.
+
+The real number is also why the shared floor of 5 items/s stays: it is a
+sanity floor, not a target, and even on a quiet box the real measurement
+clears it by under 2×.  A regression there is a real one; a flap on a
+loaded runner is a CI-timing artifact — which is why ``--real`` is off the
+per-push path.
 
 Usage:
-    python scripts/check_perf_gates.py            # synthetic (CI default)
-    python scripts/check_perf_gates.py --real-io  # real handler I/O
+    python scripts/check_perf_gates.py          # fast synthetic (CI default)
+    python scripts/check_perf_gates.py --real   # real socket + disk I/O
 
 Returns exit code 0 (pass) or 1 (fail) and prints results.
 """
@@ -33,33 +45,36 @@ Returns exit code 0 (pass) or 1 (fail) and prints results.
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
-import socket
+import contextlib
 import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 LATENCY_BUDGET_SEC = 2.0  # US-03: forwarding begins within 2 s of claim
 CONCURRENT_TARGET_ITEMS_PER_SEC = 5  # K8: sanity throughput floor (CI-safe)
-# The real-I/O floor is lower because a delivery now pays for an fsync plus a
-# TCP round-trip; the synthetic floor would be a lie about what is possible.
-REAL_IO_TARGET_ITEMS_PER_SEC = 2
+
+# Real-mode batch size: each study opens its own association, so this is also
+# the number of real TCP connections. Kept equal to the synthetic batch so
+# the two numbers are directly comparable.
+_REAL_COUNT = 100
+
+# A delivery that never completes must fail the gate, not hang it. Bounds the
+# drain loop in both modes (the synthetic loop had no bound either).
+_DRAIN_TIMEOUT_SEC = 60.0
+
+# Test-only UID root for the real-mode batch (kept well under VR UI's 64
+# bytes; see _seed_real_studies).
+_TEST_UID_ROOT = "1.2.840.1.999.42"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class _StopwatchHandler:
-    """Destination handler that records when delivery first began.
-
-    In synthetic mode this is the whole handler: a counter and a timestamp.
-    That is enough to gate the queue/claim/route path and nothing more —
-    review P1-7's point is that it must not be mistaken for a delivery
-    measurement.
-    """
+    """Destination handler that records when delivery first began."""
 
     def __init__(self) -> None:
         self.first_begin_sec: float | None = None
@@ -75,109 +90,53 @@ class _StopwatchHandler:
         return DeliveryResult(ok=True)
 
 
-class _AckServer:
-    """A loopback TCP server that reads a payload and ACKs it.
+class _CountingScp:
+    """Live C-STORE SCP counting instances that actually arrived on the wire.
 
-    This is the "actual socket" half of the real-I/O mode. Real delivery
-    transports (DIMSE, SFTP, HTTPS) all pay a connect + send + wait-for-ACK
-    round trip; a loopback server reproduces that cost shape without an
-    external PACS, so the mode stays deterministic and dependency-free.
+    The honest end-to-end metric for the real gate: a delivery counts only
+    once its bytes have crossed a real socket, not when the handler is
+    invoked — the fake handler's counter and the SCP's counter are what
+    separates "the queue drains" from "the data moves".
     """
 
     def __init__(self) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(16)
-        self.port = self._sock.getsockname()[1]
-        self.bytes_received = 0
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._serve, name="perf-gate-ack", daemon=True)
+        self.received = 0
+        self.first_received_sec: float | None = None
+        self._lock = threading.Lock()
+        # perf_counter() is process-wide and monotonic, so the caller can
+        # timestamp the enqueue against the same origin this uses.
+        self._start = time.perf_counter()
+        self._server: Any = None
 
-    def start(self) -> None:
-        self._thread.start()
+    def handle_store(self, event: object) -> int:
+        with self._lock:
+            if self.first_received_sec is None:
+                self.first_received_sec = time.perf_counter() - self._start
+            self.received += 1
+        return 0x0000
 
-    def _serve(self) -> None:
-        self._sock.settimeout(0.25)
-        while not self._stop.is_set():
-            try:
-                conn, _ = self._sock.accept()
-            except TimeoutError:
-                continue
-            with conn:
-                try:
-                    total = 0
-                    while True:
-                        chunk = conn.recv(65536)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                    conn.sendall(b"ok")
-                except OSError:
-                    pass
-                self.bytes_received += total
+    def start(self) -> int:
+        """Bind the SCP to an ephemeral loopback port; return the port."""
+        from pydicom.uid import AllTransferSyntaxes
+        from pydicom.uid import CTImageStorage as CTContext
+        from pynetdicom import AE, evt
 
-    def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=5.0)
-        self._sock.close()
+        ae = AE(ae_title="PERFSCP")
+        ae.add_supported_context(CTContext, AllTransferSyntaxes)
+        self._server = ae.start_server(
+            ("127.0.0.1", 0),
+            evt_handlers=[(evt.EVT_C_STORE, self.handle_store)],
+            block=False,
+        )
+        return int(self._server.server_address[1])
 
-
-class _RealIoHandler(_StopwatchHandler):
-    """A handler that performs real disk + socket I/O per delivery.
-
-    Every delivery writes a payload file, ``fsync``s it, ships the bytes over
-    a real TCP connection, and waits for the ACK. If this handler's cost
-    regresses, the real-I/O gate sees it; the synthetic one cannot.
-    """
-
-    PAYLOAD_BYTES = 4096
-
-    def __init__(self, *, out_dir: Path, server: _AckServer) -> None:
-        super().__init__()
-        self._out_dir = out_dir
-        self._server = server
-
-    def deliver(self, task: Any, spool_dir: Path) -> Any:
-        from mercure_gateway.forwarder import DeliveryResult
-
-        # US-03 is "forwarding *begins*" — the attempt, not its completion —
-        # so the timestamp is taken before the I/O, as in the base class.
-        if self.first_begin_sec is None:
-            self.first_begin_sec = time.perf_counter() - self._start
-
-        # Disk: a real write plus a real fsync, as every durable transport
-        # does. mkstemp keeps the path unique without trusting task identity.
-        fd, tmp_path = tempfile.mkstemp(prefix="perf-", suffix=".dicom", dir=str(self._out_dir))
-        payload = b"x" * self.PAYLOAD_BYTES
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(payload)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except OSError as exc:
-            return DeliveryResult(ok=False, error=str(exc))
-
-        # Network: a real connect/send/recv round trip to the loopback ACK
-        # server. connect() is where a hung peer would block, so a socket
-        # timeout bounds it exactly as the real transports do (review P1-12).
-        try:
-            with socket.create_connection(("127.0.0.1", self._server.port), timeout=10) as sock:
-                sock.sendall(payload)
-                # Shutting down the write side is what tells the server the
-                # payload is complete; recv then waits for its ACK.
-                sock.shutdown(socket.SHUT_WR)
-                ack = sock.recv(2)
-            if ack != b"ok":
-                return DeliveryResult(ok=False, error=f"unexpected ACK {ack!r}")
-        except OSError as exc:
-            return DeliveryResult(ok=False, error=str(exc))
-
-        self.deliveries += 1
-        return DeliveryResult(ok=True)
+    def shutdown(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
 
 
 def _seed_studies(spool: Any, count: int) -> None:
+    """Enqueue ``count`` studies against the fake handler (no files on disk)."""
     from mercure_gateway.config import DICOMDestination
 
     target = DICOMDestination(
@@ -191,20 +150,99 @@ def _seed_studies(spool: Any, count: int) -> None:
         spool.enqueue(study_id, [target])
 
 
-def _make_handler(real_io: bool, *, out_dir: Any) -> tuple[_StopwatchHandler, _AckServer | None]:
-    """The handler for this run, and the server to stop afterwards.
+def _write_dicom_file(path: Path, study_uid: str, instance_uid: str) -> None:
+    """Write a minimal valid CT DICOM file — the smallest unit a handler reads."""
+    from pydicom.dataset import FileDataset, FileMetaDataset
+    from pydicom.uid import UID, CTImageStorage, ExplicitVRLittleEndian
 
-    Returns ``(handler, ack_server)`` where ``ack_server`` is ``None`` in
-    synthetic mode — the caller stops it in a ``finally``.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = CTImageStorage
+    # pydicom types these as UID, not str — wrap so mypy stays clean.
+    meta.MediaStorageSOPInstanceUID = UID(instance_uid)
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds = FileDataset(path, {}, file_meta=meta, preamble=b"\x00" * 128)
+    ds.StudyInstanceUID = study_uid
+    ds.SeriesInstanceUID = f"{study_uid}.1"
+    ds.SOPInstanceUID = instance_uid
+    ds.SOPClassUID = CTImageStorage
+    ds.PatientName = "PERF^GATE"
+    ds.Modality = "CT"
+    ds.save_as(path, enforce_file_format=True)
+
+
+def _seed_real_studies(spool: Any, count: int, target: Any) -> None:
+    """Write real DICOM files to the spool and enqueue them for ``target``.
+
+    Every study lands on disk as an actual ``.dcm`` file, so delivery reads
+    real bytes and the handler's presentation-context negotiation runs
+    against real file headers — the path the production forwarder takes.
     """
-    if not real_io:
-        return _StopwatchHandler(), None
-    server = _AckServer()
-    server.start()
-    return _RealIoHandler(out_dir=out_dir, server=server), server
+    for i in range(count):
+        # Short, deterministic UIDs under one test-only root: pydicom's
+        # generate_uid() can emit values longer than VR UI's 64-byte ceiling.
+        study_uid = f"{_TEST_UID_ROOT}.1.{i}"
+        instance_uid = f"{_TEST_UID_ROOT}.2.{i}"
+        _write_dicom_file(
+            spool.spool_dir / study_uid / f"{study_uid}.1" / f"{instance_uid}.dcm",
+            study_uid,
+            instance_uid,
+        )
+        study_id = spool.receive(study_uid)
+        spool.enqueue(study_id, [target])
 
 
-def measure_latency(real_io: bool = False, *, out_dir: Any = None) -> float:
+def _drain(forwarder: Any, count: int, delivered: Any, limit: int = 10) -> bool:
+    """Pump the forwarder until ``delivered`` reaches ``count`` or the budget ends.
+
+    Returns whether the batch completed — a stuck delivery fails the gate
+    instead of hanging it.
+    """
+    deadline = time.perf_counter() + _DRAIN_TIMEOUT_SEC
+    while delivered() < count:
+        if time.perf_counter() > deadline:
+            return False
+        forwarder.process_once(limit=limit)
+    return True
+
+
+@contextlib.contextmanager
+def _real_harness() -> Iterator[tuple[Any, Any, Any, _CountingScp]]:
+    """A temp on-disk spool + real DICOMHandler + live SCP, torn down on exit.
+
+    Yields ``(spool, forwarder, target, scp)`` so callers can seed studies
+    against the real destination without reaching into forwarder internals.
+    """
+    from mercure_gateway.config import DICOMDestination, default_config
+    from mercure_gateway.forwarder import Forwarder, RetryPolicy
+    from mercure_gateway.forwarder.handlers.dicom import DICOMHandler
+    from mercure_gateway.spool import Spool
+    from mercure_gateway.spool.db import mem_database
+
+    scp = _CountingScp()
+    port = scp.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="perf-gate-") as tmp:
+            cfg = default_config()
+            cfg.storage.spool_dir = str(Path(tmp) / "spool")
+            spool = Spool(mem_database(), cfg)
+            target = DICOMDestination(
+                name="pacs",
+                host="127.0.0.1",
+                port=port,
+                aet_target="PERFSCP",
+            )
+            forwarder = Forwarder(cfg, spool, retry=RetryPolicy(base_delay_sec=0))
+            forwarder.register_handler("dicom", DICOMHandler(target, spool))
+            try:
+                yield spool, forwarder, target, scp
+            finally:
+                forwarder.stop()
+    finally:
+        scp.shutdown()
+
+
+def measure_latency() -> float:
     """Return seconds from queueing a study to first delivery attempt."""
     from mercure_gateway.config import default_config
     from mercure_gateway.forwarder import Forwarder
@@ -215,24 +253,20 @@ def measure_latency(real_io: bool = False, *, out_dir: Any = None) -> float:
     spool = Spool(db)
     cfg = default_config()
     cfg.forwarding.queue_poll_interval_ms = 5
-    handler, server = _make_handler(real_io, out_dir=out_dir)
+    handler = _StopwatchHandler()
 
-    try:
-        forwarder = Forwarder(cfg, spool)
-        forwarder.register_handler("dicom", handler)
-        _seed_studies(spool, 1)
-        forwarder.process_once()
-        forwarder.stop()
-    finally:
-        if server is not None:
-            server.stop()
+    forwarder = Forwarder(cfg, spool)
+    forwarder.register_handler("dicom", handler)
+    _seed_studies(spool, 1)
+    forwarder.process_once()
+    forwarder.stop()
 
     assert handler.first_begin_sec is not None, "no delivery attempted"
     return handler.first_begin_sec
 
 
-def measure_throughput(real_io: bool = False, *, out_dir: Any = None, count: int = 100) -> float:
-    """Return items delivered per second across a batch."""
+def measure_throughput() -> float:
+    """Return items delivered per second across a batch (synthetic handler)."""
     from mercure_gateway.config import default_config
     from mercure_gateway.forwarder import Forwarder
     from mercure_gateway.spool import Spool
@@ -241,65 +275,93 @@ def measure_throughput(real_io: bool = False, *, out_dir: Any = None, count: int
     db = mem_database()
     spool = Spool(db)
     cfg = default_config()
-    handler, server = _make_handler(real_io, out_dir=out_dir)
+    handler = _StopwatchHandler()
 
-    try:
-        forwarder = Forwarder(cfg, spool)
-        forwarder.register_handler("dicom", handler)
-        _seed_studies(spool, count)
+    forwarder = Forwarder(cfg, spool)
+    forwarder.register_handler("dicom", handler)
+    count = 100
+    _seed_studies(spool, count)
 
-        start = time.perf_counter()
-        while handler.deliveries < count:
-            forwarder.process_once(limit=10)
-        elapsed = time.perf_counter() - start
-        forwarder.stop()
-    finally:
-        if server is not None:
-            server.stop()
+    start = time.perf_counter()
+    _drain(forwarder, count, lambda: handler.deliveries)
+    elapsed = time.perf_counter() - start
+    forwarder.stop()
 
     return count / max(elapsed, 1e-9)
 
 
+def measure_real_latency() -> float:
+    """Seconds from enqueue to the first byte arriving at a real SCP (P1-7)."""
+    with _real_harness() as (spool, forwarder, target, scp):
+        # Timestamp the enqueue against the SCP's own clock origin.
+        enqueue_at = time.perf_counter() - scp._start
+        _seed_real_studies(spool, 1, target)
+        forwarder.process_once()
+
+    assert scp.first_received_sec is not None, "no instance reached the SCP"
+    return scp.first_received_sec - enqueue_at
+
+
+def measure_real_throughput() -> float:
+    """Instances/s delivered through a real socket to a real SCP (P1-7)."""
+    with _real_harness() as (spool, forwarder, target, scp):
+        _seed_real_studies(spool, _REAL_COUNT, target)
+        start = time.perf_counter()
+        drained = _drain(forwarder, _REAL_COUNT, lambda: scp.received)
+        elapsed = time.perf_counter() - start
+
+    assert drained, f"only {scp.received}/{_REAL_COUNT} instances reached the SCP"
+    return scp.received / max(elapsed, 1e-9)
+
+
+def _report(
+    label: str, value: float, budget: float, unit: str, *, at_most: bool = True
+) -> bool:
+    """Print one gate line; return whether it passed.
+
+    ``at_most`` selects the sense: latency must stay under its budget,
+    throughput must clear its floor.
+    """
+    ok = value <= budget if at_most else value >= budget
+    print(f"{'PASS' if ok else 'FAIL'}: {label} {value:.1f} {unit} (budget {budget:g} {unit})")
+    return ok
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    # P1-7: the real-I/O mode is opt-in. It is slower and its floor depends on
-    # the host's disk and loopback, so per-push CI keeps the synthetic gate
-    # and the integration path runs this one.
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--real-io",
+        "--real",
         action="store_true",
-        help="deliver through a handler that performs real fsync + socket I/O",
+        help="measure through a real socket to a local C-STORE SCP (slow/integration)",
     )
     args = parser.parse_args(argv)
 
-    ok = True
-    out_dir: Any = None
-    if args.real_io:
-        out_dir = Path(tempfile.mkdtemp(prefix="perf-gate-"))
-
-    try:
-        label = "real-I/O" if args.real_io else "synthetic"
-        floor = REAL_IO_TARGET_ITEMS_PER_SEC if args.real_io else CONCURRENT_TARGET_ITEMS_PER_SEC
-
-        latency = measure_latency(args.real_io, out_dir=out_dir)
-        status = "PASS" if latency <= LATENCY_BUDGET_SEC else "FAIL"
-        ok = ok and status == "PASS"
-        print(
-            f"{status} ({label}): forwarding begins in {latency*1000:.0f} ms "
-            f"(budget {LATENCY_BUDGET_SEC*1000:.0f} ms)"
+    if args.real:
+        ok = _report(
+            "real forwarding begins in",
+            measure_real_latency() * 1000,
+            LATENCY_BUDGET_SEC * 1000,
+            "ms",
         )
-
-        throughput = measure_throughput(args.real_io, out_dir=out_dir)
-        status = "PASS" if throughput >= floor else "FAIL"
-        ok = ok and status == "PASS"
-        print(
-            f"{status} ({label}): concurrent throughput {throughput:.1f} items/s "
-            f"(floor {floor:.0f})"
+        ok &= _report(
+            "real concurrent throughput",
+            measure_real_throughput(),
+            CONCURRENT_TARGET_ITEMS_PER_SEC,
+            "items/s",
+            at_most=False,
         )
-    finally:
-        if out_dir is not None:
-            shutil.rmtree(out_dir, ignore_errors=True)
+        return 0 if ok else 1
 
+    ok = _report(
+        "forwarding begins in", measure_latency() * 1000, LATENCY_BUDGET_SEC * 1000, "ms"
+    )
+    ok &= _report(
+        "concurrent throughput",
+        measure_throughput(),
+        CONCURRENT_TARGET_ITEMS_PER_SEC,
+        "items/s",
+        at_most=False,
+    )
     return 0 if ok else 1
 
 

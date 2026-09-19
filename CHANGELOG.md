@@ -133,12 +133,34 @@ recovery.
   fails on an un-regenerated `api-schema.ts` (P1-9) — the drift that let the
   SPA's `fetchConfig` type itself into `Record<string, unknown>`.
 - The throughput gate keeps the fast synthetic check as the CI default (P1-7)
-  and gains a real-I/O mode (`just perf-gates-real`, `--real-io`): the handler
-  performs a real `fsync` plus a real TCP round trip per delivery, so a
-  regression in handler cost becomes visible. The synthetic handler still
-  does no I/O and measures the queue/claim/route path only — the two are
-  labelled distinctly in the output so the synthetic number is never read as
-  a delivery measurement.
+  and gains a real mode (`just perf-gates-real`, `--real`) that delivers the
+  same batch through the **real `DICOMHandler`** to a live C-STORE SCP,
+  reading real `.dcm` files off a temp spool and counting instances that
+  arrived on the wire. The synthetic handler does no I/O and its number is
+  ~300× the real one — the fake measured a while loop, not throughput. The
+  two are labelled distinctly in the output so the synthetic figure is never
+  quoted as a delivery measurement; `--real` runs on the integration path
+  (the `integration` marker, previously declared but unused, is now wired
+  and deselected in CI) because a socket-bound measurement flaps on a loaded
+  shared runner.
+
+### Frontend
+
+- **CSP `frame-src 'self' data:` is now pinned by a test (P1-11).** The
+  directive was present but only header *presence* was asserted anywhere, so
+  a directive removed or relaxed by accident would have passed silently —
+  and report PDFs render in a `data:` iframe that `object-src 'none'` gives
+  no fallback to. `test_csp_content` now pins each load-bearing directive as
+  a full directive, including the deliberate `style-src 'unsafe-inline'`
+  relaxation React needs.
+- **Cancellable fetches and non-stacking pollers (P1-20).** `apiFetch` /
+  `getJson` / `postJson` accept an `AbortSignal`, and a new `usePoll` hook
+  replaces the bare `setInterval` pollers in the logs and pipeline views:
+  each call aborts its predecessor, the timer re-arms only after settlement
+  (polls cannot overlap or land out of order), a hidden tab stops polling
+  and refetches on return, and unmount aborts and clears. `isAbortError()`
+  keeps a deliberately cancelled request from being reported as "Log refresh
+  failed".
 
 ### Documentation
 
@@ -151,9 +173,6 @@ recovery.
 
 Tracked so this entry stays honest about the state of the branch:
 
-- **P1-11** — CSP `frame-src 'self' data:` for the PDF rendering path.
-- **P1-20** — `AbortController` through the SPA fetch layer; the three bare
-  `setInterval` pollers still stack.
 - **P1-19** — the read-connection change above.
 - **P1-22** — six documents still describe an auth-enabling path that does not
   exist (the PBKDF2 CLI/endpoint surfaces replaced it).

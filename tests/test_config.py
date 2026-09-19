@@ -166,7 +166,10 @@ def test_env_overrides_scalar_fields_recursively() -> None:
             "MERCURE_GATEWAY_GENERAL_APPLIANCE_NAME": "Deploy-1",
             "MERCURE_GATEWAY_RECEIVER_PORT": "11114",
             "MERCURE_GATEWAY_RECEIVER_AE_TITLE": "DEPLOY",
+            # auth_enabled is paired with its hash: enabling auth without one
+            # would boot a panel nobody can log into (P0-8, via the env path).
             "MERCURE_GATEWAY_WEB_UI_AUTH_ENABLED": "true",
+            "MERCURE_GATEWAY_WEB_UI_AUTH_PASSWORD_HASH": "sha256$salt$hash",
             "MERCURE_GATEWAY_STORAGE_DISK_FULL_WARNING_PCT": "85",
             "MERCURE_GATEWAY_GENERAL_LOG_LEVEL": "DEBUG",
         },
@@ -222,6 +225,21 @@ def test_env_boolean_value_false() -> None:
         environ={"MERCURE_GATEWAY_WEB_UI_AUTH_ENABLED": "false"},
     )
     assert cfg.web_ui.auth_enabled is False
+
+
+def test_env_enabling_auth_without_a_hash_is_refused() -> None:
+    """Enabling auth by env with no hash boots an unloginnable panel (P0-8).
+
+    ``_walk`` mutates by bare ``setattr``, so ``WebUIConfig``'s
+    ``_auth_needs_a_hash`` validator never runs on this path, and
+    ``insecure_bind_reason`` then reports the panel as protected — the check
+    below is the only thing between the env var and a permanent lockout.
+    """
+    with pytest.raises(ValueError, match="auth_password_hash is empty"):
+        apply_env_overrides(
+            default_config(),
+            environ={"MERCURE_GATEWAY_WEB_UI_AUTH_ENABLED": "true"},
+        )
 
 
 # ── TD-08: secret inventory & env-var secret injection ───────────────────
@@ -542,8 +560,36 @@ def test_load_config_heals_unknown_keys_and_names_them(
         assert dropped in log
 
 
+def test_load_config_heals_an_unknown_key_inside_a_list_element(tmp_path) -> None:
+    """An unknown key nested in destinations[] heals, not recurses forever.
+
+    Pydantic reports such a key as ``("destinations", 0, "sftp", "stray")`` — a
+    loc that carries both a list index and the discriminated-union branch name,
+    neither of which the dict-only walk could follow. The prune then deleted
+    nothing, the retry raised the identical error, and boot died on
+    ``RecursionError``: a typo inside one destination bricked the appliance,
+    the one thing the healer exists to prevent.
+    """
+    path = tmp_path / "mercure-gateway.json"
+    cfg = default_config()
+    cfg.destinations = [
+        DICOMDestination(
+            type="dicom", name="pacs", host="pacs.local", port=104, aet_target="PACS"
+        )
+    ]
+    save_config(cfg, path)
+
+    payload = json.loads(path.read_text())
+    payload["destinations"][0]["typo_key"] = "x"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_config(path)  # would RecursionError before the fix
+    assert len(loaded.destinations) == 1
+    assert loaded.destinations[0].name == "pacs"
+    assert "typo_key" not in json.loads(path.read_text())["destinations"][0]
+
+
 def test_load_config_preserves_the_original_as_a_backup(tmp_path) -> None:
-    """The operator's file is never destroyed by the heal."""
     path = tmp_path / "mercure-gateway.json"
     save_config(default_config(), path)
     original = path.read_text()

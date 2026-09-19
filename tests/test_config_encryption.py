@@ -271,3 +271,42 @@ def test_wrong_key_raises(tmp_path) -> None:
 
     with pytest.raises(ConfigEncryptionError):
         load_config(path, master_password="wrong-pw")
+
+
+def test_a_stale_keyring_entry_does_not_override_the_vault(tmp_path) -> None:
+    """The vault wins; a stale keyring entry must not resurrect an old secret.
+
+    The keyring write is gated on ``store.available`` at save time, but the
+    vault is written unconditionally, so the two can disagree: save while the
+    keyring is down and only the vault carries the new value, then boot with it
+    back up and the keyring still holds the previous one. Preferring the
+    keyring would silently authenticate with a rotated-away credential
+    (review P1-2).
+    """
+    cfg = _secret_config()
+    path = tmp_path / "gw.json"
+    mp = pytest.MonkeyPatch()
+    mp.setattr(KeyringCredentialStore, "available", property(lambda _self: False))
+    mp.setattr(enc, "_keyring_available", lambda: False)
+    try:
+        save_config(cfg, path, master_password="pw")
+        assert cfg.destinations[0].password == "TOPSECRET"  # caller untouched
+    finally:
+        mp.undo()
+
+    # Keyring is back, and it holds a stale value for the same destination.
+    stale = {"nas:password": "OLD-COMPROMISED"}
+    mp = pytest.MonkeyPatch()
+    mp.setattr(enc, "_keyring_available", lambda: True)
+    mp.setattr(KeyringCredentialStore, "available", property(lambda _self: True))
+    mp.setattr(
+        KeyringCredentialStore,
+        "get_password",
+        lambda _self, name: stale.get(name),
+    )
+    try:
+        loaded = load_config(path, master_password="pw")
+    finally:
+        mp.undo()
+
+    assert loaded.destinations[0].password == "TOPSECRET"

@@ -315,14 +315,25 @@ def decrypt_config_from_storage(
 def _resolve_secret(
     store: KeyringCredentialStore, key: str, encrypted: str, vault: CredentialVault
 ) -> str:
-    """Prefer the OS keyring; fall back to decrypting the config vault block."""
+    """Resolve a stored secret, preferring the config vault over the keyring.
+
+    Both hold the value when the keyring was writable at save time; the vault
+    is authoritative because it is written unconditionally (the keyring write
+    is gated on ``store.available``). Preferring the keyring would let a stale
+    entry win: save with the keyring down and only the vault carries the new
+    value, then boot with it back up and the keyring still holds the *old* one
+    — an operator who rotated a compromised credential would find the
+    appliance still using the revoked one, audit-recorded as a success
+    (review P1-2, credential cross-wiring in a new place).
+    """
+    try:
+        return vault.decrypt_field(encrypted)
+    except WrongPasswordError:
+        pass
     if store.available:
         from_keyring = store.get_password(key)
         if from_keyring is not None:
             return from_keyring
-    try:
-        return vault.decrypt_field(encrypted)
-    except WrongPasswordError as exc:
-        raise ConfigEncryptionError(
-            "invalid master password for encrypted configuration"
-        ) from exc
+    raise ConfigEncryptionError(
+        "invalid master password for encrypted configuration"
+    )

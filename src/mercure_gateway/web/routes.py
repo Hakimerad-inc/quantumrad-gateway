@@ -990,6 +990,20 @@ def _restore_redacted_secrets(payload: dict[str, Any], current: GatewayConfig) -
     for name, entry in payload_entries.items():
         prev = current_entries.get(name)
         if prev is None:
+            # Nothing stored under this name — same failure mode as the
+            # destination branch above: a sentinel that names nothing stored
+            # cannot be restored, and persisting the literal "***" would make
+            # the credential unauthenticatable (review P1-2).
+            unrestorable = [
+                key for key in CREDENTIAL_ENTRY_FIELDS if entry.get(key) == _REDACTED_SENTINEL
+            ]
+            if unrestorable:
+                raise RedactedSecretUnrestorableError(
+                    f"credentials.entries.{name}.{unrestorable[0]}",
+                    f"Credential entry {name!r} has a redacted {unrestorable[0]} but "
+                    f"no entry named {name!r} exists in the stored config — re-enter "
+                    "the credential (the literal value would not be accepted).",
+                )
             continue
         for key in CREDENTIAL_ENTRY_FIELDS:
             if entry.get(key) == _REDACTED_SENTINEL and prev.get(key):

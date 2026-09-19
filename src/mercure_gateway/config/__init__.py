@@ -747,28 +747,27 @@ def _resolve_master_password(
 def _prune_extra_keys(payload: Any, errors: list[Any]) -> Any:
     """Return a deep copy of *payload* without the ``extra_forbidden`` locations.
 
-    Each error's ``loc`` is a path (``("general", "ae_title")``) into the parsed
-    document. ``copy.deepcopy`` is taken first because the payload may be an
-    arbitrary object graph Pydantic built from the input; mutating it in place
-    would corrupt the caller's copy.
-    """
-    import copy
+    Each error's ``loc`` is a path into the parsed document. Two loc segments
+    are not literal payload keys and must be walked specially:
 
-    pruned = copy.deepcopy(payload)
-    for err in errors:
-        loc = list(err.get("loc", ()))
-        if not loc:
-            continue
-        parent, leaf = loc[:-1], loc[-1]
-        node: Any = pruned
-        for part in parent:
-            if not isinstance(node, dict) or part not in node:
-                node = None
-                break
-            node = node[part]
-        if isinstance(node, dict) and leaf in node:
-            del node[leaf]
-    return pruned
+    * an ``int`` index — ``("destinations", 0, ...)`` selects a list element.
+      The dict-only walk used to hit the list, fail its ``isinstance`` guard,
+      and prune nothing, so the retried validation raised the identical error
+      and :func:`normalize_and_validate` recursed until ``RecursionError`` — a
+      typo inside one destination object bricked the appliance at boot, the
+      exact failure the healer exists to prevent.
+    * the discriminated-union branch name — Pydantic reports a destination's
+      extras as ``("destinations", 0, "sftp", "stray")`` where ``sftp`` is the
+      matched branch, not a key the payload carries. It is skipped rather than
+      descended into, which leaves ``node`` on the destination dict itself.
+
+    ``copy.deepcopy`` is taken first because the payload may be an arbitrary
+    object graph Pydantic built from the input; mutating it in place would
+    corrupt the caller's copy.
+    """
+    return _prune_locs(
+        payload, [list(err.get("loc", ())) for err in errors if err.get("loc")]
+    )
 
 
 # Bind hosts that are single-user by definition (admin guide §Authentication,
@@ -819,16 +818,30 @@ def _prune_for_disk(payload: Any, locs: list[list[Any]]) -> Any:
     this variant takes the already-recorded locs straight from the healed
     config, so the file rewrite prunes exactly what validation dropped.
     """
+    return _prune_locs(payload, locs)
+
+
+def _prune_locs(payload: Any, locs: list[list[Any]]) -> Any:
+    """Deep copy *payload* and delete each of *locs* (see :func:`_prune_extra_keys`
+    for why loc segments can be list indices or union branch names)."""
     import copy
 
     pruned = copy.deepcopy(payload)
     for loc in locs:
+        if not loc:
+            continue
         parent, leaf = loc[:-1], loc[-1]
         node: Any = pruned
         for part in parent:
+            if isinstance(node, list) and isinstance(part, int):
+                if not 0 <= part < len(node):
+                    node = None
+                    break
+                node = node[part]
+                continue
             if not isinstance(node, dict) or part not in node:
-                node = None
-                break
+                node = node if isinstance(node, dict) else None
+                continue
             node = node[part]
         if isinstance(node, dict) and leaf in node:
             del node[leaf]
@@ -1153,4 +1166,23 @@ def apply_env_overrides(config: GatewayConfig, environ: Any | None = None) -> Ga
                 ) from exc
 
     _walk(config, _ENV_PREFIX)
+    # The walk uses bare setattr, and the strict models do not set
+    # validate_assignment (it would re-run every model_validator on each of the
+    # mutations above, including test fixtures that deliberately build an
+    # intermediate state). So the cross-field invariants a model_validator
+    # guards — notably WebUIConfig._auth_needs_a_hash (P0-8) — are not enforced
+    # here. Re-check the one that is a permanent lockout rather than letting the
+    # appliance boot an unloginnable panel: an env override can flip
+    # auth_enabled true while the hash is still empty, and insecure_bind_reason
+    # then reports the panel as protected (main.py applies overrides before the
+    # bind check), so nothing else catches it.
+    ui = config.web_ui
+    if ui.auth_enabled and not ui.auth_password_hash:
+        raise ValueError(
+            "environment override set web_ui.auth_enabled but "
+            "web_ui.auth_password_hash is empty — no password exists to log in "
+            "with, so the panel would be permanently locked out. Set the hash "
+            "(MERCURE_GATEWAY_WEB_UI_AUTH_PASSWORD_HASH, --set-web-password, or "
+            "PUT /api/web-ui/password) before enabling auth."
+        )
     return config

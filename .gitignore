@@ -102,3 +102,9 @@ playwright-report/
 
 # Session worktrees (per-user scratch holding in-flight branches).
 .claude/worktrees/
+
+# OpenAPI export written by `just gen-api` (scripts/export_openapi.py). The
+# SPA's committed src/types/api-schema.ts is the generated output that
+# matters; the JSON is an intermediate artifact, and `just gen-api-check`
+# (plus the api-schema-drift CI job) catches drift by regenerating both.
+mercure-gateway.openapi.json

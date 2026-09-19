@@ -32,7 +32,7 @@ describe("saveConfig surfaces restart-required (H5)", () => {
     const seen: boolean[] = [];
     const unsub = api.onRestartRequired((v) => seen.push(v));
 
-    const res = await api.saveConfig({ general: { appliance_name: "x" } });
+    const res = await api.saveConfig({ config_version: "1.0", general: { appliance_name: "x", locale: "en", log_level: "INFO" } });
     expect(res).not.toBeNull();
     expect(res?.restart_required).toBe(true);
 
@@ -56,7 +56,7 @@ describe("saveConfig surfaces restart-required (H5)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const api = await import("./api");
-    await expect(api.saveConfig({ general: { appliance_name: "" } })).rejects.toThrow(
+    await expect(api.saveConfig({ config_version: "1.0", general: { appliance_name: "", locale: "en", log_level: "INFO" } })).rejects.toThrow(
       "Invalid config: appliance_name",
     );
     // A failed save must not flip the restart signal.
@@ -75,7 +75,7 @@ describe("saveConfig surfaces restart-required (H5)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const api = await import("./api");
-    await expect(api.saveConfig({})).rejects.toThrow("502 Bad Gateway");
+    await expect(api.saveConfig({ config_version: "1.0" })).rejects.toThrow("502 Bad Gateway");
     expect(api.isRestartRequired()).toBe(false);
   });
 });

@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchConfig, saveConfig, apiUrl, fetchConfigWarnings } from "../api";
-import type { ConfigWarning } from "../api";
+import type { ConfigWarning, GatewayConfig } from "../api";
 import { IconCheck, IconX, IconPlus } from "../ui/icons";
 
 /** Fields each destination type exposes in the form. Secret fields are masked.
@@ -198,9 +198,13 @@ export default function DestinationsView() {
 
   const load = useCallback(async () => {
     try {
-      const cfg = (await fetchConfig()) as Record<string, unknown>;
-      setDestinations(withStableIds((cfg.destinations as Destination[]) ?? []));
-      setForwardingRules(Array.isArray(cfg.forwarding_rules) ? (cfg.forwarding_rules as unknown[]) : []);
+      const cfg = await fetchConfig();
+      // The schema's destination list is a discriminated union of eight read
+      // types; the form edits one loose mutable shape with a client-only uid.
+      // Narrowing through `unknown` keeps fetchConfig's return type honest
+      // while the edit shape stays permissive.
+      setDestinations(withStableIds((cfg.destinations as unknown as Destination[]) ?? []));
+      setForwardingRules(cfg.forwarding_rules ?? []);
       setDirty(false);
       setError("");
     } catch (e) {
@@ -278,12 +282,12 @@ export default function DestinationsView() {
     setMsg("");
     setError("");
     try {
-      const current = (await fetchConfig()) as Record<string, unknown>;
+      const current = await fetchConfig();
       // Send only the destinations section; the rest of the config round-trips
       // untouched so this page cannot clobber an unrelated setting. The stable
       // ids are client-only and must not reach the backend — the model would
       // reject the extra field.
-      current.destinations = forPayload(destinations);
+      current.destinations = forPayload(destinations) as GatewayConfig["destinations"];
       const result = await saveConfig(current);
       setDirty(false);
       const found = result?.warnings?.length ?? 0;

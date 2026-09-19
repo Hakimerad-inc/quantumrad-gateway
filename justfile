@@ -93,8 +93,17 @@ build-backend:
 # change to a pydantic model or a route signature. Forgetting this leaves the
 # frontend compiling against a backend that no longer has that shape.
 gen-api:
-    uv run python scripts/export_openapi.py
+    uv run python scripts/export_openapi.py --output ../mercure-gateway.openapi.json
     cd web && npx openapi-typescript ../mercure-gateway.openapi.json -o src/types/api-schema.ts
+
+# CI guard: fail if the committed api-schema.ts is not what the current
+# backend exports. Catches a route or model change that never regenerated the
+# SPA's types — the drift that let a Record<string, unknown> paper over a
+# real mismatch (review P1-9).
+gen-api-check:
+    uv run python scripts/export_openapi.py --output /tmp/api-schema-check.json
+    cd web && npx openapi-typescript /tmp/api-schema-check.json -o /tmp/api-schema-check.ts
+    @diff -u src/types/api-schema.ts /tmp/api-schema-check.ts && echo "api-schema.ts is up to date"
 
 # ── Pre-commit ──────────────────────────────────────────────────────────
 

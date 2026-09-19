@@ -22,6 +22,7 @@ import type {
   DestinationNode,
   DestinationRouteRow,
   DiskStatus,
+  GatewayConfig,
   LogsResponse,
   PipelineSnapshot,
   QueueStats,
@@ -46,6 +47,7 @@ export type {
   DestinationNode,
   DestinationRouteRow,
   DiskStatus,
+  GatewayConfig,
   LogsResponse,
   PipelineSnapshot,
   QueueStats,
@@ -183,8 +185,8 @@ export function fetchReportContent(reportId: number): Promise<ReportContent> {
   return getJson<ReportContent>(`/api/reports/${reportId}/content`);
 }
 
-export function fetchConfig(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/config");
+export function fetchConfig(): Promise<GatewayConfig> {
+  return getJson<GatewayConfig>("/api/config");
 }
 
 // Result of a config save. `restart_required` is always true on success today:
@@ -210,7 +212,7 @@ export function isRestartRequired(): boolean {
 }
 
 export async function saveConfig(
-  payload: Record<string, unknown>,
+  payload: GatewayConfig,
 ): Promise<SaveConfigResult | null> {
   const res = await apiFetch("/api/config", {
     method: "PUT",

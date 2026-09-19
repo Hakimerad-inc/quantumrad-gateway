@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import { fetchConfig, saveConfig, apiUrl } from "../api";
+import type { GatewayConfig } from "../api";
 import { IconCheck, IconX, IconChevronLeft, IconChevronRight } from "../ui/icons";
 
 const STEPS = ["receiver", "destinations", "reports", "admin", "summary"];
@@ -79,12 +80,21 @@ export default function SetupWizardPage() {
     setSaving(true);
     setErrors([]);
     try {
-      const current = (await fetchConfig()) as Record<string, unknown>;
+      const current = await fetchConfig();
       // The receiver step's ae_title/port belong to the *receiver* section —
       // writing them into `general` silently discards them (GeneralConfig has
       // neither field), the operator gets a success toast, and the receiver
-      // keeps its defaults forever (review P0-4).
-      current.receiver = { ...(current.receiver as object || {}), ...data.receiver };
+      // keeps its defaults forever (review P0-4). The generated GatewayConfig
+      // type makes the wrong merge a compile error here.
+      //
+      // The assertion is narrow and deliberate: this step collects only two of
+      // the receiver's fields, so a partial merge is correct (the server fills
+      // the rest) even though openapi-typescript marks every defaulted field
+      // required. It still type-checks the section name — the part that broke.
+      current.receiver = {
+        ...current.receiver,
+        ...data.receiver,
+      } as GatewayConfig["receiver"];
       current.destinations = data.destinations.map((d) => ({
         name: d.name,
         type: "dicom",
@@ -96,11 +106,11 @@ export default function SetupWizardPage() {
       }));
       // Only `enabled` is taken from the wizard: `query_source` is a
       // structured object (ReportQuerySource), not the free-text
-      // "host:port" string this step collects.
+      // "host:port" string this step collects. Same partial-merge assertion.
       current.reports = {
-        ...(current.reports as object || {}),
+        ...current.reports,
         enabled: data.reports.enabled,
-      };
+      } as GatewayConfig["reports"];
       await saveConfig(current);
       // The admin password is never round-tripped through the config body —
       // it is posted as plaintext to the dedicated endpoint, which hashes it

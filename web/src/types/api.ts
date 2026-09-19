@@ -25,6 +25,15 @@ export type QueueStats = Schemas["QueueStats"];
 export type SystemStatus = Schemas["SystemStatus"];
 export type DiskStatus = Schemas["DiskStatus"];
 
+// The config endpoints. GET /api/config returns a redacted view of the real
+// GatewayConfig: every field the schema describes is present and typed, so a
+// merge writing a receiver field into the general section (the wizard bug,
+// review P0-4) is a compile error here rather than a runtime 400. This is the
+// type `fetchConfig` used to return as Record<string, unknown>.
+export type GatewayConfig = Schemas["RedactedGatewayConfig"];
+export type ConfigUpdateResponse = Schemas["ConfigUpdateResponse"];
+export type ConfigImportResponse = Schemas["ConfigImportResponse"];
+
 // ── Endpoints returning ad-hoc dicts (no response model server-side) ──
 
 export interface LogsResponse {
@@ -68,26 +77,12 @@ export interface ReportContent {
   mime: string | null;
 }
 
-export interface SaveConfigResult {
-  status: string;
-  message: string;
-  restart_required: boolean;
-  /** Non-fatal lint findings against the saved config (may be absent on older backends). */
-  warnings?: ConfigWarning[];
-}
-
-/** A non-fatal misconfiguration finding the panel renders (GET/PUT /api/config). */
-export interface ConfigWarning {
-  /** Dotted path into the config document, e.g. "forwarding_rules[0].targets". */
-  path: string;
-  message: string;
-  severity: "warning" | "info";
-}
-
-export interface ConfigWarningsResult {
-  warnings: ConfigWarning[];
-  config_version: string;
-}
+// Save/import results now have server-side response models (review P1-9), so
+// these are derived from the schema rather than hand-written. The lint warning
+// shape is shared by both and by the panel's warnings banner.
+export type SaveConfigResult = ConfigUpdateResponse;
+export type ConfigWarning = Schemas["ConfigWarningDict"];
+export type ConfigWarningsResult = Schemas["ConfigWarningsResponse"];
 
 export interface DestinationHealth {
   status: string;

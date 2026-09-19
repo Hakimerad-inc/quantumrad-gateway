@@ -11,6 +11,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import Field, field_validator, model_validator
+
+from mercure_gateway.config import GatewayConfig, WebUIConfig
+
 # Secret-bearing fields per destination type (never returned by the API).
 DESTINATION_SECRET_FIELDS = (
     "password",
@@ -28,7 +32,44 @@ CREDENTIAL_ENTRY_FIELDS = (
     "api_key_encrypted",
 )
 
-__all__ = ["redact_config"]
+__all__ = ["RedactedGatewayConfig", "redact_config"]
+
+
+class _RedactedWebUI(WebUIConfig):
+    """The web-UI section as ``GET /api/config`` returns it.
+
+    The real :class:`WebUIConfig` rejects any hash that is not a known scheme,
+    which is what makes a mistyped hash a save-time error instead of a lockout
+    (review P0-8). The redacted view carries ``"***"`` in that field, which is
+    not a hash and never reaches a login, so the strict validators are relaxed
+    here — this is the response *model*, not the write boundary.
+    """
+
+    auth_password_hash: str = Field(
+        default="",
+        description="pbkdf2$/sha256$ hash, or '***' when redacted by the API.",
+    )
+
+    @field_validator("auth_password_hash")
+    @classmethod
+    def _hash_is_a_known_scheme(cls, value: str) -> str:
+        return value
+
+    @model_validator(mode="after")
+    def _auth_needs_a_hash(self) -> _RedactedWebUI:
+        return self
+
+
+class RedactedGatewayConfig(GatewayConfig):
+    """The response model for ``GET /api/config``.
+
+    Declaring it (rather than letting the endpoint return a bare dict) is what
+    exports the real schema to the SPA's generated TypeScript types — so a
+    merge writing a receiver field into the general section fails at compile
+    time instead of 400ing at runtime (review P1-9).
+    """
+
+    web_ui: _RedactedWebUI = Field(default_factory=_RedactedWebUI)
 
 
 def redact_config(data: dict[str, Any]) -> dict[str, Any]:

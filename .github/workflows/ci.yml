@@ -20,6 +20,38 @@ jobs:
       - run: uv run ruff check .
       - run: uv run mypy .
 
+  # The SPA's api-schema.ts is generated from the backend's OpenAPI export.
+  # A route or model change that never regenerated it is exactly how the
+  # SPA's fetchConfig drifted to Record<string, unknown> and papered over the
+  # wizard's wrong-section merge (review P1-9). This is `just gen-api-check`
+  # in CI: regenerate to /tmp and diff against the committed file.
+  api-schema-drift:
+    name: api-schema.ts drift check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - name: Export the current OpenAPI schema
+        run: uv run python scripts/export_openapi.py --output /tmp/api-schema-check.json
+      - name: Regenerate the SPA types from it
+        run: npx openapi-typescript /tmp/api-schema-check.json -o /tmp/api-schema-check.ts
+        working-directory: web
+      - name: Diff against the committed types
+        run: diff -u src/types/api-schema.ts /tmp/api-schema-check.ts
+        working-directory: web
+
   dependency-audit:
     name: dependency audit (pip-audit + npm + cargo)
     runs-on: ubuntu-latest

@@ -40,6 +40,7 @@ from mercure_gateway.config.lint import lint_config
 from mercure_gateway.redact import (
     CREDENTIAL_ENTRY_FIELDS,
     DESTINATION_SECRET_FIELDS,
+    RedactedGatewayConfig,
     redact_config,
 )
 from mercure_gateway.spool import Spool
@@ -833,12 +834,32 @@ def study_timeline(request: Request, study_id: int) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/config")
+@router.get("/config", response_model=RedactedGatewayConfig)
 def get_config(request: Request) -> dict[str, Any]:
-    """Get current configuration (all credentials redacted)."""
+    """Get current configuration (all credentials redacted).
+
+    ``response_model`` exports the real schema to the SPA's generated
+    TypeScript types, so a merge writing a receiver field into the general
+    section (the P0-4 wizard bug) fails at compile time instead of 400ing at
+    runtime (review P1-9).
+    """
     cfg = _config(request)
     data: dict[str, Any] = json.loads(cfg.model_dump_json())
     return redact_config(data)
+
+
+class RedactedSecretUnrestorableError(Exception):
+    """A '***' sentinel in *payload* names nothing in the stored config.
+
+    Raised by :func:`_restore_redacted_secrets` so the caller can answer 400
+    naming the field — the operator must re-enter the credential. Persisting
+    the literal ``"***"`` would silently destroy it (review F4 / P1-2).
+    """
+
+    def __init__(self, path: str, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.message = message
 
 
 def _restore_redacted_secrets(payload: dict[str, Any], current: GatewayConfig) -> dict[str, Any]:
@@ -905,7 +926,16 @@ def _restore_redacted_secrets(payload: dict[str, Any], current: GatewayConfig) -
     return data
 
 
-@router.put("/config")
+class ConfigUpdateResponse(BaseModel):
+    """The result of a successful config write."""
+
+    status: str
+    message: str
+    restart_required: bool
+    warnings: list[ConfigWarningDict] = Field(default_factory=list)
+
+
+@router.put("/config", response_model=ConfigUpdateResponse)
 def update_config(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
     """Update configuration and persist it to ``mercure-gateway.json``.
 
@@ -975,7 +1005,22 @@ def _audit_config_rejection(request: Request, reason: str) -> None:
         logger.warning("could not record the CONFIG_SECURITY_REJECTED audit event")
 
 
-@router.get("/config/warnings")
+class ConfigWarningDict(BaseModel):
+    """One lint finding as the panel consumes it (config/lint's as_dict)."""
+
+    path: str
+    message: str
+    severity: str = "warning"
+
+
+class ConfigWarningsResponse(BaseModel):
+    """Lint findings against the running config, plus the version it ran on."""
+
+    warnings: list[ConfigWarningDict] = Field(default_factory=list)
+    config_version: str = "1.0"
+
+
+@router.get("/config/warnings", response_model=ConfigWarningsResponse)
 def config_warnings(request: Request) -> dict[str, Any]:
     """Non-fatal misconfiguration findings against the *running* config.
 
@@ -1005,7 +1050,16 @@ def export_config(request: Request) -> JSONResponse:
     )
 
 
-@router.post("/config/import")
+class ConfigImportResponse(BaseModel):
+    """The result of importing a foreign config file."""
+
+    status: str
+    message: str
+    restart_required: bool
+    ignored_keys: list[str] = Field(default_factory=list)
+
+
+@router.post("/config/import", response_model=ConfigImportResponse)
 async def import_config(request: Request) -> dict[str, Any]:
     """Import configuration from uploaded JSON file.
 

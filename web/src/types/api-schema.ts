@@ -19,7 +19,9 @@ export interface paths {
          *
          *     With ``web_ui.auth_enabled`` a wrong or missing password returns 401;
          *     with auth disabled any password is accepted (the API is open regardless)
-         *     so the SPA login flow works uniformly.
+         *     so the SPA login flow works uniformly. Either way the attempt is counted
+         *     by the rate limiter when auth is enabled — an open panel has nothing to
+         *     brute-force, a locked one must not be brute-forceable either.
          */
         post: operations["login_api_login_post"];
         delete?: never;
@@ -42,6 +44,39 @@ export interface paths {
          * @description Clear the admin session cookie.
          */
         post: operations["logout_api_logout_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/web-ui/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Change Password
+         * @description Set the admin password hash.
+         *
+         *     This is the only API surface that creates a hash, and it never round-trips
+         *     one: the new password arrives in plaintext over the (loopback or TLS)
+         *     panel, is hashed server-side, and only the hash is stored. The session that
+         *     made the change stays valid — the signing secret is not derived from the
+         *     hash.
+         *
+         *     ``require_auth`` is a no-op while auth is disabled, which is exactly the
+         *     first-boot setup-wizard case; on a running appliance auth-off implies a
+         *     loopback bind (the composition root refuses anything else), so the endpoint
+         *     is no more exposed than the rest of the open panel. It deliberately does
+         *     **not** enable auth on the operator's behalf — silently turning auth on
+         *     would be a lockout in the hands of anyone who can reach the panel.
+         */
+        post: operations["change_password_api_web_ui_password_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -472,6 +507,11 @@ export interface paths {
         /**
          * Get Config
          * @description Get current configuration (all credentials redacted).
+         *
+         *     ``response_model`` exports the real schema to the SPA's generated
+         *     TypeScript types, so a merge writing a receiver field into the general
+         *     section (the P0-4 wizard bug) fails at compile time instead of 400ing at
+         *     runtime (review P1-9).
          */
         get: operations["get_config_api_config_get"];
         /**
@@ -483,6 +523,13 @@ export interface paths {
          *     the body is validated into a :class:`GatewayConfig` and saved to the
          *     ``config_path`` configured on app state.  When no path is configured the
          *     update is validated and applied in memory only.
+         *
+         *     A config that would bind an unauthenticated admin panel to a network
+         *     address is rejected with 409 (review P0-3): the document is *valid*, the
+         *     running appliance's posture is what conflicts with it, and refusing to
+         *     persist is the only response that stops an open panel from being saved one
+         *     click at a time. The check runs after validation so the operator sees the
+         *     most specific error first.
          */
         put: operations["update_config_api_config_put"];
         post?: never;
@@ -865,6 +912,257 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * AuditConfig
+         * @description Local tamper-evident audit log configuration.
+         */
+        AuditConfig: {
+            /**
+             * Local
+             * @default true
+             */
+            local: boolean;
+            /**
+             * Encrypt
+             * @default true
+             */
+            encrypt: boolean;
+            /**
+             * Phi Scope
+             * @description PHI scoping for audit events and exports (§6.4). 'minimal' omits patient-identifying fields (patient_name, mrn) from audit detail and exports; 'full' records them. Default = minimal.
+             * @default minimal
+             * @enum {string}
+             */
+            phi_scope: "minimal" | "full";
+            /**
+             * Retention Days
+             * @description Audit log retention window (days). Events older than this are pruned (default 1 year per PRD §7). Applies to the audit chain and the rotating text log.
+             * @default 365
+             */
+            retention_days: number;
+            hub_reporting?: components["schemas"]["HubReporting"];
+        };
+        /**
+         * ConfigImportResponse
+         * @description The result of importing a foreign config file.
+         */
+        ConfigImportResponse: {
+            /** Status */
+            status: string;
+            /** Message */
+            message: string;
+            /** Restart Required */
+            restart_required: boolean;
+            /** Ignored Keys */
+            ignored_keys?: string[];
+        };
+        /**
+         * ConfigUpdateResponse
+         * @description The result of a successful config write.
+         */
+        ConfigUpdateResponse: {
+            /** Status */
+            status: string;
+            /** Message */
+            message: string;
+            /** Restart Required */
+            restart_required: boolean;
+            /** Warnings */
+            warnings?: components["schemas"]["ConfigWarningDict"][];
+        };
+        /**
+         * ConfigWarningDict
+         * @description One lint finding as the panel consumes it (config/lint's as_dict).
+         */
+        ConfigWarningDict: {
+            /** Path */
+            path: string;
+            /** Message */
+            message: string;
+            /**
+             * Severity
+             * @default warning
+             */
+            severity: string;
+        };
+        /**
+         * ConfigWarningsResponse
+         * @description Lint findings against the running config, plus the version it ran on.
+         */
+        ConfigWarningsResponse: {
+            /** Warnings */
+            warnings?: components["schemas"]["ConfigWarningDict"][];
+            /**
+             * Config Version
+             * @default 1.0
+             */
+            config_version: string;
+        };
+        /**
+         * CredentialEntry
+         * @description Encrypted credential block for a single destination.
+         */
+        CredentialEntry: {
+            /**
+             * Type
+             * @description Destination type (e.g. "sftp", "s3").
+             */
+            type: string;
+            /** Username */
+            username?: string | null;
+            /**
+             * Password Encrypted
+             * @description AES-256-GCM encrypted password ("AES256GCM:...").
+             */
+            password_encrypted?: string | null;
+            /**
+             * Private Key Encrypted
+             * @description AES-256-GCM encrypted private key (SSH/SFTP).
+             */
+            private_key_encrypted?: string | null;
+            /**
+             * Passphrase Encrypted
+             * @description AES-256-GCM encrypted passphrase for the private key.
+             */
+            passphrase_encrypted?: string | null;
+            /**
+             * Api Key Encrypted
+             * @description AES-256-GCM encrypted API key (S3, XNAT, DICOMweb, hub reporting).
+             */
+            api_key_encrypted?: string | null;
+        };
+        /**
+         * CredentialsConfig
+         * @description Encrypted credential storage (product refinement spec §2.5).
+         *
+         *     Credentials are stored as AES-256-GCM encrypted blocks, decrypted with a
+         *     master password on startup via PBKDF2 (100k iterations, SHA-256).  When
+         *     ``encrypted`` is false, credentials are stored in plaintext (dev/test only).
+         */
+        CredentialsConfig: {
+            /**
+             * Encrypted
+             * @description Encrypt credential values at rest.  Disable for dev/test only.
+             * @default true
+             */
+            encrypted: boolean;
+            /**
+             * Salt
+             * @description Base64-encoded PBKDF2 salt.  Set once when the configuration is first locked with a master password.  Must be present when ``encrypted`` is true.
+             */
+            salt?: string | null;
+            /**
+             * Entries
+             * @description Per-destination credential blocks, keyed by destination name.
+             */
+            entries?: {
+                [key: string]: components["schemas"]["CredentialEntry"];
+            };
+        };
+        /**
+         * DICOMDestination
+         * @description C-STORE (SCU) destination — mercure hub receiver or vendor PACS.
+         */
+        DICOMDestination: {
+            /** Name */
+            name: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Timeout Sec
+             * @description Connect/association timeout in seconds. None uses the transport's default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither connects nor rejects within this window fails the delivery and the study retries on the next pass — without it, one hung destination halts all delivery (review P1-12).
+             */
+            timeout_sec?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "dicom";
+            /** Host */
+            host: string;
+            /** Port */
+            port: number;
+            /** Aet Target */
+            aet_target: string;
+            /**
+             * Aet Source
+             * @default GATEWAY
+             */
+            aet_source: string;
+        };
+        /**
+         * DICOMTLSDestination
+         * @description C-STORE over DICOM-TLS (AES/TLS).
+         */
+        DICOMTLSDestination: {
+            /** Name */
+            name: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Timeout Sec
+             * @description Connect/association timeout in seconds. None uses the transport's default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither connects nor rejects within this window fails the delivery and the study retries on the next pass — without it, one hung destination halts all delivery (review P1-12).
+             */
+            timeout_sec?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "dicom_tls";
+            /** Host */
+            host: string;
+            /** Port */
+            port: number;
+            /** Aet Target */
+            aet_target: string;
+            /**
+             * Aet Source
+             * @default GATEWAY
+             */
+            aet_source: string;
+            /**
+             * Verify Peer
+             * @default true
+             */
+            verify_peer: boolean;
+            /** Cacert */
+            cacert?: string | null;
+        };
+        /**
+         * DICOMwebDestination
+         * @description RESTful DICOMweb target (STOW-RS).
+         */
+        DICOMwebDestination: {
+            /** Name */
+            name: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Timeout Sec
+             * @description Connect/association timeout in seconds. None uses the transport's default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither connects nor rejects within this window fails the delivery and the study retries on the next pass — without it, one hung destination halts all delivery (review P1-12).
+             */
+            timeout_sec?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "dicomweb";
+            /** Url */
+            url: string;
+            /** Aet */
+            aet?: string | null;
+            /** Auth Token */
+            auth_token?: string | null;
+        };
+        /**
          * DiskStatus
          * @description Live spool filesystem capacity + disk-full management state (S10-T7).
          */
@@ -933,15 +1231,135 @@ export interface components {
              */
             aet_source: string;
         };
+        /**
+         * FolderDestination
+         * @description Local/network folder target (drop folder).
+         */
+        FolderDestination: {
+            /** Name */
+            name: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Timeout Sec
+             * @description Connect/association timeout in seconds. None uses the transport's default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither connects nor rejects within this window fails the delivery and the study retries on the next pass — without it, one hung destination halts all delivery (review P1-12).
+             */
+            timeout_sec?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "folder";
+            /** Path */
+            path: string;
+        };
+        /**
+         * ForwardingConfig
+         * @description Concurrent forwarding worker settings (product refinement spec §2.2).
+         */
+        ForwardingConfig: {
+            /**
+             * Concurrency
+             * @description Maximum number of concurrent forwarding workers.
+             * @default 3
+             */
+            concurrency: number;
+            /**
+             * Queue Poll Interval Ms
+             * @description How often workers poll for new tasks (milliseconds).
+             * @default 500
+             */
+            queue_poll_interval_ms: number;
+        };
+        /**
+         * ForwardingRule
+         * @description Optional advanced routing rule (v1.1). Evaluated against extracted DICOM tags.
+         */
+        ForwardingRule: {
+            /** Rule */
+            rule: string;
+            /** Targets */
+            targets: string[];
+            /**
+             * Priority
+             * @default normal
+             * @enum {string}
+             */
+            priority: "normal" | "high" | "low";
+        };
+        /**
+         * GeneralConfig
+         * @description Top-level gateway identity and runtime settings.
+         */
+        GeneralConfig: {
+            /**
+             * Appliance Name
+             * @default Gateway-CLI-01
+             */
+            appliance_name: string;
+            /**
+             * Locale
+             * @default en
+             */
+            locale: string;
+            /**
+             * Log Level
+             * @default INFO
+             */
+            log_level: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /**
+         * HubReporting
+         * @description Optional streaming of audit events to a mercure hub bookkeeper (v1.1).
+         */
+        HubReporting: {
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Bookkeeper Url
+             * @default
+             */
+            bookkeeper_url: string;
+            /**
+             * Api Key
+             * @default
+             */
+            api_key: string;
+            /**
+             * Anchor Public Key
+             * @default
+             */
+            anchor_public_key: string;
+        };
         /** LoginRequest */
         LoginRequest: {
             /** Password */
             password: string;
+        };
+        /**
+         * PasswordChangeRequest
+         * @description Rotate the admin password.
+         *
+         *     ``current_password`` is required whenever auth is already enabled: without
+         *     it, a hijacked or stale session could silently rotate the credential and
+         *     extend its own access (review P0-8).
+         */
+        PasswordChangeRequest: {
+            /** Current Password */
+            current_password?: string | null;
+            /** New Password */
+            new_password: string;
         };
         /** QueueStats */
         QueueStats: {
@@ -977,6 +1395,268 @@ export interface components {
             failed: number;
         };
         /**
+         * ReceiverConfig
+         * @description Local DICOM C-STORE SCP settings.
+         *
+         *     ``port=0`` is allowed in code/tests: it asks the OS for an ephemeral port
+         *     (resolved after the transport binds; see ``Receiver.port``). Config files
+         *     should always set a real port.
+         */
+        ReceiverConfig: {
+            /**
+             * Ae Title
+             * @default GATEWAY
+             */
+            ae_title: string;
+            /**
+             * Port
+             * @default 11112
+             */
+            port: number;
+            /**
+             * Max Associations
+             * @description Maximum concurrent DICOM associations (US-01 AC: ≥25 modalities can push simultaneously).
+             * @default 25
+             */
+            max_associations: number;
+            /**
+             * Decompress Common
+             * @description Decompress common compressed syntaxes (JPEG 2000, JPEG-LS, RLE) on receive. Rare/proprietary syntaxes are passed through as-is.
+             * @default true
+             */
+            decompress_common: boolean;
+            /**
+             * Auto Enqueue Delay Sec
+             * @description Idle window (seconds) after the last received instance before a study is auto-enqueued to the enabled destinations (US-03). The delay debounces multi-instance studies so the forwarder never delivers a half-received study; modalities do not signal end-of-study.
+             * @default 5
+             */
+            auto_enqueue_delay_sec: number;
+            /**
+             * Allowed Ae Titles
+             * @description Empty = accept any AE title.
+             */
+            allowed_ae_titles?: string[];
+        };
+        /**
+         * RedactedGatewayConfig
+         * @description The response model for ``GET /api/config``.
+         *
+         *     Declaring it (rather than letting the endpoint return a bare dict) is what
+         *     exports the real schema to the SPA's generated TypeScript types — so a
+         *     merge writing a receiver field into the general section fails at compile
+         *     time instead of 400ing at runtime (review P1-9).
+         */
+        RedactedGatewayConfig: {
+            /**
+             * Config Version
+             * @description Configuration schema version for migration compatibility.
+             * @default 1.0
+             */
+            config_version: string;
+            general?: components["schemas"]["GeneralConfig"];
+            receiver?: components["schemas"]["ReceiverConfig"];
+            /** Destinations */
+            destinations?: (components["schemas"]["DICOMDestination"] | components["schemas"]["DICOMTLSDestination"] | components["schemas"]["DICOMwebDestination"] | components["schemas"]["SFTPDestination"] | components["schemas"]["RsyncDestination"] | components["schemas"]["S3Destination"] | components["schemas"]["FolderDestination"] | components["schemas"]["XNATDestination"])[];
+            forwarding?: components["schemas"]["ForwardingConfig"];
+            /** Forwarding Rules */
+            forwarding_rules?: components["schemas"]["ForwardingRule"][];
+            reports?: components["schemas"]["ReportConfig"];
+            audit?: components["schemas"]["AuditConfig"];
+            update?: components["schemas"]["UpdateConfig"];
+            storage?: components["schemas"]["StorageConfig"];
+            web_ui?: components["schemas"]["_RedactedWebUI"];
+            credentials?: components["schemas"]["CredentialsConfig"];
+            usb_mode?: components["schemas"]["USBModeConfig"];
+        };
+        /**
+         * ReportConfig
+         * @description Report-retrieval configuration.
+         */
+        ReportConfig: {
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            query_source?: components["schemas"]["ReportQuerySource"] | null;
+            /**
+             * Store Scp Port
+             * @description Port for the report C-STORE SCP the PACS C-MOVEs reports into. Must match the port registered for this gateway's AE title on the PACS (a C-MOVE destination is resolved by AE title).
+             * @default 11113
+             */
+            store_scp_port: number;
+            /**
+             * Poll Interval Sec
+             * @default 300
+             */
+            poll_interval_sec: number;
+            /**
+             * Sla Seconds
+             * @description SLA window (seconds) for report retrieval. Exceeded → SLA_EXPIRED event (K3).
+             * @default 300
+             */
+            sla_seconds: number;
+            /**
+             * On Retrieval
+             * @default store
+             * @enum {string}
+             */
+            on_retrieval: "store" | "store_and_forward";
+            /**
+             * Report Types
+             * @description Which report SOP classes to retrieve. 'sr' = DICOM Structured Report (1.2.840.10008.5.1.4.1.1.88.33); 'pdf' = Encapsulated PDF (1.2.840.10008.5.1.4.1.1.104.2).
+             */
+            report_types?: ("sr" | "pdf")[];
+        };
+        /**
+         * ReportQuerySource
+         * @description PACS endpoint used for report retrieval (C-FIND/C-MOVE).
+         */
+        ReportQuerySource: {
+            /**
+             * Type
+             * @default dicom
+             * @enum {string}
+             */
+            type: "dicom" | "dicomweb" | "fhir" | "hl7";
+            /** Host */
+            host: string;
+            /** Port */
+            port: number;
+            /** Aet */
+            aet: string;
+            /**
+             * Timeout Sec
+             * @description Association timeout for the report C-FIND/C-MOVE. None uses the DIMSE default (30 s). A PACS that never answers the association would otherwise hang the report poller and stop retrieval silently (review P1-12).
+             */
+            timeout_sec?: number | null;
+        };
+        /**
+         * RsyncDestination
+         * @description rsync-over-SSH target.
+         */
+        RsyncDestination: {
+            /** Name */
+            name: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Timeout Sec
+             * @description Connect/association timeout in seconds. None uses the transport's default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither connects nor rejects within this window fails the delivery and the study retries on the next pass — without it, one hung destination halts all delivery (review P1-12).
+             */
+            timeout_sec?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "rsync";
+            /** Host */
+            host: string;
+            /**
+             * Ssh Port
+             * @default 22
+             */
+            ssh_port: number;
+            /** Username */
+            username: string;
+            /** Remote Path */
+            remote_path: string;
+        };
+        /**
+         * S3Destination
+         * @description S3-compatible object-store target.
+         */
+        S3Destination: {
+            /** Name */
+            name: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Timeout Sec
+             * @description Connect/association timeout in seconds. None uses the transport's default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither connects nor rejects within this window fails the delivery and the study retries on the next pass — without it, one hung destination halts all delivery (review P1-12).
+             */
+            timeout_sec?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "s3";
+            /** Bucket */
+            bucket: string;
+            /** Endpoint Url */
+            endpoint_url?: string | null;
+            /** Region */
+            region?: string | null;
+            /** Access Key Id */
+            access_key_id?: string | null;
+            /** Secret Access Key */
+            secret_access_key?: string | null;
+            /**
+             * Remote Prefix
+             * @default
+             */
+            remote_prefix: string;
+            /**
+             * Use Https
+             * @default true
+             */
+            use_https: boolean;
+        };
+        /**
+         * SFTPDestination
+         * @description SFTP (SSH file transfer) target.
+         */
+        SFTPDestination: {
+            /** Name */
+            name: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Timeout Sec
+             * @description Connect/association timeout in seconds. None uses the transport's default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither connects nor rejects within this window fails the delivery and the study retries on the next pass — without it, one hung destination halts all delivery (review P1-12).
+             */
+            timeout_sec?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "sftp";
+            /** Host */
+            host: string;
+            /**
+             * Port
+             * @default 22
+             */
+            port: number;
+            /** Username */
+            username: string;
+            /** Password */
+            password?: string | null;
+            /** Private Key */
+            private_key?: string | null;
+            /** Passphrase */
+            passphrase?: string | null;
+            /**
+             * Remote Path
+             * @default /
+             */
+            remote_path: string;
+            /**
+             * Known Hosts
+             * @default
+             */
+            known_hosts: string;
+        };
+        /**
          * ServiceStatusModel
          * @description Windows service install/run state for the admin panel.
          */
@@ -996,6 +1676,40 @@ export interface components {
              * @default unsupported
              */
             state: string;
+        };
+        /**
+         * StorageConfig
+         * @description Spool directory and retention settings.
+         */
+        StorageConfig: {
+            /**
+             * Spool Dir
+             * @description Root directory for the DICOM spool and database.
+             */
+            spool_dir?: string;
+            /**
+             * Max Spool Gb
+             * @description Maximum spool size in GiB of persisted DICOM instances. Enforced by the disk monitor: delivered studies are purged oldest-first when exceeded (review M3); undelivered studies are never removed.
+             * @default 20
+             */
+            max_spool_gb: number;
+            /**
+             * Retention Delivered Days
+             * @default 3
+             */
+            retention_delivered_days: number;
+            /**
+             * Disk Full Warning Pct
+             * @description Capacity percentage at which a disk-full warning is emitted.
+             * @default 90
+             */
+            disk_full_warning_pct: number;
+            /**
+             * Purge On Disk Full
+             * @description Automatically purge oldest delivered studies when capacity exceeds 'disk_full_warning_pct'. Undelivered/FAILED studies are never purged.
+             * @default false
+             */
+            purge_on_disk_full: boolean;
         };
         /**
          * StudyPage
@@ -1070,6 +1784,88 @@ export interface components {
              */
             config_pending_restart: boolean;
         };
+        /**
+         * USBModeConfig
+         * @description USB dongle variant settings (usb-dongle-gateway-spec §6).
+         */
+        USBModeConfig: {
+            /**
+             * Enabled
+             * @description Enable USB-specific behavior (aggressive retention, storage budget, hot-unplug monitoring).  Auto-detected when spool is on removable media.
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Storage Budget Gb
+             * @description Maximum data partition usage in GB (shared data partition).
+             * @default 18
+             */
+            storage_budget_gb: number;
+            /**
+             * Retention Delivered Hours
+             * @description Aggressive retention for USB: delivered studies purged after N hours.
+             * @default 24
+             */
+            retention_delivered_hours: number;
+            /**
+             * Hot Unplug Safe
+             * @description Enable graceful shutdown on USB removal detection.
+             * @default true
+             */
+            hot_unplug_safe: boolean;
+            /**
+             * Flush Timeout Sec
+             * @description Max seconds the hot-unplug flush may run before removal is forced (K10: flush ≤10 s).
+             * @default 10
+             */
+            flush_timeout_sec: number;
+            /**
+             * Auto Start On Boot
+             * @description Auto-start gateway on USB boot or plug-in.
+             * @default true
+             */
+            auto_start_on_boot: boolean;
+            /**
+             * Led Enabled
+             * @description Hardware LED status indicator support (requires compatible device).
+             * @default false
+             */
+            led_enabled: boolean;
+            /**
+             * Led Pin
+             * @description GPIO pin for LED control in Linux mode (BCM numbering).
+             * @default GPIO18
+             */
+            led_pin: string;
+        };
+        /**
+         * UpdateConfig
+         * @description Auto-update settings (PRD §2.3 Q5, ADR-0006).
+         *
+         *     The updater is fail-closed: without ``public_key`` configured, every
+         *     signature check rejects the archive, so the default state is
+         *     "updates disabled" rather than "updates unverified".
+         */
+        UpdateConfig: {
+            /**
+             * Enabled
+             * @description Check the update endpoint at startup (never auto-installs).
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Update Url
+             * @description URL of the signed update manifest (latest.json).
+             * @default
+             */
+            update_url: string;
+            /**
+             * Public Key
+             * @description Ed25519 public key (PEM or raw base64) used to verify update archives. Empty = updates cannot verify (fail-closed).
+             * @default
+             */
+            public_key: string;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -1082,6 +1878,86 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * XNATDestination
+         * @description XNAT server target.
+         */
+        XNATDestination: {
+            /** Name */
+            name: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Timeout Sec
+             * @description Connect/association timeout in seconds. None uses the transport's default (DIMSE 30 s, SFTP 30 s, rsync 300 s). A peer that neither connects nor rejects within this window fails the delivery and the study retries on the next pass — without it, one hung destination halts all delivery (review P1-12).
+             */
+            timeout_sec?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "xnat";
+            /** Url */
+            url: string;
+            /** Username */
+            username: string;
+            /** Password */
+            password: string;
+            /** Project */
+            project: string;
+            /** Subject */
+            subject?: string | null;
+        };
+        /**
+         * _RedactedWebUI
+         * @description The web-UI section as ``GET /api/config`` returns it.
+         *
+         *     The real :class:`WebUIConfig` rejects any hash that is not a known scheme,
+         *     which is what makes a mistyped hash a save-time error instead of a lockout
+         *     (review P0-8). The redacted view carries ``"***"`` in that field, which is
+         *     not a hash and never reaches a login, so the strict validators are relaxed
+         *     here — this is the response *model*, not the write boundary.
+         */
+        _RedactedWebUI: {
+            /**
+             * Host
+             * @description Bind address for the web admin panel. Use 0.0.0.0 for network access.
+             * @default 127.0.0.1
+             */
+            host: string;
+            /**
+             * Port
+             * @default 8080
+             */
+            port: number;
+            /**
+             * Auth Enabled
+             * @description Require password authentication for the web UI. Disabled by default for localhost-only access; enable for shared machines.
+             * @default false
+             */
+            auth_enabled: boolean;
+            /**
+             * Auth Password Hash
+             * @description pbkdf2$/sha256$ hash, or '***' when redacted by the API.
+             * @default
+             */
+            auth_password_hash: string;
+            /**
+             * Tls Cert File
+             * @description PEM certificate for the web admin panel (ADR-0007). Empty = plain HTTP. Must be paired with tls_key_file; intended for non-loopback binds, where the unauthenticated panel would otherwise leak PHI.
+             * @default
+             */
+            tls_cert_file: string;
+            /**
+             * Tls Key File
+             * @description PEM private key matching tls_cert_file. Empty = plain HTTP.
+             * @default
+             */
+            tls_key_file: string;
         };
     };
     responses: never;
@@ -1145,6 +2021,41 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+        };
+    };
+    change_password_api_web_ui_password_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordChangeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1672,9 +2583,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RedactedGatewayConfig"];
                 };
             };
         };
@@ -1700,9 +2609,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ConfigUpdateResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1731,9 +2638,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ConfigWarningsResponse"];
                 };
             };
         };
@@ -1773,9 +2678,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ConfigImportResponse"];
                 };
             };
         };

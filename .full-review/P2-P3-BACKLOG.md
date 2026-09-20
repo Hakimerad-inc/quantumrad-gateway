@@ -52,33 +52,37 @@ Counts at the bottom are the source of truth for "how far through the pass are w
 
 ### Step 1 — Cheap sweep
 
+All Step 1 items below landed as **`2e2c83f`** (Wave A). Gate was green on that
+commit: 976 tests, 89.71% coverage, web/ lint + `tsc -b` + 93/93 vitest,
+`gen-api-check` clean, `cargo test` 12/12 + `cargo fmt` + clippy clean.
+
 | Item | Status | Notes |
 |---|---|---|
-| `/api/pipeline` → `COUNT(*)` | todo | |
-| `count_routes_by_target` index + TTL memo | todo | |
-| `spool_num_bytes` covering index | todo | |
-| `import_config` `run_in_threadpool` | todo | |
-| Queue-state literals → `StudyState` | todo | |
-| Middleware order swap + preflight test | todo | |
-| OpenAPI gated behind auth | todo | |
-| Loopback CSRF port pin | todo | |
-| `AuthContext` `useMemo` | todo | |
-| Dead `dot="accent"` token | todo | |
-| `ae_title` fixtures | todo | |
-| CSS `ProtectedRoute` comment | todo | |
-| SPA-not-built error message path | todo | |
-| Spool schema docstring (4→7 tables) | todo | |
-| Read-conn `_read_disabled` docstring | todo | untracked item |
-| Forwarder docstring (`retry_max`) | todo | |
-| `wizard.py` docstring | todo | |
-| LED quickstart table | todo | docs align to code |
-| CI `paths-ignore` for docs | todo | |
-| Drop `docs/sprint-plan` trigger | todo | |
-| `dependabot.yml` + `CODEOWNERS` | todo | |
-| `numpy` floor | todo | |
-| Rust `log` crate | todo | |
-| Rust edition 2024 / MSRV | todo | build-break risk — verify `cargo tauri build` |
-| Test-rig image pin | todo | |
+| `/api/pipeline` → `COUNT(*)` | done | |
+| `count_routes_by_target` index + TTL memo | done | |
+| `spool_num_bytes` covering index | done | |
+| `import_config` `run_in_threadpool` | done | |
+| Queue-state literals → `StudyState` | done | |
+| Middleware order swap + preflight test | done | |
+| OpenAPI gated behind auth | done | |
+| Loopback CSRF port pin | done | |
+| `AuthContext` `useMemo` | done | |
+| Dead `dot="accent"` token | done | |
+| `ae_title` fixtures | done | |
+| CSS `ProtectedRoute` comment | done | |
+| SPA-not-built error message path | done | |
+| Spool schema docstring (4→7 tables) | done | |
+| Read-conn `_read_disabled` docstring | done | untracked item |
+| Forwarder docstring (`retry_max`) | done | |
+| `wizard.py` docstring | done | |
+| LED quickstart table | done | docs align to code |
+| CI `paths-ignore` for docs | done | |
+| Drop `docs/sprint-plan` trigger | done | |
+| `dependabot.yml` + `CODEOWNERS` | done | |
+| `numpy` floor | done | |
+| Rust `log` crate | done | |
+| Rust edition 2024 / MSRV | done | `cargo tauri build` verified clean; edition changed rustfmt's `use` ordering — the pre-existing import block was normalized with `cargo fmt`, proven edition-induced by a temporary revert |
+| Test-rig image pin | done | |
 
 ### Step 2 — Spool durability and performance
 
@@ -139,7 +143,7 @@ Counts at the bottom are the source of truth for "how far through the pass are w
 | Item | Status | Notes |
 |---|---|---|
 | `test-fast` CI job | todo | |
-| Perf gate `--real` in CI + scaling ratio | todo | needs test-rig Orthanc |
+| Perf gate `--real` in CI + scaling ratio | blocked | needs a live Orthanc on the CI runner — the `inst_s_25 / inst_s_1 ≥ 3×` ratio is unverifiable without one. Tracked as blocked, not forced |
 | Staged rollout / update channel | todo | |
 | `eslint` / `globals` / `whatwg-encoding` bumps | todo | |
 | Runbook §4 Windows flake wording | todo | |
@@ -148,15 +152,15 @@ Counts at the bottom are the source of truth for "how far through the pass are w
 
 | Check | Status | Notes |
 |---|---|---|
-| `ruff check .` | todo | |
-| `mypy .` | todo | |
-| `pytest -m "not integration"` | todo | |
-| coverage ≥ 80 | todo | |
-| `web/`: eslint + `tsc -b` + vitest | todo | must run from `web/` |
-| `just gen-api-check` | todo | after `response_model` work |
-| `cargo test` + `cargo tauri build` | todo | after Rust items |
+| `ruff check .` | pass | clean on 2e2c83f |
+| `mypy .` | pass | 72 source files, no issues |
+| `pytest -m "not integration"` | pass | 976 passed, 5 skipped, 3 deselected |
+| coverage ≥ 80 | pass | 89.71% |
+| `web/`: eslint + `tsc -b` + vitest | pass | lint clean, tsc -b exit 0, 93/93 tests; bare `tsc --noEmit` checks nothing here (root tsconfig is references-only) |
+| `just gen-api-check` | pass | api-schema.ts matches the exported schema (no response_model work in Wave A, so no regen needed) |
+| `cargo test` + `cargo tauri build` | pass | 12/12 tests, fmt clean, clippy clean; `cargo tauri build` green at edition 2024 |
 
-**Tally:** 3 done · 51 todo · 0 dropped · 0 blocked — of 64 tracked lines
+**Tally:** 29 done · 25 todo · 0 dropped · 1 blocked — of 64 tracked lines
 (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11 findings were
 dropped up front as stale (see the DROPPED table below), so these 51 represent the
 open surface of the original 81.
@@ -199,12 +203,16 @@ grouping:
 WAVE 0 — landed (1ab6eb5, c4a5f82, 6d9815e)
   └─ unblocks everything below; tree clean at 6d9815e
 
-WAVE A — parallel, zero cross-dependencies
+WAVE A — LANDED as 2e2c83f (8 parallel batches, 16 agents incl. verify; gate green:
+       976 tests, 89.71% cov, web/ lint+tsc-b+vitest 93/93, gen-api-check clean,
+       cargo test 12/12 + fmt + clippy)
    A1  src/mercure_gateway/web/__init__.py  middleware order swap + preflight CSP test,
        OpenAPI gated behind auth, loopback CSRF port pin, SPA-not-built message path
+       └─ the order was genuinely inverted: CORS was outermost and swallowed OPTIONS
+          before _SecurityMiddleware saw it. Now registered last = outermost.
    A2  spool/db.py + web/pipeline.py        COUNT(*) rewrite, idx_task_routing_target
-       covering index + TTL memo, instance_meta covering index, spool schema + read-conn
-       docstrings (same file as the indexes — one batch)
+       covering index + TTL memo (RouteRollupCache), instance_meta covering index,
+       spool schema + read-conn docstrings
    A3  web/routes.py                        queue-state literals → StudyState,
        import_config run_in_threadpool
    A4  forwarder/__init__.py + web/wizard.py docstrings (nonexistent knobs/endpoints)
@@ -212,8 +220,12 @@ WAVE A — parallel, zero cross-dependencies
        `dot="accent"` token, ae_title fixtures, dead CSS comment
    A6  docs/guides/usb-quickstart.md        LED table rewrite against led.py
    A7  .github/ + pyproject.toml + test-rig paths-ignore, drop docs/sprint-plan,
-       dependabot.yml, CODEOWNERS, numpy floor, Orthanc image pin
-   A8  src-tauri/Cargo.toml                 `log` crate (wire or remove), edition 2024 + MSRV
+       dependabot.yml, CODEOWNERS, numpy floor (uv.lock re-resolved to numpy 2.0),
+       Orthanc image pin
+   A8  src-tauri/Cargo.toml                 `log` crate WIRED via tauri-plugin-log 2.9.2
+       (LogDir+Stdout at Info; both eprintln! replaced), edition 2024 + MSRV 1.85
+       └─ edition 2024 changed rustfmt's `use` ordering; the pre-existing import
+          block was normalized with `cargo fmt` (verified edition-induced by revert)
        └─ A5's ae_title fixture fix is an input to C4 (a11y scan scans that document)
 
 WAVE B — needs Wave A's files settled; B1–B11 interleave by file

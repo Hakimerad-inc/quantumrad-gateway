@@ -5,11 +5,11 @@
 `.full-review/05-final-report.md:110-139` carries the P2/P3 backlog as two prose
 paragraphs — 58 P2 + 23 P3 = 81 findings — with **no IDs, no checkboxes, and no
 status tracking**. Nothing in the repo tracks them at item level. The review base
-was `aab94b5`; 32 commits have landed since, including P0/P1 work that closed
+was `aab94b5`; 34 commits have landed since, including P0/P1 work that closed
 several of these findings and re-graded others into tiers already shipped.
 
 So the backlog as written is materially rotted. This plan starts from a
-re-validation of every item against `HEAD` (`b1f835a`), which changes the shape
+re-validation of every item against `HEAD` (`6d9815e`), which changes the shape
 of the work considerably:
 
 - **~11 items are STALE** — already closed by P0/P1 commits (`axe.js` deleted,
@@ -48,7 +48,7 @@ Counts at the bottom are the source of truth for "how far through the pass are w
 |---|---|---|
 | `/rules/preview` WIP | done | Landed as `1ab6eb5` (P0-9). Was uncommitted when this pass started; verified before it landed: 95 backend + 93 frontend tests pass, `tsc -b` clean |
 | `dicomweb` report transport | done | Landed as `c4a5f82`. Resolved the schema drift: `api-schema.ts` now matches the backend exactly (re-verified, no diff) |
-| `PROVENANCE.json` verify at build time | blocked | Uncommitted WIP in `src-tauri/build.rs` (+215) moves the frozen-sidecar version check into the Tauri build script so `cargo tauri build` alone cannot skip it. Someone's in-flight work — left untouched |
+| `PROVENANCE.json` verify at build time | done | Landed as `6d9815e`. The guard moved into `src-tauri/build.rs` and fires on every `cargo tauri build`, not just when `package_backend.py` is the thing freezing. Parsers live in `src-tauri/src/sidecar.rs` so `cargo test` actually runs them — a build script's `#[cfg(test)]` module never executes. `ci.yml`'s Linux packaging job now runs that `cargo test`. Working tree clean |
 
 ### Step 1 — Cheap sweep
 
@@ -156,7 +156,7 @@ Counts at the bottom are the source of truth for "how far through the pass are w
 | `just gen-api-check` | todo | after `response_model` work |
 | `cargo test` + `cargo tauri build` | todo | after Rust items |
 
-**Tally:** 1 done · 51 todo · 0 dropped · 0 blocked — of 62 tracked lines
+**Tally:** 3 done · 51 todo · 0 dropped · 0 blocked — of 64 tracked lines
 (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11 findings were
 dropped up front as stale (see the DROPPED table below), so these 51 represent the
 open surface of the original 81.
@@ -167,40 +167,131 @@ open surface of the original 81.
 |---|---|---|---|
 | 1 | Uncommitted `/rules/preview` WIP overlaps backlog files | resolved | Landed cleanly as `1ab6eb5`; tree no longer carries it |
 | 2 | WIP `api-schema.ts` inconsistent with the backend | resolved | `c4a5f82` added the dicomweb backend the schema described. Re-ran the drift check — no diff |
+| 3 | In-flight `src-tauri/build.rs` provenance work | resolved | Landed as `6d9815e`; working tree is clean and every gate is green at `HEAD` |
 
 **Context shift since the pass was planned:** `IMPLEMENTATION-PLAN.md`'s "remaining
-open work" list has moved. #1 (`POST /rules/preview`) landed as `1ab6eb5`; #2
-(`dicomweb`/`fhir` factories) landed as `c4a5f82` — dicomweb is wired through both
-the forwarder (`main.py:245`) and the report factory (`main.py:360-372`), with
-`fhir` noted as using the same path. #3 (PROVENANCE verify) is in flight as the
-uncommitted `src-tauri/build.rs`. Only #4 (a real rollback path) remains untouched,
-and that one was resolved by deletion back at P1-14.
+open work" list is now **empty**. #1 (`POST /rules/preview`) landed as `1ab6eb5`;
+#2 (`dicomweb`/`fhir` factories) landed as `c4a5f82` — dicomweb is wired through
+both the forwarder (`main.py:245`) and the report factory (`main.py:360-372`), with
+`fhir` noted as using the same path; #3 (PROVENANCE verify) landed as `6d9815e`;
+#4 (a real rollback path) was resolved by deletion back at P1-14. Every line in
+Steps 1–8 below is therefore unblocked and can be scheduled on its own merits.
 
 ---
 
-## Step 0 — Reconcile the baseline
+## Dependency tree and execution waves
+
+Steps are not a sequence — they are a DAG. The tracker's Step order is a *reading*
+order; the order work can actually be done in is below. Two rules drove the
+grouping:
+
+1. **File ownership is the real coupling.** `web/__init__.py` is touched by four
+   Step 1 items and by Step 4's lifespan work; `web/routes.py` by two Step 1
+   items, all of Step 4's contract work, and Step 5's `usb_mode` field. Items
+   sharing a file are one agent's batch, always — parallel agents writing the
+   same file produce merge conflicts, not parallelism.
+2. **`just gen-api` is a barrier, not a step.** Regenerating `api-schema.ts` must
+   happen once, after every `response_model` lands, and nothing downstream may
+   assume the old types. Similarly the tray docs (Step 6) must wait for the 4th
+   state to actually exist (Step 5) or they describe behaviour that does not ship.
+
+```
+WAVE 0 — landed (1ab6eb5, c4a5f82, 6d9815e)
+  └─ unblocks everything below; tree clean at 6d9815e
+
+WAVE A — parallel, zero cross-dependencies
+   A1  src/mercure_gateway/web/__init__.py  middleware order swap + preflight CSP test,
+       OpenAPI gated behind auth, loopback CSRF port pin, SPA-not-built message path
+   A2  spool/db.py + web/pipeline.py        COUNT(*) rewrite, idx_task_routing_target
+       covering index + TTL memo, instance_meta covering index, spool schema + read-conn
+       docstrings (same file as the indexes — one batch)
+   A3  web/routes.py                        queue-state literals → StudyState,
+       import_config run_in_threadpool
+   A4  forwarder/__init__.py + web/wizard.py docstrings (nonexistent knobs/endpoints)
+   A5  web/src/                             AuthContext useMemo/useCallback, dead
+       `dot="accent"` token, ae_title fixtures, dead CSS comment
+   A6  docs/guides/usb-quickstart.md        LED table rewrite against led.py
+   A7  .github/ + pyproject.toml + test-rig paths-ignore, drop docs/sprint-plan,
+       dependabot.yml, CODEOWNERS, numpy floor, Orthanc image pin
+   A8  src-tauri/Cargo.toml                 `log` crate (wire or remove), edition 2024 + MSRV
+       └─ A5's ae_title fixture fix is an input to C4 (a11y scan scans that document)
+
+WAVE B — needs Wave A's files settled; B1–B11 interleave by file
+   B1  spool/__init__.py  2a Spool.complete/fail atomic completion
+   B2  spool/__init__.py  2b _requeue_complete_routes executemany   ← same file as B1
+   B3  reports/move.py    3a study-level C-MOVE dedup + 3b save-in-handler
+   B4  reports/find.py    3c C-FIND early stop
+   B5  web/routes.py      31× response_model                         ← after A3
+   B6  web/routes.py      absolute file_path out of PHI responses     ← pairs with B5
+   B7  audit/__init__.py + web/routes.py  audit verify → iter_audit_events streaming
+   B8  web/auth.py        session revocation list
+   B9  web/__init__.py + main.py  health monitor into a lifespan       ← after A1
+   B10 web/routes.py      SystemStatus.usb_mode field                 ← after A3/B5
+   B11 src-tauri/src/lib.rs  derive_state `removable` arm + glyph + the first test it
+       has ever had + default divergence fix                          ← after B10
+
+WAVE C — regeneration and the frontend that consumes it
+   C1  just gen-api → api-schema.ts          ← barrier: after B5/B6, single pass
+   C2  useAsync hook + migrate 7 pages       ← after C1 if adopting generated types
+   C3  route-level code splitting            ← independent of C1/C2
+   C4  a11y-scan parametrization             ← after A5's fixture fix
+
+WAVE D — documentation aligns to shipped behaviour
+   D1  ADR-0002 rewrite (Method 2 as shipped)  ← after B11 (4 tray states must be real)
+   D2  ADR-0005 stale vs sprint board
+   D3  PRD + PRODUCT_BRIEF + main.py SQLCipher claims (docs align to code; ADR-0004 declined)
+   D4  README operator entry point
+   D5  web/README.md + delete stray JSONs
+   D6  monitoring/prometheus.yml + alert rules as real files
+
+WAVE E — CI and release
+   E1  test-fast CI job (`not slow and not integration`)
+   E2  perf gate --real in CI + scaling ratio     ← BLOCKED: needs test-rig Orthanc
+   E3  staged rollout / update channel field      ← tauri.conf.json + update.py + release.yml
+   E4  eslint / globals / whatwg-encoding bumps
+   E5  runbook §4 Windows flake wording
+
+GATE — full suite, serially, after each wave:
+   ruff check . · mypy . · pytest -m "not integration" · --cov-fail-under=80
+   cd web && npm run lint && npx tsc -b && npm run test
+   just gen-api-check (after Wave C) · cd src-tauri && cargo test && cargo fmt --check
+```
+
+**Critical path:** A3 → B5 → C1 → C2 is the longest chain (routes.py contract work
+→ regenerate types → migrate the fetch layer). Everything else is width.
+
+**Genuinely blocked:** E2. The `--real` perf mode needs a live Orthanc on the CI
+runner; the receive-scaling ratio assertion (`inst_s_25 / inst_s_1 ≥ 3×`) is
+unverifiable without one. Tracked as blocked, not forced.
 
 ---
 
 ## Step 0 — Reconcile the baseline
 
 The working tree was carrying an in-flight `POST /rules/preview` endpoint when
-this pass was planned. Both concerns resolved themselves before the pass began:
+this pass was planned. All three open-work items resolved themselves before the
+pass began:
 
 - `1ab6eb5 feat: expose the routing-rule preview over HTTP (P0-9)` — the WIP
   landed. It was verified first: 95 backend tests, 93 frontend tests, `tsc -b` clean.
 - `c4a5f82 fix: wire the dicomweb report transport through the composition root` —
   added the backend half that the WIP's regenerated `api-schema.ts` had described
   ahead of its backend. The drift I flagged is gone; re-ran the check, no diff.
+- `6d9815e fix: make the frozen-sidecar provenance check load-bearing in the build`
+  — moves the version guard into `src-tauri/build.rs` so a bare
+  `cargo tauri build` cannot bundle a stale backend, and adds a `PROVENANCE.json`
+  existence-and-agreement check beside it. Was in flight as uncommitted WIP when
+  this pass was planned; landed, so the guard is now real rather than pending.
 
-The only uncommitted residue now is `src-tauri/build.rs` (+215), which moves the
-frozen-sidecar provenance check into the Tauri build script so a bare
-`cargo tauri build` cannot bundle a stale backend. That is `IMPLEMENTATION-PLAN.md`
-open-work item #3, in flight by someone else — left untouched.
-
-Baseline for the pass is now clean apart from that one file, and the two backlog
+Baseline for the pass is a clean working tree at `6d9815e`, and the two backlog
 items that would have conflicted with the WIP (`web/routes.py`,
-`web/src/types/api-schema.ts`) are free to modify.
+`web/src/types/api-schema.ts`) are free to modify. Every line reference in Steps
+1–8 was re-verified against `HEAD` after that commit; line numbers in
+`web/routes.py` have drifted (the `/rules/preview` endpoint landed above them —
+`save_config` is now at `:1211`/`:1235`, not `:1169`), but no claim has rotted:
+`response_model` is still 10 of 38 operations, `SystemStatus` still has no
+`usb_mode` field, `derive_state` still has no `removable` arm, and the
+`_requeue_complete_routes` / `complete` / `fail` shapes are unchanged.
 
 ---
 

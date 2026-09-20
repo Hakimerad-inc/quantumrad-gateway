@@ -332,12 +332,14 @@ class Spool:
         pre_existing = {p for p in (out_dir, out_dir.parent) if p.exists()}
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{instance_uid}.dcm"
-        new_instance = not path.exists()
 
         # Writes the file and the .tags sidecar only — no DB rows (review
         # P1-18). New-series detection now happens inside the transaction
         # below, where it is both ordered correctly against the instance_meta
-        # insert (M11) and atomic with it.
+        # insert (M11) and atomic with it. new_instance is resolved there too:
+        # the file is written before this transaction so it survives a crash
+        # the row does not, which makes a filesystem probe report "duplicate"
+        # on the retry after a rolled-back receive (M11 follow-up).
         received_syntax, stored_syntax, num_bytes = self._apply_transfer_syntax(dataset, path)
 
         # Durability barrier. The instance bytes and the directory entries that
@@ -352,7 +354,7 @@ class Spool:
         # became one. A failure here rolls both back and propagates, so the
         # receiver returns 0xC120 and the modality retries rather than a study
         # row landing without provenance.
-        study_id, _new_series = self._db.store_received_instance(
+        study_id, _new_series, new_instance = self._db.store_received_instance(
             study_uid=study_uid,
             series_uid=series_uid,
             instance_uid=instance_uid,
@@ -364,7 +366,6 @@ class Spool:
             mrn=_tag(dataset, "PatientID"),
             patient_name=_tag(dataset, "PatientName"),
             modality=_tag(dataset, "Modality"),
-            new_instance=new_instance,
         )
         if new_instance:
             # A genuinely NEW instance re-opens the study (the upsert demoted
@@ -909,11 +910,13 @@ class Spool:
             return 0
         retention_hours = self._effective_retention_hours()
         rows = self._db.list_purgable_delivered(retention_hours)
+        purged = 0
         for row in rows:
-            self._purge_study_dir(raw_uid=str(row["study_uid"]), study_id=int(row["id"]))
-        if rows:
-            logger.info("retention: purged %d delivered study(ies)", len(rows))
-        return len(rows)
+            if self._purge_study_dir(raw_uid=str(row["study_uid"]), study_id=int(row["id"])):
+                purged += 1
+        if purged:
+            logger.info("retention: purged %d delivered study(ies)", purged)
+        return purged
 
     def _effective_retention_hours(self) -> int:
         """Retention window in hours for the current config profile (S10-T5)."""
@@ -929,12 +932,18 @@ class Spool:
 
         Only fully-delivered (``SENT``) studies are eligible; undelivered /
         FAILED studies are never auto-removed (US-04).  Returns ``True`` when a
-        study was removed, ``False`` when nothing eligible remains.
+        study was actually removed, ``False`` otherwise — including when an
+        eligible study *exists* but its files cannot be deleted. The callers
+        treat ``True`` as "made progress, keep going": returning it here for a
+        failed delete made the disk-full loop re-select the same un-deletable
+        study every iteration until the budget tripped, reporting a capacity
+        race that was really one locked file.
         """
         row = self._db.list_oldest_delivered()
         if row is None:
             return False
-        self._purge_study_dir(raw_uid=str(row["study_uid"]), study_id=int(row["id"]))
+        if not self._purge_study_dir(raw_uid=str(row["study_uid"]), study_id=int(row["id"])):
+            return False
         logger.info("disk-full: purged delivered study %s", row["study_uid"])
         return True
 
@@ -942,14 +951,25 @@ class Spool:
         """Total bytes of persisted DICOM instances (storage-cap checks, M3)."""
         return self._db.spool_num_bytes()
 
-    def _purge_study_dir(self, raw_uid: str, study_id: int) -> None:
-        """Delete a study's spool files and database row (idempotent).
+    def has_purgeable_delivered(self) -> bool:
+        """Whether a delivered study is currently eligible for auto-purge.
 
-        The row is deleted *after* the files: a failed delete (locked file,
-        read-only media) leaves the DB row in place, so the study stays
-        visible in the queue and a later purge pass can retry — the previous
-        ``ignore_errors=True``-then-delete-row order silently removed queued
-        studies whose files never left the disk.
+        Distinguishes "nothing eligible" from "eligible but un-deletable" for
+        the disk monitor's diagnostics — the two look identical to a caller
+        that only sees ``purge_oldest_delivered`` return ``False``.
+        """
+        return self._db.list_oldest_delivered() is not None
+
+    def _purge_study_dir(self, raw_uid: str, study_id: int) -> bool:
+        """Delete a study's spool files and database row; idempotent.
+
+        Returns whether the DB row was deleted. The row is deleted *after* the
+        files: a failed delete (locked file, read-only media) leaves the row in
+        place, so the study stays visible in the queue and a later purge pass
+        can retry — the previous ``ignore_errors=True``-then-delete-row order
+        silently removed queued studies whose files never left the disk. Callers
+        that report progress must key off this return value, not on having been
+        handed an eligible row.
         """
         study_dir = self._spool_dir / raw_uid
         if study_dir.exists():
@@ -961,8 +981,9 @@ class Spool:
                     raw_uid,
                     exc,
                 )
-                return
+                return False
         self._db.delete_study(study_id)
+        return True
 
     def queued_count(self) -> int:
         """Number of studies currently waiting or sending (not terminal)."""

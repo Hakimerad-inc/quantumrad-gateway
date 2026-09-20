@@ -23,6 +23,7 @@ from typing import Any
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian
 from pynetdicom import AE, evt
+from pynetdicom.association import Association
 
 from mercure_gateway.reports.find import PDF_SOP_CLASS, SR_SOP_CLASS, ReportMatch
 from mercure_gateway.spool import validate_uid
@@ -128,17 +129,27 @@ class ReportRetrieve:
 
         ae = AE(ae_title=self.ae_title)
         ae.maximum_pdu_size = _MAX_PDU_SIZE
+        # connection_timeout bounds the TCP connect phase (it defaults to None
+        # — blocking — and is what AE.connect passes to settimeout before
+        # socket.connect). A black-holed PACS host would otherwise pin this
+        # thread until the OS stack gives up.
+        ae.connection_timeout = self.timeout
         ae.acse_timeout = self.timeout
         ae.network_timeout = self.timeout
         ae.add_requested_context(_STUDY_ROOT_MOVE, ExplicitVRLittleEndian)
-        assoc = ae.associate(self.host, self.port, ae_title=self.aet)
-        if not assoc.is_established:
-            server.shutdown()
-            raise ReportRetrieveError(
-                f"C-MOVE association rejected by PACS at {self.host}:{self.port}"
-            )
 
+        # The store SCP is live from here on. Every exit must shut it down:
+        # associate() can raise (bad address, TLS failure) and the release()
+        # below used to never run, leaking the SCP thread and its port — and
+        # with the port bound, the next retrieve could not start one at all.
+        assoc: Association | None = None
         try:
+            assoc = ae.associate(self.host, self.port, ae_title=self.aet)
+            if not assoc.is_established:
+                raise ReportRetrieveError(
+                    f"C-MOVE association rejected by PACS at {self.host}:{self.port}"
+                )
+
             for match in matches:
                 ds = self._move_dataset(match)
                 for status, _ in assoc.send_c_move(ds, self.store_scp_ae_title, _STUDY_ROOT_MOVE):
@@ -151,7 +162,11 @@ class ReportRetrieve:
             with received_lock:
                 stored = dict(received)
         finally:
-            assoc.release()
+            # release() is a no-op on a non-established association, so this is
+            # safe for the rejected branch too; it is skipped entirely when
+            # associate() itself raised and assoc was never bound.
+            if assoc is not None:
+                assoc.release()
             server.shutdown()
 
         for match in matches:

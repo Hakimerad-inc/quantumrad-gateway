@@ -258,7 +258,7 @@ class TestStoreBeforeAcknowledgeDurability:
             events.append("fsync")
             real_fsync(path, dirs=dirs)
 
-        def store_spy(**kwargs: object) -> tuple[int, bool]:
+        def store_spy(**kwargs: object) -> tuple[int, bool, bool]:
             events.append("commit")
             return real_store(**kwargs)  # type: ignore[arg-type]
 
@@ -351,7 +351,7 @@ class TestMergedReceiveTransaction:
                 begins.append(sql)
             statements.append(sql)
 
-        def spy(**kwargs: object) -> tuple[int, bool]:
+        def spy(**kwargs: object) -> tuple[int, bool, bool]:
             flags["inside"] = True
             try:
                 return real_store(**kwargs)  # type: ignore[arg-type]
@@ -438,6 +438,64 @@ class TestMergedReceiveTransaction:
         assert len(studies) == 1
         row = studies[0]
         assert row["num_series"] == 1, "one series stored by two associations must count once"
+        assert row["num_instances"] == 2
+
+    def test_a_retry_after_a_rolled_back_receive_is_not_mistaken_for_a_duplicate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-send after a failed receive must still re-open the study.
+
+        ``new_instance`` used to be resolved with ``path.exists()`` *before* the
+        transaction, but the instance file is written before that transaction so
+        it survives the crash the row does not (store-before-ack). A receive
+        whose commit fails leaves the file on disk; the modality retries, the
+        probe sees the file, and the store reports "duplicate" — so the study
+        row keeps its old state, its counters never advance, and the new
+        instance is stranded in a study the DB insists is already delivered.
+        instance_meta rolled back too, so it is the authoritative check.
+        """
+        spool = make_spool(tmp_path, auto_enqueue_delay_sec=600.0)
+        study_uid = "1.2.3.4.5"
+        ds1 = make_dataset(study_uid)
+        spool.store_instance(ds1)
+
+        # Advance the study to a terminal state so a "duplicate" verdict is
+        # observably wrong: it would leave SENT in place instead of re-opening.
+        study_id = spool._db.get_study_by_uid(study_uid)["id"]
+        spool._db.set_study_state(study_id, StudyState.SENT.value)
+        assert spool._db.get_study(study_id)["state"] == StudyState.SENT.value
+        assert spool._db.get_study(study_id)["num_instances"] == 1
+
+        # A second instance of the same study whose commit fails once.
+        ds2 = make_dataset(study_uid)
+        ds2.SOPInstanceUID = f"{study_uid}.1.2"
+        calls = {"n": 0}
+        real_upsert = spool._db.upsert_study_instance
+
+        def boom_on_first(*args: object, **kwargs: object) -> int:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("database is full")
+            return real_upsert(*args, **kwargs)  # type: ignore[no-any-return]
+
+        monkeypatch.setattr(spool._db, "upsert_study_instance", boom_on_first)
+        with pytest.raises(sqlite3.OperationalError):
+            spool.store_instance(ds2)
+
+        # The file landed before the transaction, so it is on disk right now —
+        # this is exactly what the old filesystem probe would trip on.
+        stored = list((tmp_path / "spool").rglob("*.dcm"))
+        assert any(p.name == f"{ds2.SOPInstanceUID}.dcm" for p in stored)
+
+        # The retry. Pre-fix, new_instance=False here: state stayed SENT,
+        # counters stayed 1/1, and the instance was stranded.
+        monkeypatch.setattr(spool._db, "upsert_study_instance", real_upsert)
+        spool.store_instance(ds2)
+
+        row = spool._db.get_study_by_uid(study_uid)
+        assert row["state"] == StudyState.RECEIVED.value, (
+            "a re-sent instance after a failed receive must re-open the study"
+        )
         assert row["num_instances"] == 2
 
     def test_database_commits_are_durable_across_power_loss(self, tmp_path: Path) -> None:

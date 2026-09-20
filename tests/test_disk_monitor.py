@@ -92,6 +92,49 @@ def test_purge_oldest_delivered_never_touches_undelivered(tmp_path: Path) -> Non
     assert spool._db.get_study(failed_id) is not None
 
 
+def test_purge_reports_no_progress_when_the_files_cannot_be_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An un-deletable study must not be reported as a successful purge.
+
+    ``_purge_study_dir`` keeps the DB row when ``rmtree`` fails (by design —
+    the study stays visible and retryable). ``purge_oldest_delivered`` used to
+    return ``True`` regardless, so the disk-full loop re-selected the same
+    study every iteration until the 100-iteration budget tripped, logging a
+    capacity race that was really one locked file — and one un-deletable study
+    disabled capacity recovery permanently.
+    """
+    spool = make_spool(tmp_path)
+    deliver(spool, UID_1)
+
+    def boom(path: object, **kwargs: object) -> None:
+        raise PermissionError("file in use")
+
+    monkeypatch.setattr("mercure_gateway.spool.shutil.rmtree", boom)
+
+    # The study is eligible — but nothing was deleted, so no progress.
+    assert spool.purge_oldest_delivered() is False
+    # The row survived, so it is still visible and a later pass can retry.
+    assert spool._db.count_studies(state=StudyState.SENT.value) == 1
+
+
+def test_purge_delivered_counts_only_studies_actually_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retention purge reports studies removed, not studies attempted."""
+    spool = make_spool(tmp_path)
+    deliver(spool, UID_1, age_hours=48)
+    deliver(spool, UID_2, age_hours=48)
+
+    def boom(path: object, **kwargs: object) -> None:
+        raise PermissionError("file in use")
+
+    monkeypatch.setattr("mercure_gateway.spool.shutil.rmtree", boom)
+
+    assert spool.purge_delivered() == 0
+    assert spool._db.count_studies(state=StudyState.SENT.value) == 2
+
+
 # ── DiskMonitor warning / purge behaviour ────────────────────────────────
 
 

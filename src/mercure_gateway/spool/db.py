@@ -498,8 +498,7 @@ class Database:
         mrn: str | None,
         patient_name: str | None,
         modality: str | None,
-        new_instance: bool,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int, bool, bool]:
         """Record one received instance's provenance and study row, atomically.
 
         Review P1-18: this used to be two separate ``BEGIN IMMEDIATE`` +
@@ -518,7 +517,8 @@ class Database:
         page) and "study row without provenance" is worse than a retry — the
         storage reconciler deals with the orphaned file either way.
 
-        Returns ``(study_id, new_series)``. ``new_series`` is resolved *inside*
+        Returns ``(study_id, new_series, new_instance)``. ``new_series`` and
+        ``new_instance`` are resolved *inside*
         the transaction: the check must precede the instance_meta insert (M11
         — otherwise the series already "exists" and num_series never
         advances), and doing it under the write lock also closes the race
@@ -531,6 +531,23 @@ class Database:
                     "SELECT 1 FROM instance_meta "
                     "WHERE study_uid = ? AND series_uid = ? LIMIT 1",
                     (study_uid, series_uid),
+                ).fetchone()
+                is None
+            )
+            # Resolved here, not from ``path.exists()`` in the caller, for the
+            # same reason as ``new_series`` and one more (M11 follow-up): the
+            # instance file is written and fsynced *before* this transaction so
+            # it survives the crash the row does not (the store-before-ack
+            # guarantee), which means a rolled-back receive leaves the file on
+            # disk. On the modality's retry, a filesystem probe sees it and
+            # reports "duplicate" — so the study row keeps its old state, its
+            # counters do not advance, and complete routes are never re-queued.
+            # A live instance then sits in a study the DB insists is already
+            # delivered. instance_meta is authoritative: it rolled back too.
+            new_instance = (
+                conn.execute(
+                    "SELECT 1 FROM instance_meta WHERE instance_uid = ? LIMIT 1",
+                    (instance_uid,),
                 ).fetchone()
                 is None
             )
@@ -568,7 +585,7 @@ class Database:
                 new_instance=new_instance,
                 new_series=new_series,
             )
-        return study_id, new_series
+        return study_id, new_series, new_instance
 
     def upsert_study_instance(
         self,

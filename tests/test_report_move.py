@@ -237,3 +237,135 @@ def test_save_rejects_overlong_uid(tmp_path: Path) -> None:
 
     with pytest.raises(InvalidUIDError):
         retrieve._save(ds, long_uid, SR_SOP_CLASS, "1.2.3.4")
+
+
+# ── Store SCP lifetime (review: server leak when associate raises) ─────
+
+
+@pytest.fixture()
+def store_scp_recorder(monkeypatch: pytest.MonkeyPatch) -> tuple[list[object], list[object]]:
+    """Record every C-STORE SCP ``retrieve()`` starts and every ``shutdown()``.
+
+    Patches the ``AE`` class methods the module bound at import time, so the
+    server objects the code under test creates can be inspected after the fact.
+    """
+    from mercure_gateway.reports import move as move_module
+
+    servers: list[object] = []
+    shutdowns: list[object] = []
+    real_start_server = move_module.AE.start_server
+
+    def record_server(self: object, *args: object, **kwargs: object) -> object:
+        server = real_start_server(self, *args, **kwargs)
+        real_shutdown = server.shutdown  # type: ignore[attr-defined]
+
+        def recorded_shutdown(*a: object, **kw: object) -> object:
+            shutdowns.append(server)
+            return real_shutdown(*a, **kw)
+
+        server.shutdown = recorded_shutdown  # type: ignore[attr-defined]
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(move_module.AE, "start_server", record_server)
+    return servers, shutdowns
+
+
+def _make_retrieve(tmp_path: Path, pacs_port: int, store_port: int) -> object:
+    from mercure_gateway.reports.move import ReportRetrieve
+
+    return ReportRetrieve(
+        host="127.0.0.1",
+        port=pacs_port,
+        aet="PACS",
+        store_scp_port=store_port,
+        store_scp_ae_title="GATEWAY",
+        reports_dir=tmp_path / "reports",
+    )
+
+
+def _a_sr_match() -> ReportMatch:
+    return ReportMatch(
+        sop_class_uid=SR_SOP_CLASS,
+        study_uid="1.2.840.99",
+        series_uid="1.2.3.4.5.6.100",
+        sop_instance_uid="1.2.3.4.5.6.7.1",
+    )
+
+
+def test_associate_raising_still_shuts_down_the_store_scp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store_scp_recorder: tuple[list[object], list[object]],
+) -> None:
+    """An exception out of ``associate()`` must not leak the store SCP.
+
+    ``associate()`` has documented raise paths (bad address, TLS failure). The
+    cleanup ``finally`` used to begin *after* it, so the SCP thread and its
+    bound port survived — and with the port bound, the next retrieve could not
+    start a store SCP at all.
+    """
+    from mercure_gateway.reports import move as move_module
+
+    servers, shutdowns = store_scp_recorder
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("TLS handshake failed")
+
+    monkeypatch.setattr(move_module.AE, "associate", boom)
+
+    retrieve = _make_retrieve(tmp_path, pacs_port=free_port(), store_port=free_port())
+    with pytest.raises(RuntimeError, match="TLS handshake failed"):
+        retrieve.retrieve([_a_sr_match()])
+
+    assert len(servers) == 1
+    assert shutdowns == servers, "the store SCP must be shut down on the raising path"
+
+
+def test_rejected_association_still_shuts_down_the_store_scp(
+    tmp_path: Path, store_scp_recorder: tuple[list[object], list[object]]
+) -> None:
+    """A rejected association must shut the store SCP down too (regression)."""
+    servers, shutdowns = store_scp_recorder
+
+    retrieve = _make_retrieve(tmp_path, pacs_port=free_port(), store_port=free_port())
+    from mercure_gateway.reports.move import ReportRetrieveError
+
+    with pytest.raises(ReportRetrieveError):
+        retrieve.retrieve([_a_sr_match()])
+
+    assert len(servers) == 1
+    assert shutdowns == servers
+
+
+def test_store_scp_port_is_reusable_after_a_failed_retrieve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store_scp_recorder: tuple[list[object], list[object]],
+) -> None:
+    """The bound port is released, so a second retrieve can start its own SCP.
+
+    This is the user-visible symptom of the leak: the first retrieve fails, and
+    every retrieve after it fails to even bind the store SCP.
+    """
+    from mercure_gateway.reports import move as move_module
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("TLS handshake failed")
+
+    monkeypatch.setattr(move_module.AE, "associate", boom)
+
+    store_port = free_port()
+    retrieve = _make_retrieve(tmp_path, pacs_port=free_port(), store_port=store_port)
+
+    with pytest.raises(RuntimeError):
+        retrieve.retrieve([_a_sr_match()])
+
+    # If the first server was never shut down, this bind fails with
+    # EADDRINUSE. Use SO_REUSEADDR off so a lingering listener is detected.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    try:
+        probe.bind(("127.0.0.1", store_port))
+    finally:
+        probe.close()

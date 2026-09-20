@@ -105,8 +105,16 @@ class DICOMHandler:
         (acse 30 s, network 60 s) — this makes the budget explicit and lets a
         site with a slow PACS raise it via ``timeout_sec`` instead of
         inheriting a value nothing documents (review P1-12).
+
+        ``connection_timeout`` is the one that actually bounds the *TCP
+        connect* phase: ``AE.connect`` does ``settimeout(ae.connection_timeout)``
+        before ``socket.connect()``, and its default is ``None`` — blocking.
+        A black-holed host (dropped SYNs, no RST) therefore pins a forwarder
+        worker until the OS stack gives up, which is the one phase
+        ``timeout_sec`` exists to bound. It must be set explicitly.
         """
         timeout = self._associate_timeout()
+        ae.connection_timeout = timeout
         ae.acse_timeout = timeout
         ae.network_timeout = timeout
 

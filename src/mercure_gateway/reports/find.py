@@ -87,7 +87,14 @@ class ReportFinder:
         self.timeout = timeout
 
     def _apply_timeouts(self, ae: AE) -> None:
-        """Bind the DIMSE budgets explicitly (see the module note on P1-12)."""
+        """Bind the DIMSE budgets explicitly (see the module note on P1-12).
+
+        ``connection_timeout`` is the TCP connect phase: it defaults to
+        ``None`` (blocking) and is what ``AE.connect`` hands to
+        ``settimeout`` before ``socket.connect()``, so without it a
+        black-holed PACS host pins this thread until the OS stack times out.
+        """
+        ae.connection_timeout = self.timeout
         ae.acse_timeout = self.timeout
         ae.network_timeout = self.timeout
 

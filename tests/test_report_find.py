@@ -168,6 +168,7 @@ def test_timeouts_are_applied_to_the_ae() -> None:
     ae = AE(ae_title="GATEWAY")
     finder._apply_timeouts(ae)
 
+    assert ae.connection_timeout == 90.0
     assert ae.acse_timeout == 90.0
     assert ae.network_timeout == 90.0
 
@@ -184,5 +185,6 @@ def test_timeouts_fall_back_to_the_default() -> None:
     ae = AE(ae_title="GATEWAY")
     finder._apply_timeouts(ae)
 
+    assert ae.connection_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
     assert ae.acse_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
     assert ae.network_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC

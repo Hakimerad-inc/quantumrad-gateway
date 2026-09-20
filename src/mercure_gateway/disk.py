@@ -207,7 +207,18 @@ class DiskMonitor:
             self.purge_budget_hits += 1
             return False
         if not self._spool.purge_oldest_delivered():
-            logger.warning("%s but no delivered studies to purge", still_over_context)
+            # False now distinguishes "nothing eligible" from "eligible but
+            # un-deletable"; list_oldest_delivered is the cheapest way to tell
+            # them apart, and only the second one explains a stuck loop.
+            if self._spool.has_purgeable_delivered():
+                logger.error(
+                    "%s and the oldest delivered study cannot be deleted "
+                    "(locked file or read-only media); capacity recovery is "
+                    "blocked until it can be",
+                    still_over_context,
+                )
+            else:
+                logger.warning("%s but no delivered studies to purge", still_over_context)
             return False
         self._purges_this_check += 1
         self.purge_iterations_total += 1

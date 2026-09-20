@@ -306,6 +306,7 @@ def test_timeouts_are_applied_to_the_ae(tmp_path: Path) -> None:
     ae = AE(ae_title="GATEWAY")
     handler._apply_timeouts(ae)
 
+    assert ae.connection_timeout == 90.0
     assert ae.acse_timeout == 90.0
     assert ae.network_timeout == 90.0
 
@@ -320,8 +321,31 @@ def test_timeouts_fall_back_to_the_default(tmp_path: Path) -> None:
     ae = AE(ae_title="GATEWAY")
     handler._apply_timeouts(ae)
 
+    assert ae.connection_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
     assert ae.acse_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
     assert ae.network_timeout == _DEFAULT_ASSOCIATE_TIMEOUT_SEC
+
+
+def test_the_tcp_connect_phase_is_bounded(tmp_path: Path) -> None:
+    """``connection_timeout`` is the only attribute bounding ``socket.connect``.
+
+    It defaults to ``None`` (blocking) and is what ``AE.connect`` passes to
+    ``settimeout`` before connecting — so a black-holed host pins the worker
+    until the OS stack gives up. Unlike acse/network/dimse, the library ships
+    no default for it; without this line the phase is unbounded.
+    """
+    target = DICOMDestination(
+        name="pacs", type="dicom", host="10.0.0.99", port=11112, aet_target="PACS"
+    )
+    handler = DICOMHandler(target, make_spool(tmp_path))
+
+    ae = AE(ae_title="GATEWAY")
+    handler._apply_timeouts(ae)
+
+    assert ae.connection_timeout is not None, (
+        "the connect phase must be bounded — AE.connection_timeout defaults to "
+        "None, and nothing in pynetdicom fills it in"
+    )
 
 
 def test_pynetdicom_defaults_already_bound_a_silent_peer() -> None:

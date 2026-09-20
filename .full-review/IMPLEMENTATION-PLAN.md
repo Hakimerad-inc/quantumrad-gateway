@@ -6,14 +6,54 @@
 
 ## Progress
 
+Statuses below were re-verified against the tree at `3ac3732`, not taken from
+commit messages. Legend: ✅ done · ◐ done with a known divergence · △ partial.
+
 | WS | Item | Status |
 |---|---|---|
 | 1 | P0-12 axe.js ×2 deleted | ✅ built static dir 1.5 MB → 244 KB; a11y suite still green on `axe-core` |
 | 1 | P1-16 cookie `Secure` | ✅ transport-conditional; `logout` flag matches |
 | 1 | P1-21 SFTP ambient creds | ✅ `look_for_keys=False, allow_agent=False` on both branches |
 | 1 | P1-10 wizard merge | ✅ receiver→`receiver`; reports merge narrowed to `enabled` |
-| 5.1 | P1-5 SPA CI gates | ✅ new `web` job: eslint + `tsc -b` + vitest |
-| 5.2 | P1-6 subprocess coverage | ✅ `parallel=true` + `COVERAGE_PROCESS_START`; `main.py` 33%→65% in isolation, gate 88.3% (stable across 2 runs) |
+| 2.1 | P0-4 strict schema + self-heal | ✅ `_StrictConfigModel` at `config/__init__.py:85`; all 24 models; `extra="forbid"` verified to propagate 2 levels; `.unknown-keys.bak` on read-only media |
+| 2.2 | P0-3 + P0-8 + P1-17 auth chain | ◐ see "Known divergences" — import path now covered (fixed `3ac3732`); bcrypt *verify* deliberately retained |
+| 2.3 | P1-1 no cleartext secrets | ✅ encryption default-on; keyring at first boot; 0600 sidecar fallback; `ALLOW_PLAINTEXT_SECRETS` opt-out |
+| 2.4 | P1-2 redaction restore | ✅ name-keyed only; sentinel naming nothing → 400; duplicate names rejected by model_validator |
+| 2.5 | P1-9 codegen contract | ◐ `--output`, 4 `response_model`s, `web/src/types/api-schema.ts` (verified byte-identical to a fresh generation); drift guard is its **own** `api-schema-drift` job, not a `quality` step |
+| 3.1 | P0-6 + P0-7 report transports | ◐ wired via the registry in `main.py`; **only `"dicom"` has a factory** — a valid `dicomweb` config silently disables retrieval |
+| 3.2 | P0-5 context budget | ✅ `_MAX_REQUESTED_CONTEXTS = 120`; compressed syntaxes only for classes present; `except (ConnectionError, ValueError)` |
+| 3.3 | P0-9 one routing engine | △ engine unified, `modality:` grammar, fail-open, lint compiles; **`POST /rules/preview` never exposed** — `preview_routing()` is test-only |
+| 3.4 | P0-11 bounded purge | ✅ `_MAX_PURGE_ITERATIONS = 100`; counter is `purge_iterations_total` / `purge_budget_hits`; the iteration pause is `time.sleep`, not `_stop_event.wait` |
+| 3.5 | P1-12 transport timeouts | ✅ `connection_timeout` set on all three SCUs + SFTP `connect(timeout=)` |
+| 4.1 | P0-10 hub observability | ✅ counters + `hub_delivering`; `AnchorVerifier` on a 300 s timer, off the scrape path |
+| 4.2 | P0-2 sidecar provenance | ◐ assertion is in Python packaging (`package_backend.py`), **not** Rust; `PROVENANCE.json` is write-only — nothing verifies it |
+| 4.3 | P1-13 + P1-15 release artifacts | ◐ SBOM + sha256 + no-`--clobber`; `latest.json` was written to the repo root and never uploaded (fixed `67b960d`) |
+| 4.4 | P1-14 rollback | ◐ resolved by **deletion**, not implementation — see "Known divergences" |
+| 5.1 | P1-5 SPA CI gates | ✅ `web` job: eslint + `tsc -b` + vitest |
+| 5.2 | P1-6 subprocess coverage | ✅ `parallel=true` + `COVERAGE_PROCESS_START`; `main.py` 33%→65% in isolation, gate 88.3% |
+| 5.3 | P1-7 real-I/O perf gate | ◐ real socket + real files; the spool DB is **in-memory** in this mode, so DB durability is not measured |
+| 5.4 | P1-8 version in API | ✅ `FastAPI(version=__version__)`; guarded by `test_version_sync.py` |
+| 6.1 | P1-18 one transaction | ✅ single `BEGIN IMMEDIATE`; provenance inside it; rolls back on failure |
+| 6.2 | P1-19 reads off the writer | ✅ per-thread `mode=ro` + `query_only`; sticky one-warning fallback. A same-file read connection, not a read replica |
+| 7.1 | P1-20 fetch races | ✅ self-cancelling poller, abort on unmount, refetch on visible |
+| 7.2 | P1-11 CSP | ✅ backend + **Tauri shell** (parity fixed `3ac3732`) |
+| 8 | P1-22 stale auth docs | ✅ pbkdf2 format in all four places; `/api/system/info` → `/system/status` (fixed `67b960d`) |
+
+**Post-merge durability triage** (not part of the original review — committed
+`893100a`, each with a negative-control regression test):
+`new_instance` resolved inside the transaction rather than from `path.exists()`;
+`purge_oldest_delivered` distinguishes "nothing eligible" from "un-deletable";
+`connection_timeout` on every SCU; the C-STORE SCP is shut down when
+`associate()` raises.
+
+**Remaining open work, ranked:**
+1. `POST /rules/preview` (3.3) — the engine is unified but the operator-facing
+   half was never wired over HTTP.
+2. `dicomweb` / `fhir` factories (3.1) — a valid config value silently disables
+   report retrieval with only a boot-time error log.
+3. `PROVENANCE.json` verification (4.2) — currently write-only; and
+   `cargo tauri build` run directly skips the Python version gate entirely.
+4. A real rollback path (4.4) — currently a documented human procedure.
 
 **Two deviations from the plan, both measured not assumed:**
 
@@ -48,10 +88,36 @@ composition-root lines were mostly covered ones — the dark region was
 4. `just gen-api` is worse than described: `scripts/export_openapi.py:25-29` writes the schema to
    **stdout**, so the recipe cannot run on a clean checkout at all.
 
-Two findings are more severe than the review text: the frozen sidecar at `src-tauri/binaries/`
-is not merely version-stale (rc1) — it **lacks `_enforce_bind_security`** entirely (still has
-`_warn_insecure`), so a locally-built installer would boot an unauthenticated admin panel on the
-LAN rather than refusing.
+### Corrections accumulated during implementation
+
+5. **The frozen-sidecar escalation is moot.** `src-tauri/binaries/` is gitignored and empty on a
+   clean checkout — there is no committed sidecar to be version-stale or to lack
+   `_enforce_bind_security`. The earlier "more severe than the review text" note described a
+   snapshot that no longer exists. The version gate runs against a *freshly frozen* bundle in the
+   packaging script, which is the right place for it; the tradeoff is that
+   `cargo tauri build` invoked directly skips that gate entirely (see open work #3).
+6. **P1-12 on the pinned pynetdicom (3.0.4) is a configurability finding, not a missing-timeout
+   one.** The library's own defaults (acse 30 s, network 60 s, dimse 30 s) already bound a peer
+   that accepts the socket but never answers; `associate()` takes no `timeout=` kwarg on this
+   version. What was genuinely missing was `AE.connection_timeout`, which has **no** library
+   default (`ae.py:707`, `None`) and is the attribute `AE.connect` passes to `settimeout` before
+   `socket.connect()` (`transport.py:416`) — a black-holed host pinned the worker until the OS
+   stack gave up. That is the one phase the review's framing did not name.
+7. **P1-14 was resolved by removal.** `Updater.rollback()` was deleted, not fixed: the Tauri
+   updater is forward-only and a running binary cannot un-swap its own staged archive. The
+   acceptance criterion shifted to "no fake rollback path an operator might assume works"
+   (`test_the_updater_exposes_no_rollback_path`) plus a 7-step manual runbook. If a real restore
+   path is wanted, that is separate work — and nothing currently tests that a reinstall actually
+   preserves spool/audit/config.
+8. **The P1-11 fix had to land twice.** The CSP correction was applied to the backend headers
+   only; the packaged shell serves the SPA over Tauri's asset protocol, where the backend's
+   headers never apply, so the report PDF iframe still rendered blank there. `tauri.conf.json`
+   now carries the same directives. Any future CSP change must touch both places.
+9. **`latest.json` was never published.** The release workflow assembled the Tauri updater
+   manifest, wrote it to the **repo root**, and the upload step globs only `find dist -type f`.
+   `tauri.conf.json` points the updater at `.../releases/latest/download/latest.json`, so a real
+   release shipped a working updater endpoint that 404s. Fixed in `67b960d`; the workflow's own
+   header comment had claimed it attached the manifest.
 
 ---
 

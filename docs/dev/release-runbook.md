@@ -174,7 +174,7 @@ The real procedure, for a release that turned out to be broken after shipping:
    program tree (see `docs/guides/backup-restore.md` for the paths). Nothing in
    step 3 touches them.
 5. **Restart** and confirm the reported version in the web panel's footer or
-   `GET /api/system/info`.
+   `GET /api/system/status`.
 6. **Prevent re-application**: the desktop shell checks for updates on a
    schedule. If the broken release is still `latest`, point
    `config.update.update_url` at a manifest for the good version, or disable

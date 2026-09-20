@@ -180,7 +180,13 @@ jobs:
               "pub_date": pub_date,
               "platforms": platforms,
           }
-          with open("latest.json", "w") as fh:
+          # Written into dist/ so the upload step's `find dist -type f`
+          # glob picks it up. Writing it to the repo root meant the
+          # assembled updater manifest was printed and then never
+          # published — while tauri.conf.json points the updater at
+          # .../releases/latest/download/latest.json, which 404s.
+          os.makedirs("dist", exist_ok=True)
+          with open("dist/latest.json", "w") as fh:
               json.dump(manifest, fh, indent=2)
           print(json.dumps(manifest, indent=2))
           PY

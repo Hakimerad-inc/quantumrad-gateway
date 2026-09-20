@@ -19,7 +19,7 @@ installer:
    chain, and credential store are untouched (see `backup-restore.md` for
    their locations).
 3. Confirm the reported version in the web panel footer or
-   `GET /api/system/info`.
+   `GET /api/system/status`.
 
 Verify the download before installing — the release body lists every
 artifact's sha256, and `sha256sum -c SHA256SUMS` in the download directory

@@ -12,7 +12,7 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": "default-src 'self' http://127.0.0.1; connect-src 'self' http://127.0.0.1; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1; object-src 'none'; frame-src 'self' data:; base-uri 'self'; frame-ancestors 'none'"
     }
   },
   "bundle": {

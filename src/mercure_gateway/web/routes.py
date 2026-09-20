@@ -1216,6 +1216,17 @@ async def import_config(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
     healed = getattr(updated, "_healed_unknown_keys", None) or []
 
+    # Same posture check as PUT /config (review P0-3): an imported file is
+    # every bit as able to bind an unauthenticated admin panel to the LAN, and
+    # this is the one config write path that persisted it without a peep —
+    # boot would then refuse the very file import just wrote.
+    from mercure_gateway.config import insecure_bind_reason
+
+    reason = insecure_bind_reason(updated)
+    if reason is not None:
+        _audit_config_rejection(request, reason)
+        raise HTTPException(status_code=409, detail=reason)
+
     # Persist to disk if config_path is configured
     config_path: object = getattr(request.app.state, "config_path", None)
     if config_path:

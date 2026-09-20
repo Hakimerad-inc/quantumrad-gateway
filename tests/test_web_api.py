@@ -532,6 +532,38 @@ def test_import_config(client: TestClient, tmp_path) -> None:
     assert r.json()["status"] == "ok"
 
 
+def test_import_config_rejects_an_insecure_bind(client: TestClient, tmp_path) -> None:
+    """An imported file that would open the admin panel to the LAN is 409.
+
+    Import is a full config write and persisted to disk, so without this
+    check it could save a file boot would then refuse — the one config write
+    path that used to apply it without a peep (review P0-3).
+    """
+    config_path = tmp_path / "gw.json"
+    from mercure_gateway.config import save_config
+
+    save_config(default_config(), config_path)
+    client.app.state.config_path = str(config_path)
+
+    imported = default_config()
+    imported.web_ui.host = "0.0.0.0"
+    imported.web_ui.auth_enabled = False
+    files = {"file": ("mercure-gateway.json", imported.model_dump_json(), "application/json")}
+    r = client.post("/api/config/import", files=files)
+
+    assert r.status_code == 409
+    assert "auth_enabled" in r.json()["detail"]
+    # The running config is unchanged, and the file on disk was not overwritten.
+    assert client.get("/api/config").json()["web_ui"]["host"] == "127.0.0.1"
+    from json import loads
+
+    assert loads(config_path.read_text())["web_ui"]["host"] == "127.0.0.1"
+    # The refused import is in the audit chain like the PUT path's rejections.
+    events = client.get("/api/audit?limit=25").json()
+    assert isinstance(events, list)
+    assert any(e["event"] == "CONFIG_SECURITY_REJECTED" for e in events)
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Auth endpoints  (review F5 — login must issue the session cookie)
 # ══════════════════════════════════════════════════════════════════════

@@ -51,14 +51,24 @@ function stubFetch(opts: {
   warnings?: ConfigWarning[];
   saveResult?: unknown;
   echoStatus?: string;
+  preview?: unknown;
+  previewStatus?: number;
 } = {}) {
-  const { config = CONFIG_WITH_SECRET, warnings = [], saveResult = { status: 'ok', restart_required: true }, echoStatus = 'ok' } = opts;
+  const {
+    config = CONFIG_WITH_SECRET,
+    warnings = [],
+    saveResult = { status: 'ok', restart_required: true },
+    echoStatus = 'ok',
+    preview = null,
+    previewStatus = 200,
+  } = opts;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url.endsWith('/api/config') && (!init || init.method === undefined)) return json(config);
     if (url.endsWith('/api/config/warnings')) return json({ warnings, config_version: '1.0' });
     if (url.endsWith('/api/config') && init?.method === 'PUT') return json(saveResult);
     if (url.endsWith('/api/echo')) return json({ status: echoStatus });
+    if (url.endsWith('/api/rules/preview')) return json(preview, previewStatus);
     return json({});
   });
 }
@@ -340,6 +350,72 @@ describe('DestinationsView', () => {
     const card = name.closest('.card')!;
     await user.click(card.querySelector('button')!); // first button in the header is Echo
     expect(await screen.findByText('refused')).toBeInTheDocument();
+  });
+
+  it('previews which destinations a modality routes to, by configured rule', async () => {
+    // The preview is the operator-facing half of the unified rule engine
+    // (review P0-9): before it, the only way to ask "where would this go" was
+    // to let a real study arrive and check the queue.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const fetchStub = stubFetch({
+      preview: { targets: ['pacs-a'], matched_any: true },
+    });
+    vi.stubGlobal('fetch', fetchStub);
+    render(<DestinationsView />);
+    await screen.findByDisplayValue('pacs-a');
+
+    await user.type(screen.getByLabelText('Modality to preview'), 'CT');
+    await user.click(screen.getByRole('button', { name: /Preview/ }));
+
+    expect(await screen.findByText(/A forwarding rule matched/)).toBeInTheDocument();
+    expect(screen.getByText(/pacs-a/)).toBeInTheDocument();
+    // The tag the operator typed is what the backend is asked about.
+    const posts = fetchStub.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(JSON.parse(posts[0]![1]!.body as string)).toEqual({ tags: { Modality: 'CT' }, rules: null });
+  });
+
+  it('distinguishes a rule match from the default route in the preview', async () => {
+    // The target list alone cannot tell the two apart — "pacs-a" because a
+    // rule said so and "pacs-a" because no rule said anything are different
+    // statements about the operator's config.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        preview: { targets: ['pacs-a'], matched_any: false },
+      }),
+    );
+    render(<DestinationsView />);
+    await screen.findByDisplayValue('pacs-a');
+
+    await user.type(screen.getByLabelText('Modality to preview'), 'US');
+    await user.click(screen.getByRole('button', { name: /Preview/ }));
+
+    expect(await screen.findByText(/No rule matched this modality/)).toBeInTheDocument();
+  });
+
+  it('reports a rule the preview cannot parse instead of a silent default', async () => {
+    // A malformed configured rule makes the endpoint 400; the live router
+    // fails open and over-delivers, so without this the operator's preview
+    // would look clean while every study went everywhere.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        preview: { detail: 'forwarding_rules[1]: rule has empty tag or value' },
+        previewStatus: 400,
+      }),
+    );
+    render(<DestinationsView />);
+    await screen.findByDisplayValue('pacs-a');
+
+    await user.type(screen.getByLabelText('Modality to preview'), 'CT');
+    await user.click(screen.getByRole('button', { name: /Preview/ }));
+
+    expect(await screen.findByText(/could not be parsed/)).toBeInTheDocument();
+    // The failed preview never renders a target list that could be mistaken
+    // for an answer.
+    expect(screen.queryByText(/A forwarding rule matched/)).not.toBeInTheDocument();
   });
 
   it('renders lint warnings from the running config', async () => {

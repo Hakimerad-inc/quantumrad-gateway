@@ -565,6 +565,176 @@ def test_import_config_rejects_an_insecure_bind(client: TestClient, tmp_path) ->
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Forwarding-rule preview  (US-09 / review P0-9 — the engine existed but was
+# reachable only from these tests; the operator-facing half was never wired)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _config_with_rules(client: TestClient, *, rules: list, enabled: bool = True) -> None:
+    """Give the app two destinations plus *rules*, returning nothing.
+
+    Destinations are set on ``app.state.config`` (what the preview reads) with
+    one disabled, so the default-route test can tell 'every enabled target'
+    from 'every target'.
+    """
+    from mercure_gateway.config import DICOMDestination
+
+    client.app.state.config.destinations = [
+        DICOMDestination(
+            name="pacs", host="pacs.local", port=104, aet_target="PACS", enabled=enabled
+        ),
+        DICOMDestination(name="archive", host="arch.local", port=104, aet_target="ARCH"),
+        DICOMDestination(
+            name="off", host="off.local", port=104, aet_target="OFF", enabled=False
+        ),
+    ]
+    client.app.state.config.forwarding_rules = rules
+
+
+def test_preview_rules_matches_a_configured_rule(client: TestClient) -> None:
+    from mercure_gateway.config import ForwardingRule
+
+    _config_with_rules(
+        client,
+        rules=[ForwardingRule(rule="modality:CT", targets=["archive"], priority="high")],
+    )
+    r = client.post("/api/rules/preview", json={"tags": {"Modality": "CT"}})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["targets"] == ["archive"]
+    assert body["matched_any"] is True
+
+
+def test_preview_rules_no_match_is_the_default_route(client: TestClient) -> None:
+    """A tag set no rule matches previews every *enabled* destination.
+
+    A disabled destination never receives a study regardless of what a rule
+    says, so the default route is the enabled set — previewing all three would
+    disagree with what enqueue actually does.
+    """
+    _config_with_rules(client, rules=[])
+    r = client.post("/api/rules/preview", json={"tags": {"Modality": "US"}})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["targets"] == ["pacs", "archive"]
+    # The target list alone cannot tell "a rule picked these" from "no rule
+    # said anything" — the flag is the difference.
+    assert body["matched_any"] is False
+
+
+def test_preview_rules_supplied_rules_override_the_configured_ones(
+    client: TestClient,
+) -> None:
+    """An unsaved rule set is previewable without touching the config.
+
+    The destinations panel edits rules before saving them; without this the
+    operator could only check the rules already on disk.
+    """
+    from mercure_gateway.config import ForwardingRule
+
+    _config_with_rules(client, rules=[ForwardingRule(rule="modality:CT", targets=["pacs"])])
+    r = client.post(
+        "/api/rules/preview",
+        json={
+            "tags": {"Modality": "MR"},
+            "rules": [{"rule": "modality:MR", "targets": ["archive"]}],
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["targets"] == ["archive"]
+    assert body["matched_any"] is True
+    # The configured rules were not consulted and were not changed.
+    assert client.app.state.config.forwarding_rules[0].targets == ["pacs"]
+
+
+def test_preview_rules_rejects_a_malformed_configured_rule(client: TestClient) -> None:
+    """A bad configured rule is a 400, not a silent default route.
+
+    Routing fails open (a typo over-delivering beats a stranded study), but
+    preview is the operator's explicit check, so the problem is reported —
+    with its index, the same pointer /config/warnings uses.
+    """
+    from mercure_gateway.config import ForwardingRule
+
+    _config_with_rules(
+        client,
+        rules=[
+            ForwardingRule(rule="modality:CT", targets=["archive"]),
+            ForwardingRule(rule="malformed", targets=["pacs"]),
+        ],
+    )
+    r = client.post("/api/rules/preview", json={"tags": {"Modality": "CT"}})
+
+    assert r.status_code == 400
+    assert "forwarding_rules[1]" in r.json()["detail"]
+
+
+def test_preview_rules_rejects_a_malformed_supplied_rule(client: TestClient) -> None:
+    _config_with_rules(client, rules=[])
+    r = client.post(
+        "/api/rules/preview",
+        json={"tags": {}, "rules": [{"rule": "garbage", "targets": ["pacs"]}]},
+    )
+
+    assert r.status_code == 400
+    assert "forwarding_rules[0]" in r.json()["detail"]
+
+
+def test_preview_rules_rejects_an_invalid_rule_shape(client: TestClient) -> None:
+    """A rule missing its required fields is a 422, not a preview of nothing.
+
+    ForwardingRule requires a non-empty rule and at least one target; an
+    empty target list is not a rule that matches nothing, it is one that can
+    never deliver.
+    """
+    r = client.post(
+        "/api/rules/preview",
+        json={"tags": {"Modality": "CT"}, "rules": [{"rule": "modality:CT"}]},
+    )
+    assert r.status_code == 422
+
+
+def test_preview_rules_agrees_with_enqueue(client: TestClient, spool: Spool) -> None:
+    """The preview's answer is the answer enqueue gives a real study.
+
+    Before P0-9 the panel previewed one engine and production routed by
+    another (the preview engine raised on every deployed ``modality:CT``
+    rule; the router hand-rolled a matcher with no priority). This pins the
+    unified behaviour end to end.
+    """
+    from mercure_gateway.config import DICOMDestination, ForwardingRule
+
+    _config_with_rules(
+        client,
+        rules=[
+            ForwardingRule(rule="modality:CT", targets=["archive"], priority="high"),
+            ForwardingRule(rule="modality:CT", targets=["pacs"], priority="normal"),
+        ],
+    )
+    # enqueue reads the spool's own config ref — keep the two in step, the way
+    # the running appliance does (a save takes effect after restart).
+    spool._config = client.app.state.config
+
+    r = client.post("/api/rules/preview", json={"tags": {"Modality": "CT"}})
+    assert r.json()["targets"] == ["archive"]
+
+    study_id = spool.receive("1.2.3.4", modality="CT")
+    spool.enqueue(
+        study_id,
+        [
+            DICOMDestination(name="pacs", host="pacs.local", port=104, aet_target="PACS"),
+            DICOMDestination(name="archive", host="arch.local", port=104, aet_target="ARCH"),
+        ],
+    )
+    routes = [row["target_name"] for row in spool.get_routes(study_id)]
+    assert routes == ["archive"]
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Auth endpoints  (review F5 — login must issue the session cookie)
 # ══════════════════════════════════════════════════════════════════════
 

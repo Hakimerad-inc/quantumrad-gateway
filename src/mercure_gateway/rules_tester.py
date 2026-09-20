@@ -12,10 +12,28 @@ so it raises instead — the operator asked to be told.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from mercure_gateway.config import ForwardingRule
 from mercure_gateway.rules import RuleEngine, RuleSyntaxError
 
-__all__ = ["preview_routing", "RuleSyntaxError"]
+__all__ = ["preview_routing", "RulePreview", "RuleSyntaxError"]
+
+
+@dataclass(frozen=True)
+class RulePreview:
+    """Where a study carrying a tag set would be routed.
+
+    ``matched_any`` is False when no rule matched, meaning ``targets`` is the
+    default route (every enabled destination) rather than anything a rule
+    selected. The two look identical in a target list alone, and they are not
+    the same statement: one says "my rules decided this", the other says "my
+    rules said nothing about this". The panel shows the difference so an
+    operator does not read a silent default as an intended match.
+    """
+
+    targets: list[str]
+    matched_any: bool
 
 
 def preview_routing(
@@ -23,8 +41,8 @@ def preview_routing(
     tags: dict[str, str],
     *,
     all_targets: list[str],
-) -> list[str]:
-    """Return the targets that would receive a study with *tags*.
+) -> RulePreview:
+    """Preview the targets that would receive a study with *tags*.
 
     Raises :class:`RuleSyntaxError` when any rule is malformed. The live router
     would skip it and route by the rest; preview is the operator's validation
@@ -34,4 +52,7 @@ def preview_routing(
     if engine.skipped:
         index, message = engine.skipped[0]
         raise RuleSyntaxError(f"forwarding_rules[{index}]: {message}")
-    return engine.resolve(tags, all_targets=all_targets)
+    matched, matched_any = engine.match(tags)
+    if not matched_any:
+        return RulePreview(list(all_targets), False)
+    return RulePreview(matched, True)

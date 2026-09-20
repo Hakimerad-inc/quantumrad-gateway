@@ -35,7 +35,7 @@ from starlette.responses import Response
 
 from mercure_gateway import __version__
 from mercure_gateway.audit import AuditLog
-from mercure_gateway.config import GatewayConfig
+from mercure_gateway.config import ForwardingRule, GatewayConfig
 from mercure_gateway.config.lint import lint_config
 from mercure_gateway.redact import (
     CREDENTIAL_ENTRY_FIELDS,
@@ -1247,6 +1247,90 @@ async def import_config(request: Request) -> dict[str, Any]:
         # which settings did not survive the round trip.
         "ignored_keys": [".".join(str(part) for part in loc) for loc in healed],
     }
+
+
+# ---------------------------------------------------------------------------
+# Forwarding-rule preview  (§5.5 / US-09 — review P0-9)
+# ---------------------------------------------------------------------------
+
+
+class RulePreviewRequest(BaseModel):
+    """A synthetic tag set to route, and optionally the rules to route it by.
+
+    ``rules`` omitted means "use the configured rules" — the preview then
+    answers what the running appliance would do. Supplied rules are previewed
+    instead, so an operator can test an edit in the destinations panel *before*
+    saving it: the difference between "these rules route CT to the archive" and
+    "these rules would, once I save them" is exactly the question a dry-run
+    exists to answer.
+    """
+
+    tags: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "DICOM tags and values to route, e.g. "
+            '{"Modality": "CT", "StudyDescription": "CHEST"}. Case-insensitive; '
+            "values may use the rule's wildcard grammar."
+        ),
+    )
+    rules: list[ForwardingRule] | None = Field(
+        default=None,
+        description=(
+            "Rules to preview. Omit to preview the configured "
+            "forwarding_rules."
+        ),
+    )
+
+
+class RulePreviewResponse(BaseModel):
+    """Where a study carrying the requested tags would be routed."""
+
+    targets: list[str] = Field(
+        description=(
+            "Destination names that would receive the study. When "
+            "matched_any is false this is every enabled destination (the "
+            "default route), not a set any rule selected."
+        ),
+    )
+    matched_any: bool = Field(
+        description=(
+            "True when at least one rule matched and selected targets. False "
+            "means the default route applies — no rule spoke to this tag set."
+        ),
+    )
+
+
+@router.post("/rules/preview", response_model=RulePreviewResponse)
+def preview_rules(request: Request, payload: RulePreviewRequest) -> dict[str, Any]:
+    """Preview which destinations would receive a study with the given tags.
+
+    Evaluates the same engine ``Spool.enqueue`` uses, so what an operator
+    previews is what the appliance does — before P0-9 the panel previewed one
+    engine and production routed by another, and neither discrepancy was
+    visible anywhere. The default route here is the *enabled* destinations,
+    matching enqueue's ``[t for t in filtered if t.enabled]``: a disabled
+    destination never receives a study regardless of what a rule says.
+
+    A malformed rule is a 400 rather than a silent skip. At routing time the
+    appliance fails open (a typo'd rule over-delivering beats a study stranded
+    in RECEIVED); here the operator asked to check their rules, so the first
+    problem is reported by index — the remaining ones are already enumerated by
+    ``GET /config/warnings`` at save time.
+    """
+    from mercure_gateway.rules import RuleSyntaxError
+    from mercure_gateway.rules_tester import preview_routing
+
+    cfg = _config(request)
+    rules = payload.rules if payload.rules is not None else cfg.forwarding_rules
+    # The live path can only see the Modality tag at enqueue time; a preview
+    # accepts the full set, so it is strictly more capable rather than a
+    # second implementation of the matcher.
+    all_targets = [d.name for d in cfg.destinations if d.enabled]
+    try:
+        preview = preview_routing(rules, payload.tags, all_targets=all_targets)
+    except RuleSyntaxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"targets": preview.targets, "matched_any": preview.matched_any}
 
 
 # ---------------------------------------------------------------------------

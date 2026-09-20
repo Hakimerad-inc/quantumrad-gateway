@@ -15,8 +15,8 @@
  * existing destination the operator did not touch.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { fetchConfig, saveConfig, apiUrl, fetchConfigWarnings } from "../api";
-import type { ConfigWarning, GatewayConfig } from "../api";
+import { fetchConfig, saveConfig, apiUrl, fetchConfigWarnings, previewRouting } from "../api";
+import type { ConfigWarning, GatewayConfig, RulePreview } from "../api";
 import { IconCheck, IconX, IconPlus } from "../ui/icons";
 
 /** Fields each destination type exposes in the form. Secret fields are masked.
@@ -195,6 +195,12 @@ export default function DestinationsView() {
   const [error, setError] = useState("");
   const [echoState, setEchoState] = useState<Record<string, string>>({});
   const [warnings, setWarnings] = useState<ConfigWarning[]>([]);
+  // Routing preview (review P0-9): which destinations a study with this
+  // Modality would reach under the configured forwarding rules.
+  const [previewModality, setPreviewModality] = useState("");
+  const [previewResult, setPreviewResult] = useState<RulePreview | null>(null);
+  const [previewError, setPreviewError] = useState("");
+  const [previewBusy, setPreviewBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -358,6 +364,33 @@ export default function DestinationsView() {
       },
     ]);
     markDirty();
+  };
+
+  // Ask the backend where a study with this Modality would be routed. The
+  // endpoint evaluates the configured rules through the same engine enqueue
+  // uses, so the answer is what the appliance will actually do. A null return
+  // means the request failed — most likely a rule that cannot be parsed, which
+  // the lint banner above already reports by index.
+  const runPreview = async () => {
+    const modality = previewModality.trim();
+    if (!modality) return;
+    setPreviewBusy(true);
+    setPreviewError("");
+    setPreviewResult(null);
+    try {
+      const result = await previewRouting({ Modality: modality });
+      if (result === null) {
+        setPreviewError(
+          "Preview failed — a forwarding rule could not be parsed. See the lint warnings above; the backend reports the offending rule index.",
+        );
+      } else {
+        setPreviewResult(result);
+      }
+    } catch (e) {
+      setPreviewError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPreviewBusy(false);
+    }
   };
 
   if (!loaded) return <div className="loading">Loading destinations</div>;
@@ -590,6 +623,52 @@ export default function DestinationsView() {
           {saving ? "Saving..." : dirty ? "Save Changes" : "Saved"}
           {dirty ? null : <IconCheck size={14} />}
         </button>
+      </div>
+
+      {/* Preview which destinations a study would reach, against the same rule
+          engine enqueue uses (review P0-9). Before the engine was unified this
+          would have answered for an engine production never ran; now the two
+          cannot drift, and this is the only place an operator can ask the
+          question without a real study arriving. */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-header">Preview routing</div>
+        <p style={{ color: "var(--muted)" }}>
+          Only the Modality tag is known at enqueue time, so that is the whole
+          tag set this preview can consider. A rule on any other tag previews
+          correctly over the API but cannot affect a study the router actually
+          sees.
+        </p>
+        <div className="field-row">
+          <label>
+            <span className="label">Modality</span>
+            <input
+              className="input"
+              placeholder="e.g. CT"
+              value={previewModality}
+              onChange={(e) => setPreviewModality(e.target.value)}
+              aria-label="Modality to preview"
+            />
+          </label>
+          <button
+            className="btn"
+            onClick={() => void runPreview()}
+            disabled={previewBusy || !previewModality.trim()}
+          >
+            {previewBusy ? "Previewing..." : 'Preview "where would this go?"'}
+          </button>
+        </div>
+        {previewError ? (
+          <div className="warn-note" role="alert">
+            {previewError}
+          </div>
+        ) : null}
+        {previewResult ? (
+          <div className="ok-note">
+            {previewResult.matched_any
+              ? `A forwarding rule matched — this study routes to: ${previewResult.targets.join(", ") || "(no destinations)"}`
+              : `No rule matched this modality — the default route applies: ${previewResult.targets.join(", ") || "(no enabled destinations)"}.`}
+          </div>
+        ) : null}
       </div>
     </div>
   );

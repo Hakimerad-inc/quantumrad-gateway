@@ -28,6 +28,7 @@ import type {
   QueueStats,
   ReportContent,
   ReportRow,
+  RulePreview,
   SaveConfigResult,
   ServiceStatus,
   StudyDetail,
@@ -53,6 +54,7 @@ export type {
   QueueStats,
   ReportContent,
   ReportRow,
+  RulePreview,
   SaveConfigResult,
   ServiceStatus,
   StudyDetail,
@@ -174,6 +176,23 @@ export async function requestReport(
 
 export async function refreshReport(reportId: number): Promise<{ status: string } | null> {
   return postJson(`/api/reports/${reportId}/refresh`);
+}
+
+// Preview where a tag set would route under the configured (or supplied)
+// forwarding rules — the operator-facing half of the unified rule engine
+// (review P0-9). Returns null on a malformed rule; the server reports the
+// offending rule index in `detail` and the panel renders it.
+export async function previewRouting(
+  tags: Record<string, string>,
+  rules?: { rule: string; targets: string[]; priority?: "normal" | "high" | "low" }[],
+): Promise<RulePreview | null> {
+  const res = await apiFetch("/api/rules/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tags, rules: rules ?? null }),
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as RulePreview;
 }
 
 // ── Admin tabs (S06-T4) ──────────────────────────────────────────────

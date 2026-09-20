@@ -29,17 +29,21 @@ def _rules() -> list[ForwardingRule]:
 
 def test_preview_matching_tag_set() -> None:
     result = preview_routing(_rules(), {"Modality": "MR"}, all_targets=["pacs", "archive", "hub"])
-    assert result == ["archive"]
+    assert result.targets == ["archive"]
+    assert result.matched_any is True
 
 
 def test_preview_no_match_returns_all() -> None:
     result = preview_routing(_rules(), {"Modality": "US"}, all_targets=["pacs", "archive", "hub"])
-    assert result == ["pacs", "archive", "hub"]
+    assert result.targets == ["pacs", "archive", "hub"]
+    # No rule matched US — this is the default route, not a rule's targets.
+    assert result.matched_any is False
 
 
 def test_preview_priority_high_wins() -> None:
     result = preview_routing(_rules(), {"Modality": "CT"}, all_targets=["pacs", "archive", "hub"])
-    assert result == ["archive"]
+    assert result.targets == ["archive"]
+    assert result.matched_any is True
 
 
 def test_preview_is_deterministic() -> None:
@@ -53,7 +57,7 @@ def test_preview_accepts_any_tag() -> None:
     result = preview_routing(
         rules, {"StudyDescription": "CHEST X-RAY"}, all_targets=["pacs", "hub"]
     )
-    assert result == ["pacs"]
+    assert result.targets == ["pacs"]
 
 
 def test_preview_rejects_invalid_rule() -> None:

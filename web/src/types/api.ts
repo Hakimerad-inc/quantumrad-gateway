@@ -34,6 +34,12 @@ export type GatewayConfig = Schemas["RedactedGatewayConfig"];
 export type ConfigUpdateResponse = Schemas["ConfigUpdateResponse"];
 export type ConfigImportResponse = Schemas["ConfigImportResponse"];
 
+// The rule preview endpoint (review P0-9). `matched_any` distinguishes "a rule
+// selected these targets" from "no rule matched and every enabled destination
+// gets the study" — the target lists look the same and mean different things.
+export type RulePreview = Schemas["RulePreviewResponse"];
+export type RulePreviewInput = Schemas["RulePreviewRequest"];
+
 // ── Endpoints returning ad-hoc dicts (no response model server-side) ──
 
 export interface LogsResponse {

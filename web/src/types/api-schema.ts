@@ -609,6 +609,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rules/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Rules
+         * @description Preview which destinations would receive a study with the given tags.
+         *
+         *     Evaluates the same engine ``Spool.enqueue`` uses, so what an operator
+         *     previews is what the appliance does — before P0-9 the panel previewed one
+         *     engine and production routed by another, and neither discrepancy was
+         *     visible anywhere. The default route here is the *enabled* destinations,
+         *     matching enqueue's ``[t for t in filtered if t.enabled]``: a disabled
+         *     destination never receives a study regardless of what a rule says.
+         *
+         *     A malformed rule is a 400 rather than a silent skip. At routing time the
+         *     appliance fails open (a typo'd rule over-delivering beats a study stranded
+         *     in RECEIVED); here the operator asked to check their rules, so the first
+         *     problem is reported by index — the remaining ones are already enumerated by
+         *     ``GET /config/warnings`` at save time.
+         */
+        post: operations["preview_rules_api_rules_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/studies/{study_id}/reports": {
         parameters: {
             query?: never;
@@ -1564,6 +1597,47 @@ export interface components {
             username: string;
             /** Remote Path */
             remote_path: string;
+        };
+        /**
+         * RulePreviewRequest
+         * @description A synthetic tag set to route, and optionally the rules to route it by.
+         *
+         *     ``rules`` omitted means "use the configured rules" — the preview then
+         *     answers what the running appliance would do. Supplied rules are previewed
+         *     instead, so an operator can test an edit in the destinations panel *before*
+         *     saving it: the difference between "these rules route CT to the archive" and
+         *     "these rules would, once I save them" is exactly the question a dry-run
+         *     exists to answer.
+         */
+        RulePreviewRequest: {
+            /**
+             * Tags
+             * @description DICOM tags and values to route, e.g. {"Modality": "CT", "StudyDescription": "CHEST"}. Case-insensitive; values may use the rule's wildcard grammar.
+             */
+            tags?: {
+                [key: string]: string;
+            };
+            /**
+             * Rules
+             * @description Rules to preview. Omit to preview the configured forwarding_rules.
+             */
+            rules?: components["schemas"]["ForwardingRule"][] | null;
+        };
+        /**
+         * RulePreviewResponse
+         * @description Where a study carrying the requested tags would be routed.
+         */
+        RulePreviewResponse: {
+            /**
+             * Targets
+             * @description Destination names that would receive the study. When matched_any is false this is every enabled destination (the default route), not a set any rule selected.
+             */
+            targets: string[];
+            /**
+             * Matched Any
+             * @description True when at least one rule matched and selected targets. False means the default route applies — no rule spoke to this tag set.
+             */
+            matched_any: boolean;
         };
         /**
          * S3Destination
@@ -2679,6 +2753,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConfigImportResponse"];
+                };
+            };
+        };
+    };
+    preview_rules_api_rules_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RulePreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RulePreviewResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -12,9 +12,12 @@ import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import ConfigView from './ConfigView';
 
+// Mirrors the shape GET /api/config really emits: ae_title is a ReceiverConfig
+// field, and GeneralConfig forbids extras, so a `general.ae_title` document can
+// never come back from the gateway (config/__init__.py, extra="forbid").
 const CLEAN_CONFIG = {
   config_version: '1.0',
-  general: { ae_title: 'GATEWAY' },
+  receiver: { ae_title: 'GATEWAY' },
   destinations: [
     { name: 'pacs-a', type: 'dicom', host: '10.0.0.5', port: 104, aet_target: 'ORTHANC' },
   ],

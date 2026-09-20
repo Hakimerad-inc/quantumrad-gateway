@@ -77,6 +77,43 @@ def test_csp_content(client: TestClient) -> None:
     assert directive("style-src") == "style-src 'self' 'unsafe-inline'"
 
 
+def test_csp_present_on_cors_preflight(client: TestClient) -> None:
+    """A CORS preflight reply carries the security headers too.
+
+    CORSMiddleware answers OPTIONS itself and never calls the app, so the
+    headers are only on the response if the security middleware sits
+    *outside* CORS. Starlette runs user middleware in reverse registration
+    order, so that means registering the security middleware LAST. Verified
+    broken at HEAD: OPTIONS /api/config returned 200 with no CSP while
+    GET /api/system/health had one — the security middleware was the
+    innermost layer and preflight never reached it.
+    """
+    r = client.options(
+        "/api/config",
+        headers={
+            "Origin": "http://127.0.0.1:8080",
+            "Access-Control-Request-Method": "PUT",
+        },
+    )
+    assert r.status_code == 200
+    headers = dict(r.headers)
+    assert "content-security-policy" in headers
+    assert "x-content-type-options" in headers
+    assert "x-frame-options" in headers
+
+
+def test_security_middleware_is_outermost(client: TestClient) -> None:
+    """Pin the registration order, which is what the preflight test depends on.
+
+    ``add_middleware`` inserts at the front, so ``user_middleware[0]`` is the
+    LAST registered and, once the stack is built, the OUTERMOST. That slot
+    must be the security middleware.
+    """
+    from mercure_gateway.web import _SecurityMiddleware
+
+    assert client.app.user_middleware[0].cls is _SecurityMiddleware
+
+
 def test_hsts_only_over_tls() -> None:
     """HSTS appears when the request arrives over https (ADR-0007)."""
     cfg = default_config()
@@ -183,6 +220,126 @@ def test_csrf_accepts_tauri_origin(client: TestClient) -> None:
         headers={"Origin": "tauri://localhost"},
     )
     assert r.status_code == 200
+
+
+def _client_on_port(port: int) -> TestClient:
+    """An app whose configured web port is *port* (the isolated-port posture
+    the test suite and e2e/seed.py use — the port lives in the config, not in
+    a hardcoded allow-list)."""
+    cfg = default_config()
+    cfg.web_ui.port = port
+    return TestClient(create_app(cfg, Spool(mem_database())))
+
+
+def test_csrf_origin_port_is_read_from_config() -> None:
+    """The allow-list follows web_ui.port instead of pinning 8080.
+
+    e2e/seed.py serves the panel on 18299 and sets that port in the config; a
+    hardcoded 8080 list (or one collapsed to a single literal) would reject
+    every same-app request the E2E browser makes.
+    """
+    client = _client_on_port(18299)
+    r = client.post(
+        "/api/echo",
+        json={"host": "pacs.local", "port": 104},
+        headers={"Origin": "http://127.0.0.1:18299"},
+    )
+    assert r.status_code == 200, "the configured port must be same-app"
+
+
+def test_csrf_rejects_loopback_on_another_port() -> None:
+    """A loopback host on a port the gateway does not serve is cross-origin.
+
+    This is the hole the pin closes: the old allow-list accepted *any* port on
+    127.0.0.1/localhost, so a second localhost service (or a crafted page on
+    one) was treated as same-app for a state-changing request.
+    """
+    client = _client_on_port(18299)
+    r = client.post(
+        "/api/echo",
+        json={"host": "pacs.local", "port": 104},
+        headers={"Origin": "http://127.0.0.1:18300"},
+    )
+    assert r.status_code == 403
+
+
+def test_csrf_rejects_wrong_port_on_default_config(client: TestClient) -> None:
+    """The default-config app (port 8080) rejects a request from port 8081."""
+    r = client.post(
+        "/api/echo",
+        json={"host": "pacs.local", "port": 104},
+        headers={"Origin": "http://localhost:8081"},
+    )
+    assert r.status_code == 403
+
+
+def test_cors_allow_list_matches_configured_port() -> None:
+    """CORS allows exactly the configured origin — the CSRF and CORS lists are
+    built from the same source, so a browser-driven PUT works end to end."""
+    client = _client_on_port(18299)
+    r = client.options(
+        "/api/config",
+        headers={
+            "Origin": "http://localhost:18299",
+            "Access-Control-Request-Method": "PUT",
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "http://localhost:18299"
+
+    # A port the gateway does not serve is not echoed back as allowed.
+    r = client.options(
+        "/api/config",
+        headers={
+            "Origin": "http://localhost:18300",
+            "Access-Control-Request-Method": "PUT",
+        },
+    )
+    assert r.status_code == 400
+    assert "access-control-allow-origin" not in r.headers
+
+
+# ══════════════════════════════════════════════════════════════════════
+# OpenAPI / interactive docs — not an unauthenticated API map (P1)
+#
+# /openapi.json, /docs and /redoc enumerate every admin endpoint the panel
+# exposes (PHI, credentials, start/stop). They are removed when web_ui auth
+# is on; the loopback dev posture keeps them reachable.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_docs_reachable_when_auth_disabled(client: TestClient) -> None:
+    """The dev/local posture (auth off, loopback-only) keeps the docs."""
+    assert client.app.openapi_url == "/openapi.json"
+    assert client.app.docs_url == "/docs"
+    assert client.app.redoc_url == "/redoc"
+    r = client.get("/openapi.json")
+    assert r.status_code == 200
+    assert r.json()["openapi"].startswith("3.")
+
+
+def test_docs_removed_when_auth_enabled() -> None:
+    """With auth on, the schema and docs are not served at all.
+
+    The SPA catch-all answers /openapi.json with the SPA shell when the bundle
+    is built, so the assertion is on the content type, not the status code.
+    """
+    from mercure_gateway.web.auth import hash_password
+
+    cfg = default_config()
+    cfg.web_ui.auth_enabled = True
+    cfg.web_ui.auth_password_hash = hash_password("s3cret")
+    client = TestClient(create_app(cfg, Spool(mem_database())))
+
+    assert client.app.openapi_url is None
+    assert client.app.docs_url is None
+    assert client.app.redoc_url is None
+
+    r = client.get("/openapi.json")
+    # What answers instead depends on whether the SPA bundle is present (built
+    # shell vs. the not-built fallback route) — but neither is the schema.
+    if r.headers["content-type"].startswith("application/json"):
+        assert "openapi" not in r.json()
 
 # ══════════════════════════════════════════════════════════════════════
 # Non-loopback bind with auth disabled — refuse, don't just warn (D3b)

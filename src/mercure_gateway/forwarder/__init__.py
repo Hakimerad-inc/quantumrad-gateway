@@ -2,15 +2,24 @@
 
 Reads tasks from the spool queue, dispatches to the registered destination
 handlers, tracks per-destination status and applies retry with exponential
-backoff up to ``retry_max`` attempts, after which the study is flagged
+backoff until the retry budget is exhausted, after which the study is flagged
 ``FAILED`` and its local copy is retained (never auto-deleted; PRD §3.3/§3.4).
+
+Retry budget: :class:`RetryPolicy` is built in code (``base_delay_sec=5.0``,
+``max_attempts=5`` by default). There is no config knob for it — the
+``retry`` argument to :meth:`Forwarder.__init__` is the only override, and
+production runs the defaults.
 
 Retry semantics: a failed task is failed through the state machine (route
 ``error``, study ``ERROR``) and *requeued*; the backoff delay is awaited on a
-``threading.Event`` (interruptible by :meth:`Forwarder.stop`) and the task is
-re-claimed by id on the next poll. This keeps retry state per-task — the
-worker never holds a queue slot while sleeping, and a re-claim can never
-dispatch a *different* task with the stale handler.
+``threading.Event`` (interruptible by :meth:`Forwarder.stop`) and the route is
+re-claimed by id in the *same* dispatch pass, not on a later poll. The
+backoff is slept *before* the re-queue, so for the whole wait the route sits
+in ``error`` and is invisible to ``claim_next`` — with more than one worker,
+re-queueing first would let another worker claim it instantly and the
+backoff would never apply. Re-claiming by route id can only return that same
+route, so the loop can never dispatch a *different* task with the handler it
+already resolved.
 
 The spool state machine transitions (claim → complete/fail) and the
 ``process_once`` dispatch loop are functional. Concrete transports per target

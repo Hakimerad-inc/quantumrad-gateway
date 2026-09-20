@@ -8,13 +8,19 @@ destination route rollups with cached C-ECHO reachability.
 daemon thread on a fixed cadence. Probes run in a small executor so one dark
 PACS cannot delay the others, and results are cached — the HTTP request path
 never blocks on network I/O (a dead PACS can hold an echo for seconds).
+
+``RouteRollupCache`` applies the same idea to the per-destination rollup:
+``count_routes_by_target`` is a GROUP BY over every routing row, and the flow
+view polls for it every couple of seconds, so the aggregate is memoized for
+a short window.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Mapping
+import weakref
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -24,11 +30,16 @@ from mercure_gateway.web.echo import echo_destination
 if TYPE_CHECKING:
     from mercure_gateway.config import GatewayConfig
     from mercure_gateway.spool import Spool
+    from mercure_gateway.spool.db import Database
 
-__all__ = ["DestinationHealthMonitor", "pipeline_snapshot"]
+__all__ = ["DestinationHealthMonitor", "RouteRollupCache", "pipeline_snapshot"]
 
 _PROBE_INTERVAL_SEC = 30.0
 _PROBE_TIMEOUT_SEC = 3.0
+# The flow view polls faster than this, so a memo at this TTL keeps the
+# rollup fresh for the UI while collapsing the GROUP BY to one aggregate per
+# window (see RouteRollupCache).
+_ROLLUP_TTL_SEC = 5.0
 
 
 class DestinationHealthMonitor:
@@ -110,6 +121,62 @@ class DestinationHealthMonitor:
         }
 
 
+class RouteRollupCache:
+    """Short-TTL memo for the per-destination route rollup (pipeline view).
+
+    ``count_routes_by_target`` groups all of ``task_routing`` — studies ×
+    destinations — and the flow view asks for it every couple of seconds. The
+    rollup only moves when a route transitions, so memoizing it for a few
+    seconds takes the aggregate off the common request path; a dashboard a
+    few seconds behind is the same tradeoff ``DestinationHealthMonitor``
+    makes for C-ECHO probes.
+
+    Same shape as that monitor: one lock-guarded store, populated under the
+    lock so a burst of polls loads it once, and serving a cached entry never
+    touches the database. Entries are per spool database
+    (``_rollup_caches``), so two gateways in one process cannot see each
+    other's rollups and a closed database takes its memo with it.
+    """
+
+    def __init__(self, *, ttl_sec: float = _ROLLUP_TTL_SEC) -> None:
+        self._ttl_sec = ttl_sec
+        self._lock = threading.Lock()
+        self._rows: list[dict[str, Any]] | None = None
+        self._expires_at = 0.0
+
+    def get(self, loader: Callable[[], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        """Return the rollup, loading it through *loader* if the TTL expired."""
+        with self._lock:
+            now = time.monotonic()
+            if self._rows is not None and now < self._expires_at:
+                return self._rows
+            rows = loader()
+            self._rows = rows
+            self._expires_at = now + self._ttl_sec
+            return rows
+
+    def invalidate(self) -> None:
+        """Drop the memo so the next ``get`` reloads."""
+        with self._lock:
+            self._rows = None
+
+
+# One memo per spool database: keyed weakly so a closed/replaced database
+# (tests build one per case) drops its entry instead of keeping it alive.
+_rollup_caches: weakref.WeakKeyDictionary[Database, RouteRollupCache] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _rollup_cache(db: Database) -> RouteRollupCache:
+    """The route-rollup memo belonging to *db* (created on first use)."""
+    cache = _rollup_caches.get(db)
+    if cache is None:
+        cache = RouteRollupCache()
+        _rollup_caches[db] = cache
+    return cache
+
+
 def pipeline_snapshot(
     config: GatewayConfig,
     spool: Spool,
@@ -125,7 +192,9 @@ def pipeline_snapshot(
     when not supplied explicitly (tests pass them directly).
     """
     queue = spool.count_states()
-    routes = spool.count_routes_by_target()
+    # The rollup is a GROUP BY over all routing rows and the view polls for it
+    # every few seconds — memoize it briefly (RouteRollupCache).
+    routes = _rollup_cache(spool.database).get(spool.count_routes_by_target)
 
     rollup: dict[str, dict[str, Any]] = {}
     for row in routes:
@@ -139,10 +208,10 @@ def pipeline_snapshot(
     one_hour_ago = (
         datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%d %H:%M:%S")
-    received_hour = sum(
-        1 for row in spool.list_studies_with_route_counts()
-        if row["created_at"] >= one_hour_ago
-    )
+    # Counted in SQL against idx_studies_created_at: materializing the whole
+    # studies ⋈ task_routing list to count it in Python scaled with the
+    # table, and this endpoint is polled constantly.
+    received_hour = spool.database.count_studies_since(one_hour_ago)
 
     destinations: list[dict[str, Any]] = []
     for dest in config.destinations:

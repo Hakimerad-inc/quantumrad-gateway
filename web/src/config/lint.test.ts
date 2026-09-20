@@ -15,7 +15,9 @@ function versioned(extra: string): string {
 
 describe('lintConfigDocument', () => {
   it('reports no findings for a clean document', () => {
-    const findings = lintConfigDocument(versioned('  "general": { "ae_title": "GATEWAY" }\n'));
+    // ae_title belongs to the receiver section — GeneralConfig has no such
+    // field, so this is the shape a real GET /api/config returns.
+    const findings = lintConfigDocument(versioned('  "receiver": { "ae_title": "GATEWAY" }\n'));
     expect(findings).toEqual([]);
   });
 

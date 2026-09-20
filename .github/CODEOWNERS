@@ -1,0 +1,37 @@
+# Code owners for quantumrad-gateway (remote origin: Hakimerad-inc).
+#
+# Replace the handle below with a real GitHub username or @org/team before
+# enabling branch protection's "Require review from Code Owners" — this file
+# was written offline and the org's actual team names could not be verified.
+# An unresolvable handle makes GitHub drop the rule silently instead of
+# erroring, so a stale placeholder here is worse than an empty file.
+
+*           @Hakimerad-inc/maintainers
+
+# Backend: the store-and-forward core, config model, and the FastAPI app the
+# SPA and the Tauri shell both talk to.
+/src/       @Hakimerad-inc/maintainers
+
+# Admin SPA (TypeScript/React). Kept separate from src/ so a frontend-only
+# change routes to reviewers who know the a11y and bundle-budget rules.
+/web/       @Hakimerad-inc/maintainers
+
+# Desktop shell: the Rust sidecar wiring, updater manifests, and build.rs
+# provenance parsers that release.yml's signing path depends on.
+/src-tauri/ @Hakimerad-inc/maintainers
+
+# ADRs and runbooks. Reviewed for accuracy against shipped behaviour — a
+# runbook that does not match the release script is worse than no runbook.
+/docs/      @Hakimerad-inc/maintainers
+
+# CI, release, and this file itself. Changes here run on every push and can
+# silently skip a gate, so they need a maintainer who knows why each job
+# exists (see the inline comments in workflows/ci.yml).
+/.github/   @Hakimerad-inc/maintainers
+
+# Packaging, release, perf-gate, and OpenAPI-export scripts — the tooling CI
+# and the release runbook invoke directly.
+/scripts/   @Hakimerad-inc/maintainers
+
+# Python suite, including the coverage and perf gates CI enforces.
+/tests/     @Hakimerad-inc/maintainers

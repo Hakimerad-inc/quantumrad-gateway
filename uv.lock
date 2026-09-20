@@ -978,7 +978,7 @@ requires-dist = [
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.12,<3" },
     { name = "keyring", specifier = ">=25.7.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
-    { name = "numpy", specifier = ">=1.26" },
+    { name = "numpy", specifier = ">=2.0" },
     { name = "paramiko", specifier = ">=5.0.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.2" },
     { name = "pydantic", specifier = ">=2.7" },

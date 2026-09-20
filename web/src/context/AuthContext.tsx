@@ -1,6 +1,6 @@
 /** Auth context for web UI session management (S06-T8). */
 
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
 import { apiUrl } from '../api';
 
 export interface LoginResult {
@@ -32,7 +32,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [backendUnreachable, setBackendUnreachable] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  const checkAuth = async () => {
+  // Stable identities: the value object is memoised so a parent re-render
+  // (or a state change in an unrelated part of AuthProvider) does not hand
+  // every consumer a fresh object and re-run all their effects.
+  const checkAuth = useCallback(async () => {
     try {
       const res = await fetch(apiUrl('/api/system/status'), { credentials: 'include' });
       // fetch rejects only on a transport failure, never on an HTTP status,
@@ -46,17 +49,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
 
   useEffect(function checkSessionOnMount() {
     checkAuth();
-  }, []);
+  }, [checkAuth]);
 
   // Single source of truth for authentication: callers (LoginView) must go
   // through this rather than posting to /api/login themselves, otherwise the
   // session cookie is set while `isAuthenticated` stays false and the app
   // re-renders the login screen forever (review C1).
-  const login = async (password: string): Promise<LoginResult> => {
+  const login = useCallback(async (password: string): Promise<LoginResult> => {
     try {
       const res = await fetch(apiUrl('/api/login'), {
         method: 'POST',
@@ -81,18 +84,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setBackendUnreachable(true);
       return { ok: false, unreachable: true, error: 'Cannot reach the gateway.' };
     }
-  };
+  }, []);
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     try {
       await fetch(apiUrl('/api/logout'), { method: 'POST', credentials: 'include' });
     } finally {
       setIsAuthenticated(false);
     }
-  };
+  }, []);
+
+  const value = useMemo(
+    () => ({ isAuthenticated, isLoading, backendUnreachable, login, logout, checkAuth }),
+    [isAuthenticated, isLoading, backendUnreachable, login, logout, checkAuth],
+  );
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, isLoading, backendUnreachable, login, logout, checkAuth }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

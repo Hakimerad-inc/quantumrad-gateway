@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use tauri::{
+    Manager, WindowEvent,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
 };
 use tauri_plugin_shell::ShellExt;
 
@@ -185,6 +185,24 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // Structured logging (review: the `log` crate was declared but every
+        // diagnostic was an eprintln! to a console no operator watches). The
+        // plugin installs a global logger before setup runs, so the sidecar
+        // and poll-loop diagnostics below reach both stdout and the
+        // platform's app log dir — the file an operator actually attaches to
+        // a support ticket. Level is Info so the periodic poll-loop noise
+        // stays out unless something is actually wrong (warnings/errors).
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                ])
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         // Auto-update plumbing (ADR-0006): the updater verifies Ed25519-signed
         // artifacts against the pubkey in tauri.conf.json (overridden at
         // release time via tauri.release.conf.json); the process plugin
@@ -278,11 +296,12 @@ pub fn run() {
                                 while let Some(_event) = rx.recv().await {}
                             });
                         }
-                        Err(e) => eprintln!("mercure-gateway backend failed to start: {e}"),
+                        Err(e) => log::error!("backend failed to start: {e}"),
                     }
                 }
-                None => eprintln!(
-                    "mercure-gateway backend bundle not found (run scripts/package_backend.py)"
+                None => log::warn!(
+                    "backend bundle not found (run scripts/package_backend.py); \
+                     launching without a backend"
                 ),
             }
 

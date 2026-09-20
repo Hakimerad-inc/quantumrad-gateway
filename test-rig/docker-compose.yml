@@ -10,7 +10,15 @@
 
 services:
   orthanc:
-    image: jodogne/orthanc-plugins:latest
+    # Pinned by digest, not :latest — a `docker compose pull` on a moving tag
+    # silently changes the PACS the demo and e2e chain run against, so a
+    # passing test run stops being reproducible without any commit here.
+    # Digest taken from `docker pull jodogne/orthanc-plugins:latest && docker
+    # image inspect --format={{index .RepoDigests 0}}` on 2026-09-20, which
+    # reported a single repo digest. To move it: pull the new tag, re-run that
+    # inspect after the pull has FULLY completed (inspecting mid-pull returns
+    # the previous image's digest), and replace the value below.
+    image: jodogne/orthanc-plugins@sha256:f1b5429f510f00a8b95272fd5d01229d66e2c6feebd9b06de744dd629e51560a
     container_name: mercure-gateway-orthanc
     restart: unless-stopped
     ports:

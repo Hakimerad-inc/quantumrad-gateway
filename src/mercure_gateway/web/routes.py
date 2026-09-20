@@ -14,7 +14,10 @@ The ``app.state`` carries shared references:
 
 Handlers are plain ``def`` (not ``async def``): they perform blocking SQLite
 and filesystem work, which FastAPI runs on its threadpool — an async handler
-would stall the event loop (freezing every endpoint) on a slow query.
+would stall the event loop (freezing every endpoint) on a slow query. The one
+exception is ``import_config``, which must await the multipart form stream;
+its own blocking work (validation, the fsync-heavy config write) goes through
+``run_in_threadpool`` rather than running inline.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from typing import Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
 from mercure_gateway import __version__
@@ -43,7 +47,7 @@ from mercure_gateway.redact import (
     RedactedGatewayConfig,
     redact_config,
 )
-from mercure_gateway.spool import Spool
+from mercure_gateway.spool import Spool, StudyState
 from mercure_gateway.web.auth import require_auth
 
 logger = logging.getLogger(__name__)
@@ -694,13 +698,16 @@ class QueueStats(BaseModel):
 def queue_stats(request: Request) -> QueueStats:
     """Queue statistics by state."""
     counts = _spool(request).count_states()
+    # count_states() returns raw DB strings, so the enum's *value* is what
+    # compares — but spelling it through the member means a rename reaches
+    # here as a type error instead of silently degrading the count to 0.
     return QueueStats(
         total=sum(counts.values()),
-        queued=counts.get("QUEUED", 0),
-        sending=counts.get("SENDING", 0),
-        sent=counts.get("SENT", 0),
-        error=counts.get("ERROR", 0),
-        failed=counts.get("FAILED", 0),
+        queued=counts.get(StudyState.QUEUED.value, 0),
+        sending=counts.get(StudyState.SENDING.value, 0),
+        sent=counts.get(StudyState.SENT.value, 0),
+        error=counts.get(StudyState.ERROR.value, 0),
+        failed=counts.get(StudyState.FAILED.value, 0),
     )
 
 
@@ -1211,7 +1218,10 @@ async def import_config(request: Request) -> dict[str, Any]:
     from mercure_gateway.config import normalize_and_validate
 
     try:
-        updated = normalize_and_validate(restored, source="import")
+        # Validation is Pydantic v2 construction — CPU-bound and, on a config
+        # carrying many destinations/rules, not free. Offload it so the event
+        # loop keeps serving while it runs.
+        updated = await run_in_threadpool(normalize_and_validate, restored, source="import")
     except Exception as exc:  # noqa: BLE001 — surface validation as 400
         raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
     healed = getattr(updated, "_healed_unknown_keys", None) or []
@@ -1227,12 +1237,15 @@ async def import_config(request: Request) -> dict[str, Any]:
         _audit_config_rejection(request, reason)
         raise HTTPException(status_code=409, detail=reason)
 
-    # Persist to disk if config_path is configured
+    # Persist to disk if config_path is configured. save_config is an fsync-heavy
+    # write — the worst thing to run on the event loop, since the appliance boots
+    # from a USB dongle where each flush can take tens of ms. Offload it to the
+    # threadpool like the sync handlers above get for free.
     config_path: object = getattr(request.app.state, "config_path", None)
     if config_path:
         from mercure_gateway.config import save_config
 
-        save_config(updated, str(config_path))
+        await run_in_threadpool(save_config, updated, str(config_path))
 
     # Update in-memory config
     request.app.state.config = updated

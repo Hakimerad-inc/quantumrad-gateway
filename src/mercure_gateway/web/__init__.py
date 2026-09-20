@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from mercure_gateway.web.auth import require_auth
 
 if TYPE_CHECKING:
-    from mercure_gateway.config import GatewayConfig
+    from mercure_gateway.config import GatewayConfig, WebUIConfig
     from mercure_gateway.disk import DiskMonitor
     from mercure_gateway.spool import Spool
 
@@ -36,21 +36,15 @@ __all__ = ["create_app"]
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
-# Loopback origins the Tauri webview / localhost SPA actually use — the same
-# set the CORS middleware allows.  A state-changing request whose Origin is
-# *not* in this set is CSRF (a cross-site form/post cannot spoof loopback).
-# The allow-list covers any port on loopback hosts: the SPA is served by the
-# gateway itself, so a request Origin that already matches the host on any
-# port is same-app, not cross-site (tests bind isolated web ports, e.g. E2E).
-_ALLOWED_ORIGINS = (
-    "http://127.0.0.1:8080",
-    "http://localhost:8080",
-    "tauri://localhost",
-    "https://tauri.localhost",
-)
+# Loopback hostnames the panel answers on regardless of the configured bind
+# address: the Tauri webview and a browser both address it as 127.0.0.1 or
+# localhost, and a config bound to 0.0.0.0/:: still serves those (off-loopback
+# binding requires auth — main._enforce_bind_security refuses otherwise).
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
 
-# Hosts (any port) whose origins are accepted in addition to the exact list.
-_ALLOWED_ORIGIN_HOSTS = {"127.0.0.1", "localhost"}
+# Tauri's custom schemes for the desktop shell (ADR-0002) — added verbatim
+# because they are not http(s) URLs and so cannot be built from the config.
+_TAURI_ORIGINS = ("tauri://localhost", "https://tauri.localhost")
 
 # Non-loopback binding is only allowed when auth is enabled (main.py enforces
 # this); loopback is single-user by definition, so the CSRF origin check is a
@@ -89,6 +83,31 @@ _SECURITY_HEADERS = {
 _HSTS_VALUE = "max-age=31536000; includeSubDomains"
 
 
+def _bracket_host(host: str) -> str:
+    """Bracket an IPv6 literal for use in an origin (``::1`` → ``[::1]``)."""
+    return f"[{host}]" if ":" in host else host
+
+
+def _allowed_origins(web_ui: WebUIConfig) -> tuple[str, ...]:
+    """Origins a same-app request legitimately carries, for CORS *and* CSRF.
+
+    Built from ``web_ui``: the hostnames the panel is served on, at the port
+    it is actually bound to, under the scheme it is served over.  An earlier
+    version hardcoded ``:8080`` *and* accepted any port on a loopback host, so
+    any other localhost service (or a cross-origin one on a free port) counted
+    as same-app.  The port is now pinned to ``web_ui.port`` — the tests and
+    E2E set it in the config, so an isolated web port stays allowed — and the
+    Tauri schemes are appended verbatim.
+    """
+    schemes: tuple[str, ...] = ("http", "https") if web_ui.tls_cert_file else ("http",)
+    origins = {
+        f"{scheme}://{_bracket_host(host)}:{web_ui.port}": None
+        for scheme in schemes
+        for host in (web_ui.host, *_LOOPBACK_HOSTS)
+    }
+    return (*origins, *_TAURI_ORIGINS)
+
+
 class _SecurityMiddleware:
     """Security headers + origin-based CSRF check (ASGI middleware).
 
@@ -109,32 +128,18 @@ class _SecurityMiddleware:
             return
 
         # CSRF: only meaningful for browser-like requests that send an Origin.
+        # The allow-list is exact (host *and* port, built from web_ui) — a
+        # cross-site form/post cannot forge it, and a *different* service on
+        # the same loopback host is cross-origin, not same-app.
         if scope["method"] in self._STATE_CHANGING and scope["path"].startswith("/api/"):
             headers = dict(scope.get("headers", []))
             origin = headers.get(b"origin")
-            if origin is not None:
-                origin_str = origin.decode()
-                if origin_str in self._allowed_origins:
-                    origin_allowed = True
-                else:
-                    # Same-app loopback on a non-default port (e.g. tests on an
-                    # isolated web port): host must be loopback and the scheme
-                    # plain http — tauri:// and remote hosts stay rejected.
-                    from urllib.parse import urlsplit
-
-                    parts = urlsplit(origin_str)
-                    origin_allowed = (
-                        parts.scheme == "http"
-                        and parts.hostname in _ALLOWED_ORIGIN_HOSTS
-                        and parts.username is None
-                        and parts.password is None
-                    )
-                if not origin_allowed:
-                    response = JSONResponse(
-                        status_code=403, content={"detail": "origin not allowed"}
-                    )
-                    await response(scope, receive, send)
-                    return
+            if origin is not None and origin.decode() not in self._allowed_origins:
+                response = JSONResponse(
+                    status_code=403, content={"detail": "origin not allowed"}
+                )
+                await response(scope, receive, send)
+                return
 
         async def send_wrapper(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
@@ -177,10 +182,20 @@ def create_app(
     # product's, not a literal left over from the scaffold — a hardcoded
     # "0.1.0" here is the one mirror sync_version.py could not see, and it
     # was the one that shipped (review P1-8).
+    # The schema and the interactive docs are an unauthenticated map of every
+    # admin endpoint — PHI, credentials, start/stop controls.  When the panel
+    # requires a login they are removed entirely: /openapi.json, /docs and
+    # /redoc would otherwise hand the whole surface to anyone who can reach
+    # the port.  With auth off the panel is loopback-only (main.py enforces
+    # it), so the docs stay reachable for local development.
+    _docs_off = config.web_ui.auth_enabled
     app = FastAPI(
         title="QuantumRAD Gateway API",
         version=__version__,
         description="REST API for the QuantumRAD Gateway web admin panel",
+        docs_url=None if _docs_off else "/docs",
+        redoc_url=None if _docs_off else "/redoc",
+        openapi_url=None if _docs_off else "/openapi.json",
     )
 
     # Store shared references on app state for route access
@@ -208,19 +223,26 @@ def create_app(
 
     attach_tracker(app)
 
-    # Security middleware FIRST (runs outermost): headers on every response,
-    # CSRF origin check before the CORS handling.
-    app.add_middleware(_SecurityMiddleware, allowed_origins=_ALLOWED_ORIGINS)
+    origins = _allowed_origins(config.web_ui)
 
-    # CORS: only the origins the Tauri webview / localhost SPA actually use.
-    # Never combine allow_credentials=True with wildcard origins.
+    # Middleware order: Starlette runs user middleware in REVERSE registration
+    # order, so the middleware added LAST is the OUTERMOST.  CORS is therefore
+    # registered first and the security middleware second — putting the
+    # security middleware outside CORS, where it sees every response including
+    # the preflight replies CORSMiddleware answers without calling the app
+    # (registering it first, as an earlier version did, made it the *innermost*
+    # layer, so an OPTIONS preflight went back to the browser with no CSP).
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(_ALLOWED_ORIGINS),
+        allow_origins=list(origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT"],
         allow_headers=["*"],
     )
+
+    # Security middleware LAST (runs outermost): headers on every response, and
+    # the CSRF origin check before any route is reached.
+    app.add_middleware(_SecurityMiddleware, allowed_origins=origins)
 
     # API routes. require_auth is applied ONLY to the admin router — the
     # auth router (login/logout) must be reachable before a session exists.
@@ -232,11 +254,19 @@ def create_app(
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="spa")
     else:
+        _docs_reachable = not _docs_off
+
         @app.get("/{path:path}")
         async def _spa_fallback(path: str) -> dict[str, str]:
+            # The SPA sources are web/ (vite.config.ts writes the bundle into
+            # src/mercure_gateway/web/static/), not web/static/ — the old
+            # message pointed at a directory that does not exist.
             return {
-                "message": "SPA not built. Run 'npm run build' in web/static/.",
-                "docs": "/docs",
+                "message": (
+                    "SPA not built. Run 'npm run build' in the web/ directory "
+                    "(the Vite build writes src/mercure_gateway/web/static/)."
+                ),
+                "docs": "/docs" if _docs_reachable else "/api/system/health",
             }
 
     return app

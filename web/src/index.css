@@ -337,7 +337,6 @@ pre { font-family: var(--mono); font-size: 12px; line-height: 1.6; overflow-x: a
 .pipe-dot.gray { fill: var(--border-strong); }
 .pipe-dot.yellow { fill: var(--yellow); }
 .pipe-dot.red { fill: var(--red); }
-.pipe-dot.accent { fill: var(--accent); }
 
 .edge {
   fill: none; stroke: var(--border-strong); stroke-width: 1.5;
@@ -507,7 +506,7 @@ pre { font-family: var(--mono); font-size: 12px; line-height: 1.6; overflow-x: a
   font-size: 1rem;
 }
 
-/* Protected route wrapper ensures content doesn't flash */
+/* Auth gate is inline in App.tsx; this keeps authenticated content from flashing */
 main.main > *:not(.login-page) {
   animation: fade-in 0.15s ease-out;
 }

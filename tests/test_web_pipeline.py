@@ -16,6 +16,7 @@ from mercure_gateway.config import DICOMDestination, default_config
 from mercure_gateway.spool import Spool
 from mercure_gateway.spool.db import mem_database
 from mercure_gateway.web import create_app
+from mercure_gateway.web.pipeline import RouteRollupCache, _rollup_cache
 from tests.conftest import FakeForwarder, FakeReceiver
 
 
@@ -78,6 +79,66 @@ def test_pipeline_snapshot_shape(spool: Spool, app, client: TestClient) -> None:
     assert dest["aet"] == "MERCURE"
     assert dest["routes"]["sending"] == 1
     assert dest["health"]["status"] == "ok"
+
+
+def test_pipeline_rollup_is_memoized_but_stays_correct(
+    spool: Spool, app, client: TestClient
+) -> None:
+    """The route rollup GROUP BY runs once per TTL window, not once per poll."""
+    study_id = spool.receive("1.2.3.4")
+    hub = app.state.config.destinations[0]
+
+    def hub_routes() -> dict[str, int]:
+        return client.get("/api/pipeline").json()["destinations"][0]["routes"]
+
+    assert hub_routes()["waiting"] == 0
+
+    spool.enqueue(study_id, [hub])
+    # Inside the memo window the freshly-enqueued route is not yet visible…
+    assert hub_routes()["waiting"] == 0
+    # …and shows up as soon as the memo is dropped.
+    _rollup_cache(spool.database).invalidate()
+    assert hub_routes()["waiting"] == 1
+
+
+def test_rollup_cache_reuses_within_ttl() -> None:
+    cache = RouteRollupCache(ttl_sec=5.0)
+    loads: list[list[dict[str, Any]]] = []
+
+    def loader() -> list[dict[str, Any]]:
+        rows = [{"target_name": f"t{len(loads)}"}]
+        loads.append(rows)
+        return rows
+
+    first = cache.get(loader)
+    second = cache.get(loader)
+    assert first is second
+    assert len(loads) == 1
+
+    cache.invalidate()
+    third = cache.get(loader)
+    assert third is not first
+    assert len(loads) == 2
+
+
+def test_rollup_cache_expires_after_ttl() -> None:
+    cache = RouteRollupCache(ttl_sec=0.0)
+    loads: list[list[dict[str, Any]]] = []
+
+    def loader() -> list[dict[str, Any]]:
+        rows = [{"target_name": f"t{len(loads)}"}]
+        loads.append(rows)
+        return rows
+
+    assert cache.get(loader) is not cache.get(loader)
+    assert len(loads) == 2
+
+
+def test_rollup_cache_is_per_database(spool: Spool) -> None:
+    """Two spools in one process must not share a rollup memo."""
+    other = Spool(mem_database())
+    assert _rollup_cache(spool.database) is _rollup_cache(spool.database)
+    assert _rollup_cache(spool.database) is not _rollup_cache(other.database)
 
 
 def test_destinations_summary(client: TestClient) -> None:

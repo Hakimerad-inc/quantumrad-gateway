@@ -1,8 +1,11 @@
 """SQLite store-and-forward database (spool + audit).
 
-Schema per PRD §5.4 with ``studies``, ``task_routing``, ``reports`` and
-``audit_events`` tables. Connections are configured for WAL journaling, a
-``busy_timeout`` and foreign-key enforcement.
+Schema per PRD §5.4 with seven tables: ``studies``, ``task_routing``,
+``reports`` and ``audit_events`` (PRD §5.4), plus ``db_meta`` (key/value
+store: at-rest encryption key verifier, ADR-0004), ``instance_meta``
+(per-instance storage provenance: transfer syntaxes, file path, byte count,
+v3) and ``hub_outbox`` (durable hub-event outbox, TD-06). Connections are
+configured for WAL journaling, a ``busy_timeout`` and foreign-key enforcement.
 
 Concurrency note:
 - One connection is shared by receiver/forwarder/web threads (``:memory:``
@@ -127,6 +130,11 @@ CREATE INDEX IF NOT EXISTS idx_studies_state       ON studies(state);
 CREATE INDEX IF NOT EXISTS idx_studies_created_at  ON studies(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_routing_status ON task_routing(status);
 CREATE INDEX IF NOT EXISTS idx_task_routing_study  ON task_routing(study_id);
+-- Covering index for the pipeline rollup (count_routes_by_target): the
+-- GROUP BY target_name, target_type, status and the MAX(updated_at) are both
+-- answered from the index, so the poll never touches the table.
+CREATE INDEX IF NOT EXISTS idx_task_routing_target
+    ON task_routing(target_name, target_type, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_reports_study       ON reports(study_id);
 CREATE INDEX IF NOT EXISTS idx_reports_status      ON reports(status);
 CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_events(ts);
@@ -153,6 +161,12 @@ CREATE TABLE IF NOT EXISTS instance_meta (
 );
 
 CREATE INDEX IF NOT EXISTS idx_instance_meta_study ON instance_meta(study_uid);
+-- Covering index for spool_num_bytes: the SUM(num_bytes) join reads only
+-- indexed columns, so the cap check scans the (much smaller) index rather
+-- than every instance row. The leftmost study_uid column also serves
+-- idx_instance_meta_study's lookups.
+CREATE INDEX IF NOT EXISTS idx_instance_meta_bytes
+    ON instance_meta(study_uid, num_bytes);
 
 -- Durable hub-event outbox (TD-06): audit events destined for the hub/band
 -- bookkeeper survive restarts by riding the same spool database.  Rows are
@@ -277,6 +291,19 @@ class Database:
         reads that must see uncommitted state or that feed a write decision in
         the same transaction (they take the write connection's lock for a
         reason), and anything inside :meth:`transaction`.
+
+        The fourth case is not a choice but a fallback: if
+        :meth:`_open_read_connection` cannot open the reader (``mode=ro``
+        refuses to create the file, and a WAL reader needs the ``-shm``
+        sidecar), it sets ``_read_disabled``, hands back the write connection
+        and logs once. The flag is sticky for the life of this
+        :class:`Database` — one failure means every later call from every
+        thread takes the write connection and its lock, so a configuration
+        that cannot open readers degrades to the pre-P1-19 shared-lock
+        behaviour rather than warning and retrying on every query. That is
+        the degradation ``__init__`` points readers here for, and it is safe
+        precisely because every query routed here is correct on either
+        connection.
         """
         if self._path == ":memory:" or self._read_disabled:
             return self._conn
@@ -821,6 +848,22 @@ class Database:
             sql += " WHERE " + " AND ".join(conditions)
         row = self._read_one(sql, params)
         return int(row["n"]) if row else 0
+
+    def count_studies_since(self, since: str) -> int:
+        """Count studies created at or after *since* (a UTC timestamp string).
+
+        ``since`` is compared against ``created_at`` in SQL, so the answer is
+        a range scan of ``idx_studies_created_at`` rather than the full
+        studies ⋈ task_routing materialize-and-count-in-Python it replaces
+        (the pipeline view's "received last hour" figure, polled every few
+        seconds). Timestamps are UTC ``YYYY-MM-DD HH:MM:SS`` text, so the
+        comparison is lexicographic — the same ordering the caller used to do
+        in Python, and consistent with ``CURRENT_TIMESTAMP``.
+        """
+        row = self._read_one(
+            "SELECT COUNT(*) AS n FROM studies WHERE created_at >= ?", (since,)
+        )
+        return int(row["n"]) if row is not None else 0
 
     # --- task_routing ----------------------------------------------------
 

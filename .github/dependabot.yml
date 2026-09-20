@@ -1,0 +1,76 @@
+# Weekly dependency updates. Deliberately conservative: grouped, capped, and
+# nothing here auto-merges — every bump still has to pass the CI gates and be
+# reviewed by a maintainer before it lands. There is no `auto-merge: true` in
+# any block below, and Dependabot's repository-level "Allow auto-merge" setting
+# is off.
+#
+# Caveat worth knowing: the Python lockfile is uv.lock, which Dependabot's pip
+# ecosystem does not read. A merged floor bump here goes into pyproject.toml
+# only — re-run `uv lock` (and `uv sync --all-extras`) so uv.lock and the
+# manifest stop agreeing, or CI's pip-audit step will be auditing a stale
+# resolution.
+
+version: 2
+
+updates:
+  # GitHub Actions. Every action in .github/workflows is tag-pinned (e.g.
+  # astral-sh/setup-uv@v10.1.0), so these PRs move a pin, not a floating tag.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      # A single actions/checkout bump touches every job; one PR for all of
+      # them keeps the queue short instead of opening one per action.
+      github-actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    labels: ["dependencies", "ci"]
+
+  # SPA. The repo has no root package.json — every npm dependency lives in
+  # web/, and that is the only directory with a lockfile to resolve against.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      # @vitejs/* and friends churn together and only affect the dev server;
+      # bundling them keeps the build-output reviews separate from the ones
+      # that touch the shipped bundle.
+      dev-dependencies:
+        dependency-type: development
+        patterns: ["*"]
+      production-dependencies:
+        dependency-type: production
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    labels: ["dependencies", "web"]
+
+  # Python. See the caveat at the top of this file about uv.lock.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      # FastAPI/starlette/pydantic move in lockstep; a bump that splits them
+      # across two PRs produces a matrix of untested combinations.
+      web-framework:
+        patterns: ["fastapi", "starlette", "pydantic"]
+      aws:
+        patterns: ["boto3", "botocore"]
+      dicom:
+        patterns: ["pynetdicom", "pydicom", "pylibjpeg*", "numpy"]
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    labels: ["dependencies", "python"]

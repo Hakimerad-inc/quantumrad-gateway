@@ -32,17 +32,29 @@ flash drive. It supports two modes:
 
 The gateway runs a **recovery scan** to reconcile any files on the USB's spool
 partition with the database. Delivered studies from a previous session are
-retained and re-queued if needed. The LED shows:
+retained and re-queued if needed.
 
-- **Solid green** — gateway running, no issues
-- **Blinking green** — forwarding in progress
-- **Solid red** — disk full or critical error
-- **Blinking red** — shutdown in progress (hot-unplug detected)
+### LED status colours
+
+The LED is a pure state machine: it emits one of six **solid** colours, and the
+most severe active condition wins (safe-to-remove → critical → warning → active
+→ idle → off). There is no blink state and no amber state — blink cadence is a
+hardware-layer presentation concern, so a steady colour is all you will ever
+observe.
+
+| LED | Gateway state |
+|-----|---------------|
+| Solid off (⚫) | Gateway stopped |
+| Solid blue (🔵) | Idle — receiver and forwarder running, nothing queued or sending |
+| Solid green (🟢) | Active — a study is being received or forwarded (queued or in flight) |
+| Solid yellow (🟡) | Warning — a retry/error is present, or disk usage is at or over the warning threshold |
+| Solid red (🔴) | Critical — forwarder stopped while the receiver is still accepting studies, or disk over threshold with auto-purge disabled |
+| Solid white (⚪) | Safe to remove — shutdown sequence completed and the shutdown marker written |
 
 ## Operating safely
 
 - **Always shut down the gateway before unplugging the USB** — use the web
-  admin panel's **Stop** button, or wait for the LED to go solid amber
+  admin panel's **Stop** button, or wait for the LED to go solid white
   (shutdown complete). The gateway flushes the spool and writes a shutdown
   marker.
 - **Hot-unplug protection** — if the USB is removed unexpectedly, the gateway

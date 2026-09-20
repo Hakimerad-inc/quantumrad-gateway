@@ -9,7 +9,16 @@ dependencies = [
     "pynetdicom>=3.0.4",
     "fastapi>=0.115",
     "uvicorn>=0.30",
-    "numpy>=1.26",
+    # Not imported anywhere in this tree (verified: zero `import numpy` across
+    # src/, tests/, scripts/, e2e/), so it is not a real direct dependency —
+    # uv resolves it on its own. It stays declared because pylibjpeg-rle
+    # requires it for RLE pixel-data decompression and pydicom's pixel_array
+    # path needs it at runtime; the explicit pin keeps a `uv pip tree` reader
+    # from seeing an undeclared runtime need, and protects the floor if
+    # pylibjpeg-rle's own constraint ever loosens. Floor is 2.0, not 1.26:
+    # 1.26 is EOL and the 1.x floor implied a line we do not support, while
+    # uv.lock resolves 2.5.2.
+    "numpy>=2.0",
     "cryptography>=50.0.1",
     "pylibjpeg-rle>=2.2.0",
     "paramiko>=5.0.0",

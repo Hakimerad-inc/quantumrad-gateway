@@ -15,7 +15,7 @@ export interface FlowNode {
   y: number;
   w?: number;
   h?: number;
-  /** status dot color token suffix: green | gray | yellow | red | accent */
+  /** status dot color token suffix: green | gray | yellow | red */
   dot: string;
   selected?: boolean;
   onClick?: () => void;

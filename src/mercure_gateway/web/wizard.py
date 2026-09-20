@@ -6,9 +6,12 @@ Guides a non-technical user through initial gateway configuration in the SPA:
 
 Each step has a **validation gate**; a step cannot be completed until its data
 passes.  The wizard can only be saved (``is_complete()``) once every step is
-complete.  This module holds the pure state-machine logic; the SPA drives it
-over ``GET/POST /api/wizard`` and the C-ECHO service (``web/echo.py``) powers
-the per-step connectivity validation.
+complete.  This module holds the pure state-machine logic; the SPA exercises
+it through the one wizard route that ships — ``POST /api/wizard/validate/{step}``,
+which answers the gate's error list for a step — and the C-ECHO service
+(``web/echo.py``, reached via ``POST /api/echo``) powers the per-step
+connectivity validation.  The completed data itself is persisted by the SPA
+through the regular ``PUT /api/config``, not by a wizard-specific endpoint.
 
 The ``admin`` step collects the panel password as **plaintext** — the SPA never
 holds or round-trips a hash — and posts it to ``POST /api/web-ui/password``,

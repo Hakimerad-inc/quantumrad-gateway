@@ -3,8 +3,8 @@ name = "mercure-gateway"
 version = "1.1.0-rc3"
 description = "Lightweight desktop DICOM gateway (store-and-forward) — Tauri shell"
 authors = ["mercure-gateway"]
-edition = "2021"
-rust-version = "1.77.2"
+edition = "2024"
+rust-version = "1.85"
 
 [lib]
 name = "mercure_gateway_lib"
@@ -18,6 +18,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-log = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"

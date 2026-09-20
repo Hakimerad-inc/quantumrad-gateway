@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from mercure_gateway.config import DICOMDestination
@@ -129,6 +131,55 @@ def test_count_routes_by_target(spool: Spool, target_hub: DICOMDestination) -> N
     }
     assert rollup[("hub", "complete")] == 1
     assert rollup[("hub", "error")] == 1
+
+
+def test_count_studies_since(spool: Spool) -> None:
+    """The "received last hour" figure counts in SQL against created_at."""
+    recent_id = spool.receive("1.2.3.4")
+    old_id = spool.receive("1.2.3.5")
+    # Backdate one study outside the hour window (created_at is UTC text).
+    spool.database.connection().execute(
+        "UPDATE studies SET created_at = ? WHERE id IN (?, ?)",
+        ("2000-01-01 00:00:00", recent_id, old_id),
+    )
+
+    an_hour_ago = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    assert spool.database.count_studies_since(an_hour_ago) == 0
+    assert spool.database.count_studies_since("2000-01-01 00:00:00") == 2
+    assert spool.database.count_studies_since("2999-01-01 00:00:00") == 0
+
+
+def test_pipeline_aggregates_use_covering_indexes(spool: Spool) -> None:
+    """The pipeline aggregates answer from indexes, not full table scans.
+
+    /api/pipeline is polled continuously and these aggregates take the same
+    lock the receive path needs, so a plan that falls back to scanning the
+    tables is the regression these tests exist to catch.
+    """
+    conn = spool.database.connection()
+
+    def uses_index(sql: str, index: str) -> bool:
+        plan = conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+        return any(index in row[3] for row in plan)
+
+    assert uses_index(
+        "SELECT COUNT(*) FROM studies WHERE created_at >= '2000-01-01 00:00:00'",
+        "idx_studies_created_at",
+    )
+    assert uses_index(
+        """
+        SELECT target_name, target_type, status, COUNT(*), MAX(updated_at)
+        FROM task_routing GROUP BY target_name, target_type, status
+        """,
+        "idx_task_routing_target",
+    )
+    assert uses_index(
+        """
+        SELECT COALESCE(SUM(m.num_bytes), 0) FROM instance_meta AS m
+        JOIN studies AS s ON s.study_uid = m.study_uid
+        """,
+        "idx_instance_meta_bytes",
+    )
 
 
 def test_list_recent_routes_orders_and_joins(

@@ -1,13 +1,15 @@
 """Frozen-sidecar provenance guards (review P0-2).
 
 ``scripts/package_backend.py`` freezes the Python backend into a Tauri
-sidecar. Nothing else in the pipeline compares the frozen bundle to the
-current tree, so a stale snapshot shipped silently — the committed one was
+sidecar. A stale snapshot shipped silently once — the committed one was
 1.1.0-rc1 and predated ``_enforce_bind_security``, meaning a locally built
 installer would have booted an unauthenticated admin panel on the LAN.
 
-These tests cover the two things that catch that: the packaging build
-refuses a version mismatch, and the repo carries no stale snapshot.
+The comparison now runs at both ends of the chain: this script when it
+freezes, and ``src-tauri/build.rs`` on every ``cargo tauri build`` (the
+documented pipeline is two steps, and skipping the first used to skip the
+only check). These tests cover the guard in the script, the repo's own
+cleanliness, and that the two implementations agree on what to compare.
 """
 
 from __future__ import annotations
@@ -88,6 +90,36 @@ def test_provenance_records_the_source_commit_and_version(tmp_path: Path) -> Non
     assert "pyinstaller" in record
 
 
+def test_rust_build_guard_parses_the_same_files_and_version() -> None:
+    """``src-tauri/build.rs`` mirrors this script's paths and version parse.
+
+    The frozen-sidecar check now runs from two places: this script, and the
+    Cargo build script (which catches the documented two-step chain where a
+    developer freezes once and then runs ``cargo tauri build`` from a newer
+    tree). The two must agree on *what to compare*, or one passes while the
+    other bundles a stale backend — a mismatch only visible the day a real
+    check actually fires.
+    """
+    build_rs = (REPO / "src-tauri" / "build.rs").read_text(encoding="utf-8")
+
+    # The Rust guard hardcodes the same relative paths this script uses. If
+    # either side moves a file without the other, both sides quietly check a
+    # path that no longer exists and the guard no-ops.
+    for needle in (
+        '"binaries/mercure-gateway/_internal/mercure_gateway/__init__.py"',
+        '"../src/mercure_gateway/__init__.py"',
+        '"binaries/mercure-gateway/PROVENANCE.json"',
+    ):
+        assert needle in build_rs, f"src-tauri/build.rs no longer names {needle}"
+
+    # And it must accept what this script accepts: the canonical version line,
+    # which opens with comment lines the parser has to scan past.
+    init = (REPO / "src" / "mercure_gateway" / "__init__.py").read_text(encoding="utf-8")
+    canonical = re.search(r'^__version__\s*=\s*"([^"]+)"', init, re.M)
+    assert canonical is not None
+    assert package_backend._source_version() == canonical.group(1)
+
+
 def test_no_stale_sidecar_snapshot_is_committed() -> None:
     """The repo must not carry a frozen bundle older than the source.
 
@@ -99,6 +131,11 @@ def test_no_stale_sidecar_snapshot_is_committed() -> None:
     snapshot = REPO / "src-tauri" / "binaries" / "mercure-gateway"
     if not snapshot.exists():
         return  # clean tree — nothing to be stale
+    # ``scripts/tauri_placeholders.py`` leaves a zero-byte marker so cargo has
+    # well-defined bundle inputs; it is not a bundle and carries no version.
+    marker = snapshot / "mercure-gateway"
+    if marker.exists() and marker.stat().st_size == 0:
+        return  # placeholder, never shipped
     frozen = package_backend._frozen_version()
     assert frozen is not None, (
         f"a frozen sidecar exists at {snapshot} but reports no version — "

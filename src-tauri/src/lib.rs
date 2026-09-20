@@ -9,6 +9,8 @@ use tauri::{
 };
 use tauri_plugin_shell::ShellExt;
 
+mod sidecar;
+
 // Tray states matching the Python derive_tray_state() output.
 const TRAY_IDLE: u8 = 0;
 const TRAY_SENDING: u8 = 1;

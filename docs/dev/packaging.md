@@ -30,6 +30,20 @@ uv run python scripts/package_backend.py
 cd src-tauri && cargo tauri build
 ```
 
+Step 2 is not just a packaging step — `src-tauri/build.rs` compares the
+frozen bundle's `__version__` against the source tree and fails the build
+if they disagree, so a sidecar carried over from an older checkout cannot be
+bundled even by someone who skips step 1. A missing `PROVENANCE.json` beside
+a real bundle fails for the same reason. The guard no-ops when nothing is
+frozen, so the dev path below is unaffected.
+
+The parsers behind that guard live in `src-tauri/src/sidecar.rs`, and
+`build.rs` includes them with `#[path]`. That indirection exists because
+`cargo test` compiles a build script *as a build script* and never runs its
+`#[cfg(test)]` module — parsers unit-tested in `build.rs` would be green and
+execute nowhere. In the crate, `cargo test` covers them; in the build script,
+the same code does the real check.
+
 For local development without the frozen bundle:
 
 ```bash

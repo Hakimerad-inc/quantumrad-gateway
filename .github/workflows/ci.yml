@@ -350,6 +350,12 @@ jobs:
         run: uv run python scripts/package_backend.py
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
+      # The provenance parsers live in src/sidecar.rs so that this ordinary
+      # `cargo test` covers them; in build.rs they would compile but never
+      # run, since cargo builds a build script as a build script only.
+      - name: Unit-test the build script's provenance parsers
+        run: cargo test
+        working-directory: src-tauri
       - name: Build Tauri app (Linux AppImage + deb)
         run: cargo tauri build --bundles deb,appimage
         working-directory: src-tauri

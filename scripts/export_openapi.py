@@ -8,10 +8,16 @@ The schema is the source of truth for the SPA's generated TypeScript types
 
 or, equivalently:
 
-    uv run python scripts/export_openapi.py --output ../mercure-gateway.openapi.json
+    uv run python scripts/export_openapi.py --output mercure-gateway.openapi.json
     cd web && npx openapi-typescript ../mercure-gateway.openapi.json -o src/types/api-schema.ts
 
 Writes to stdout when no ``--output`` is given, for piping into other tools.
+
+A relative ``--output`` resolves against the repository root (beside the
+justfile), never the caller's cwd: ``../mercure-gateway.openapi.json`` from
+``web/`` lands one directory *above* the repo, leaving the in-repo schema
+stale while ``gen-api`` reports success — the drift ``gen-api-check`` exists
+to catch, reintroduced by the very command meant to prevent it.
 """
 
 from __future__ import annotations

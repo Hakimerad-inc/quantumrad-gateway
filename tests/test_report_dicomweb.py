@@ -298,6 +298,35 @@ def test_factory_builds_from_query_source(tmp_path: Path) -> None:
     assert callable(transport.retrieve)
 
 
+def test_factory_service_root_is_configurable(tmp_path: Path) -> None:
+    """The QIDO/WADO root follows ``source.path`` rather than a hardcoded prefix.
+
+    Orthanc serves DICOMweb at ``/dicomweb``; dcm4chee and most cloud stores
+    do not. A hardcoded prefix made the transport 404 for any server not laid
+    out like the one it was written against, with no setting to fix it.
+    """
+    from mercure_gateway.reports.dicomweb import build_dicomweb_transport
+
+    # Unset path ⇒ the Orthanc-style default, so nothing already deployed moves.
+    default = build_dicomweb_transport(
+        ReportQuerySource(type="dicomweb", host="pacs.local", port=443, aet="GATEWAY"),
+        reports_dir=tmp_path,
+    )
+    assert default._base_url == "https://pacs.local:443/dicomweb"
+
+    custom = build_dicomweb_transport(
+        ReportQuerySource(
+            type="dicomweb",
+            host="pacs.local",
+            port=8443,
+            aet="GATEWAY",
+            path="dcm4chee-arc/aets/DCM4CHEE/rs",
+        ),
+        reports_dir=tmp_path,
+    )
+    assert custom._base_url == "https://pacs.local:8443/dcm4chee-arc/aets/DCM4CHEE/rs"
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Path-traversal guard (P0-1): the UIDs in a QIDO match are server-controlled
 # and compose the save path, so a malicious DICOMweb server can otherwise write

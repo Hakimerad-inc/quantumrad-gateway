@@ -116,7 +116,7 @@ refresh-sidecar:
 # change to a pydantic model or a route signature. Forgetting this leaves the
 # frontend compiling against a backend that no longer has that shape.
 gen-api:
-    uv run python scripts/export_openapi.py --output ../mercure-gateway.openapi.json
+    uv run python scripts/export_openapi.py --output mercure-gateway.openapi.json
     cd web && npx openapi-typescript ../mercure-gateway.openapi.json -o src/types/api-schema.ts
 
 # CI guard: fail if the committed api-schema.ts is not what the current

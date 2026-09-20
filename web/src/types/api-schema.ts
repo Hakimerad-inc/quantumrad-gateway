@@ -1543,7 +1543,7 @@ export interface components {
         };
         /**
          * ReportQuerySource
-         * @description PACS endpoint used for report retrieval (C-FIND/C-MOVE).
+         * @description PACS endpoint used for report retrieval (C-FIND/C-MOVE or QIDO/WADO).
          */
         ReportQuerySource: {
             /**
@@ -1558,6 +1558,12 @@ export interface components {
             port: number;
             /** Aet */
             aet: string;
+            /**
+             * Path
+             * @description QIDO/WADO service root for a 'dicomweb' source (e.g. 'dicomweb', 'dcm4chee-arc/aets/DCM4CHEE/rs'). Ignored by the 'dicom' type. Leading and trailing slashes are optional.
+             * @default dicomweb
+             */
+            path: string;
             /**
              * Timeout Sec
              * @description Association timeout for the report C-FIND/C-MOVE. None uses the DIMSE default (30 s). A PACS that never answers the association would otherwise hang the report poller and stop retrieval silently (review P1-12).

@@ -17,6 +17,7 @@ import socket
 import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydicom.dataset import Dataset, FileMetaDataset
@@ -204,4 +205,117 @@ def test_disabled_reports_leaves_transports_unwired(tmp_path: Path) -> None:
 
     retriever, _db, _spool = _retriever(cfg, tmp_path)
     assert retriever.finder is None
+    assert retriever.mover is None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DICOMweb query sources: build_dicomweb_transport() existed and was tested,
+# but no factory registered it — a valid dicomweb source fell through to the
+# registry's generic cls(source) fallback, which raised TypeError (the
+# constructor needs base_url), and the except in _build_report_retriever
+# swallowed it to a log line. Reports looked configured and retrieved nothing.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _dicomweb_config(
+    tmp_path: Path, *, path: str = "dicomweb", port: int = 8443
+) -> GatewayConfig:
+    cfg = default_config()
+    cfg.storage = StorageConfig(spool_dir=str(tmp_path / "spool"))
+    cfg.reports = ReportConfig(
+        enabled=True,
+        query_source=ReportQuerySource(
+            type="dicomweb", host="pacs.local", port=port, aet="GATEWAY", path=path
+        ),
+    )
+    return cfg
+
+
+@patch("requests.get")
+def test_dicomweb_query_source_wires_a_working_transport(
+    mock_get: MagicMock, tmp_path: Path
+) -> None:
+    """A dicomweb source builds its transport through the composition root.
+
+    Before the factory was registered this left finder/mover None and every
+    report FAILED — the feature's own test suite passed because it built the
+    transport directly, bypassing the composition root entirely.
+    """
+    resp = MagicMock()
+    resp.ok = True
+    resp.json.return_value = []  # no report instances on the server
+    mock_get.return_value = resp
+
+    retriever, _db, _spool = _retriever(_dicomweb_config(tmp_path), tmp_path)
+    assert retriever.finder is not None, "dicomweb source left finder unwired"
+    assert retriever.mover is not None, "dicomweb source left mover unwired"
+
+    # The wired transport actually queries the configured service root — this
+    # is the call that used to never happen.
+    assert retriever.finder(study_uid="1.2.3") == []
+    url = mock_get.call_args[0][0]
+    assert url.startswith("https://pacs.local:8443/dicomweb/studies")
+
+
+@patch("requests.get")
+def test_dicomweb_service_root_is_configurable(mock_get: MagicMock, tmp_path: Path) -> None:
+    """The QIDO/WADO root is not hardcoded: dcm4chee and cloud stores differ.
+
+    A hardcoded /dicomweb made the transport unreachable for any server not
+    laid out like the one it was written against, failing with a 404 the
+    operator could not map to a setting that does not exist.
+    """
+    resp = MagicMock()
+    resp.ok = True
+    resp.json.return_value = []
+    mock_get.return_value = resp
+
+    cfg = _dicomweb_config(
+        tmp_path, path="dcm4chee-arc/aets/DCM4CHEE/rs/", port=8443
+    )
+    retriever, _db, _spool = _retriever(cfg, tmp_path)
+    assert retriever.finder is not None
+    retriever.finder(study_uid="1.2.3")
+
+    url = mock_get.call_args[0][0]
+    # Leading/trailing slashes are tolerated in either form.
+    assert url.startswith("https://pacs.local:8443/dcm4chee-arc/aets/DCM4CHEE/rs/studies")
+
+
+def test_dicomweb_query_source_over_https_verifies_tls(tmp_path: Path) -> None:
+    """Report content over plaintext HTTP is not offered by default."""
+    from mercure_gateway.reports.dicomweb import build_dicomweb_transport
+
+    transport = build_dicomweb_transport(
+        _dicomweb_config(tmp_path).reports.query_source,  # type: ignore[arg-type]
+        reports_dir=tmp_path / "reports",
+    )
+    assert transport._base_url.startswith("https://")
+    assert transport._verify_tls is True
+
+
+@pytest.mark.parametrize("experimental_type", ["fhir", "hl7"])
+def test_experimental_transports_are_refused_not_silently_broken(
+    experimental_type: str, tmp_path: Path
+) -> None:
+    """HL7/FHIR builds cleanly and then raises on every poll.
+
+    So the registry's dispatch would log "report retrieval wired" and fail
+    each report at runtime with NotImplementedError. The flag lives with the
+    transport; while it is off, boot must refuse the source outright.
+    """
+    cfg = default_config()
+    cfg.storage = StorageConfig(spool_dir=str(tmp_path / "spool"))
+    cfg.reports = ReportConfig(
+        enabled=True,
+        query_source=ReportQuerySource(
+            type=experimental_type,  # type: ignore[arg-type]
+            host="pacs.local",
+            port=8443,
+            aet="GATEWAY",
+        ),
+    )
+
+    retriever, _db, _spool = _retriever(cfg, tmp_path)
+    assert retriever.finder is None, f"{experimental_type} source was wired anyway"
     assert retriever.mover is None

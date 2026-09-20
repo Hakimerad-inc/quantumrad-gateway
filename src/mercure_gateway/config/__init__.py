@@ -285,12 +285,26 @@ class ForwardingRule(_StrictConfigModel):
 
 
 class ReportQuerySource(_StrictConfigModel):
-    """PACS endpoint used for report retrieval (C-FIND/C-MOVE)."""
+    """PACS endpoint used for report retrieval (C-FIND/C-MOVE or QIDO/WADO)."""
 
     type: Literal["dicom", "dicomweb", "fhir", "hl7"] = "dicom"
     host: str = Field(min_length=1)
     port: int = Field(ge=1, le=65535)
     aet: str = Field(min_length=1, max_length=16)
+    # Read only by the "dicomweb" type: the QIDO/WADO service root below the
+    # host:port. Orthanc serves it at /dicomweb, dcm4chee under a longer
+    # per-AET path, cloud stores under a full resource path — a hardcoded
+    # prefix made the transport unreachable for every server not laid out like
+    # the one it was written against.
+    path: str = Field(
+        default="dicomweb",
+        min_length=1,
+        description=(
+            "QIDO/WADO service root for a 'dicomweb' source (e.g. 'dicomweb', "
+            "'dcm4chee-arc/aets/DCM4CHEE/rs'). Ignored by the 'dicom' type. "
+            "Leading and trailing slashes are optional."
+        ),
+    )
     timeout_sec: float | None = Field(
         default=None,
         ge=1.0,

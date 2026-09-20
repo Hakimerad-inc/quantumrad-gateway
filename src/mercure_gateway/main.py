@@ -357,6 +357,42 @@ def _build_report_retriever(
             )
 
         register_factory("dicom", _dicom_factory)
+    elif source.type == "dicomweb":
+        # The registry's generic ``cls(source)`` fallback cannot build this
+        # transport either: DICOMwebReportTransport takes keyword-only
+        # base_url + reports_dir, and ReportQuerySource carries neither.
+        # Before this factory was wired, a *valid* dicomweb query source fell
+        # through to that fallback, raised TypeError, and landed in the
+        # except below — report retrieval silently off, with only a boot-time
+        # error log to say why. The feature looked configured and did nothing.
+        from mercure_gateway.reports.dicomweb import build_dicomweb_transport
+
+        reports_dir = Path(config.storage.spool_dir) / "reports"
+
+        def _dicomweb_factory(src: ReportQuerySource) -> Any:
+            # QIDO/WADO carry report content over HTTPS; plaintext HTTP to a
+            # PACS is a downgrade this gateway should not offer by default.
+            return build_dicomweb_transport(
+                src, reports_dir=reports_dir, verify_tls=True
+            )
+
+        register_factory("dicomweb", _dicomweb_factory)
+
+    if source.type in ("fhir", "hl7"):
+        # HL7FHIRTransport *builds* cleanly and then raises NotImplementedError
+        # on every find/retrieve, so the registry's dispatch would log
+        # "report retrieval wired" and fail each report at poll time. Refusing
+        # here gives one clear boot-time message instead of a FAILED report
+        # per study. The flag lives with the transport (S08-Q5).
+        from mercure_gateway.reports.hl7_fhir import ENABLED as _HL7_FHIR_ENABLED
+
+        if not _HL7_FHIR_ENABLED:
+            logger.error(
+                "query_source.type=%r is experimental and not enabled in this "
+                "build; report retrieval is disabled",
+                source.type,
+            )
+            return retriever
 
     try:
         transport = transport_for_query_source(source)
@@ -370,9 +406,10 @@ def _build_report_retriever(
         return retriever
     except TypeError as exc:
         # A registered transport whose constructor needs more than the query
-        # source (dicomweb needs base_url, which ReportQuerySource does not
-        # carry) and has no factory wired here yet. Report retrieval stays off
-        # rather than crashing the boot — the poller logs the gap per report.
+        # source and has no factory wired here yet (both built-in types have
+        # one; this guards a future transport added without the composition
+        # root closing over its context). Report retrieval stays off rather
+        # than crashing the boot — the poller logs the gap per report.
         logger.error(
             "report transport for query_source.type=%r could not be built "
             "from the query source (%s); report retrieval is disabled",

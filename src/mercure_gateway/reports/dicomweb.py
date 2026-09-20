@@ -216,9 +216,17 @@ def _json_ui(value: Any) -> str:
 def build_dicomweb_transport(
     source: ReportQuerySource, *, reports_dir: Path, verify_tls: bool = True
 ) -> DICOMwebReportTransport:
-    """Build a DICOMweb transport from a ``dicomweb`` query source."""
+    """Build a DICOMweb transport from a ``dicomweb`` query source.
+
+    The service root comes from ``source.path``: Orthanc serves QIDO/WADO at
+    ``/dicomweb``, dcm4chee under a longer per-AET path, and cloud DICOM stores
+    under a full resource path, so a hardcoded prefix made this transport
+    unreachable for anything not laid out like the server it was written
+    against.
+    """
     scheme = "https" if verify_tls else "http"
-    base_url = f"{scheme}://{source.host}:{source.port}/dicomweb"
+    root = source.path.strip("/")
+    base_url = f"{scheme}://{source.host}:{source.port}/{root}"
     return DICOMwebReportTransport(
         base_url=base_url,
         reports_dir=reports_dir,

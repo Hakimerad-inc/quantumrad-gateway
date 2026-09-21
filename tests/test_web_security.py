@@ -5,6 +5,8 @@ Security tests: XSS prevention, CSRF enforcement, and security headers.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -446,3 +448,168 @@ def test_session_secret_is_per_process() -> None:
     # A cookie minted by app A does not authenticate against app B.
     b.cookies["mercure_session"] = token
     assert b.get("/api/system/status").status_code == 401
+
+
+def _logout(client: TestClient, *, bearer: str | None = None) -> None:
+    """Invoke ``logout()`` with the request threaded through.
+
+    This is the call the ``/api/logout`` route makes once it passes
+    ``request`` along — a one-line change in ``web/routes.py``, which this
+    batch does not own (batch B5B6B7B10 does).  Until then the revocation is
+    driven from here against the client's real app state, reading the token
+    from the same cookie jar (or the same Authorization header) the route
+    would read it from, so nothing about the mechanism is stubbed.
+    """
+    from fastapi import Request, Response
+
+    from mercure_gateway.web.auth import logout
+
+    if bearer is not None:
+        headers = [(b"authorization", f"Bearer {bearer}".encode())]
+    else:
+        headers = [
+            (b"cookie", f"mercure_session={client.cookies['mercure_session']}".encode())
+        ]
+    request = Request(
+        {"type": "http", "scheme": "http", "app": client.app, "headers": headers}
+    )
+    logout(Response(), secure=False, request=request)
+
+
+def test_logout_invalidates_the_token_cookie_path() -> None:
+    """A logged-out cookie stops authorising, not just stops being sent.
+
+    Before this, ``logout`` deleted the cookie and nothing else: the token
+    stayed cryptographically valid for its full 12 h TTL, so a cookie
+    captured off the wire kept working after the operator logged out.
+    """
+    client = _authed_client()
+    token = client.cookies["mercure_session"]
+    assert client.get("/api/system/status").status_code == 200
+
+    _logout(client)
+
+    # The captured cookie, replayed by hand after logout, is now refused.
+    client.cookies["mercure_session"] = token
+    assert client.get("/api/system/status").status_code == 401
+
+
+def test_the_logout_route_revokes_not_just_the_cookie() -> None:
+    """The shipped ``POST /api/logout`` endpoint actually reaches the revocation.
+
+    Every other test in this section drives ``auth.logout`` through the
+    ``_logout`` helper with a hand-built Starlette request — which the route
+    used to make by not passing *request*, so the revocation mechanism
+    existed but no HTTP request could reach it.  The endpoint deleted the
+    cookie and the token stayed valid: replaying the captured cookie against
+    a protected route after a *real* logout returned 200, not 401.
+
+    This test goes through the wire, so it fails the day the route stops
+    threading *request* through again.
+    """
+    client = _authed_client()
+    token = client.cookies["mercure_session"]
+    assert client.get("/api/system/status").status_code == 200
+
+    assert client.post("/api/logout").status_code == 200
+
+    # The cookie the client still holds (the TestClient jar keeps it until
+    # it is overwritten) is replayed by hand, as a captured one would be.
+    client.cookies["mercure_session"] = token
+    assert client.get("/api/system/status").status_code == 401
+
+    # And the bearer presentation of the same token is dead too.
+    assert (
+        client.get(
+            "/api/system/status", headers={"Authorization": f"Bearer {token}"}
+        ).status_code
+        == 401
+    )
+
+
+def test_logout_invalidates_a_bearer_token() -> None:
+    """The Authorization: Bearer path is revocable too.
+
+    ``require_auth`` accepts a bearer token for the Tauri shell and
+    scripting, and logout never touched that path at all — so a token
+    exfiltrated to a script outlived logout indefinitely.  This is also the
+    first test in the repository to exercise the bearer path at all: grep
+    ``tests/`` for "Bearer" before this change and the count is zero.
+    """
+    client = _authed_client()
+    token = client.cookies["mercure_session"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/api/system/status", headers=headers).status_code == 200
+
+    _logout(client, bearer=token)
+
+    assert client.get("/api/system/status", headers=headers).status_code == 401
+
+
+def test_revocation_does_not_break_a_fresh_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revoking one token does not wedge the auth path: a new login works.
+
+    The mint is ``int(time.time()) + TTL`` and the payload *is* the expiry,
+    so two logins inside the same second produce the identical token string.
+    The clock is nudged 5 s here so the fresh login mints a genuinely
+    different token — without that the test would be replaying the very token
+    it just revoked, and would pass or fail for the wrong reason.
+    """
+    from types import SimpleNamespace
+
+    import mercure_gateway.web.auth as auth_module
+
+    client = _authed_client()
+    dead_token = client.cookies["mercure_session"]
+    _logout(client)
+
+    real_now = time.time()
+    monkeypatch.setattr(
+        auth_module, "time", SimpleNamespace(time=lambda: real_now + 5.0)
+    )
+
+    assert client.post("/api/login", json={"password": "s3cret"}).status_code == 200
+    new_token = client.cookies["mercure_session"]
+    assert new_token != dead_token
+    # The fresh session authenticates…
+    assert client.get("/api/system/status").status_code == 200
+    # …while the revoked one is still revoked, i.e. the store is keyed per
+    # token and is not a blanket "reject everything" flag.
+    client.cookies["mercure_session"] = dead_token
+    assert client.get("/api/system/status").status_code == 401
+
+
+def test_revocation_list_does_not_accumulate_expired_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revoked entry outlives its own TTL only until the next read.
+
+    The token would have expired anyway, so an entry past its expiry can
+    never match a live presentment again — the sweep on read drops it, and
+    the list's size is bounded by tokens logged out within one TTL rather
+    than by every logout the process ever served.
+    """
+    from mercure_gateway.web.auth import (
+        _SESSION_TTL_SEC,
+        RevocationStore,
+        create_session_token,
+    )
+
+    store = RevocationStore()
+    store.revoke(create_session_token("secret"))
+    assert len(store) == 1
+
+    # Advance past the token's own 12 h expiry.
+    now = time.time()
+    monkeypatch.setattr(store, "_now", lambda: now + _SESSION_TTL_SEC + 1)
+
+    assert store.is_revoked("not-even-a-real-token") is False
+    assert len(store) == 0
+
+    # The *stored* dict is what accumulates, not the filtered live count.
+    # __len__ filters on read, so asserting only on it would pass with the
+    # sweep disabled and every token the process ever logged out still held
+    # in memory — the exact unbounded growth this is meant to prevent.
+    assert store._revoked == {}

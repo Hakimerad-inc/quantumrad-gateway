@@ -104,15 +104,26 @@ class ReportFinder:
         study_uid: str | None = None,
         accession: str | None = None,
         report_types: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[ReportMatch]:
         """C-FIND the PACS for report instances matching the criteria.
 
         Returns a list of :class:`ReportMatch`; empty list when the PACS has
         no matching report instances.  Raises :class:`ReportFinderError` when
         the association cannot be established (PACS unreachable/rejected).
+
+        ``limit`` caps the number of *matches* collected.  ``send_c_find``
+        returns a lazy iterator, so once ``limit`` matches have been appended
+        the loop breaks and the association is released in the ``finally``
+        block — the SCP is never asked for results this caller will not read.
+        A retrieval that only persists one instance (``_do_retrieve``) should
+        pass ``limit=1`` rather than C-MOVE a whole study.  ``None`` (default)
+        collects every match, preserving the behaviour of existing callers.
         """
         if not study_uid and not accession:
             raise ValueError("provide study_uid or accession")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be a positive integer")
         report_types = report_types or ["sr", "pdf"]
         wanted_sops = {_REPORT_SOP_CLASSES[t] for t in report_types if t in _REPORT_SOP_CLASSES}
 
@@ -159,6 +170,14 @@ class ReportFinder:
                         sop_instance_uid=str(getattr(dataset, "SOPInstanceUID", "")),
                     )
                 )
+                if limit is not None and len(matches) >= limit:
+                    # Early stop. send_c_find is a lazy generator: abandoning it
+                    # here stops the SCP being interrogated for the remaining
+                    # results, and the finally block below still releases the
+                    # association. The 0x0000 Success break above stays the
+                    # authority on normal termination — a Success status that
+                    # arrives before the limit is hit still ends the query.
+                    break
         finally:
             assoc.release()
         return matches

@@ -42,7 +42,11 @@ class HL7FHIRTransport:
         study_uid: str | None = None,
         accession: str | None = None,
         report_types: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[ReportMatch]:
+        # ``limit`` is accepted to keep the ReportTransport signature uniform
+        # (see reports.transport): HL7 v2 ORU^R01 is a push protocol with no
+        # server-side query to bound, so there is nothing to do with it here.
         raise NotImplementedError(
             "HL7/FHIR report transport is experimental and not yet implemented"
         )

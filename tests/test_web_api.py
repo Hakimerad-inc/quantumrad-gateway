@@ -16,6 +16,7 @@ Endpoints tested (§7):
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -30,6 +31,29 @@ from mercure_gateway.spool import Spool, StudyState
 from mercure_gateway.spool.db import mem_database
 from mercure_gateway.web import create_app
 from mercure_gateway.web.auth import verify_password
+
+_SR_SOP = "1.2.840.10008.5.1.4.1.1.88.33"
+
+
+def _write_minimal_sr(path: str, study_uid: str = "1.1.1") -> str:
+    """Write a minimal SR DICOM file — a report the content endpoint can load."""
+    from pydicom.dataset import Dataset, FileMetaDataset
+    from pydicom.uid import ExplicitVRLittleEndian
+
+    ds = Dataset()
+    ds.SOPClassUID = _SR_SOP
+    ds.SOPInstanceUID = "1.2.3.4.5.6.7.1"
+    ds.StudyInstanceUID = study_uid
+    ds.SeriesInstanceUID = "1.2.3.4.5.6.100"
+    ds.file_meta = FileMetaDataset()
+    ds.file_meta.MediaStorageSOPClassUID = _SR_SOP
+    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.is_little_endian = True
+    ds.is_implicit_VR = False
+    ds.save_as(path, enforce_file_format=True)
+    return path
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -102,6 +126,24 @@ def test_system_status_hub_fields_populated(app, client: TestClient) -> None:
     data = r.json()
     assert data["hub_registered"] is False
     assert data["hub_streaming"] is False
+
+
+def test_system_status_reports_usb_mode(app, client: TestClient) -> None:
+    """The USB dongle variant is surfaced so a tray can hint safe removal (B10).
+
+    Read from the live config rather than a boot snapshot or a device probe:
+    usb_mode.enabled is what boot decided, there is no app.state key for it,
+    and hotplug surfaces removal events rather than current state.
+    """
+    assert client.get("/api/system/status").json()["usb_mode"] is False
+
+    cfg = client.get("/api/config").json()
+    cfg["usb_mode"]["enabled"] = True
+    r = client.put("/api/config", json=cfg)
+    assert r.status_code == 200
+
+    data = client.get("/api/system/status").json()
+    assert data["usb_mode"] is True
 
 
 def test_system_status_reports_pending_restart(client: TestClient) -> None:
@@ -916,7 +958,47 @@ def test_get_report_content(client: TestClient, spool: Spool) -> None:
     assert r.status_code == 200
     data = r.json()
     assert data["report_type"] == "sr"
-    assert data["file_path"] == "/tmp/report.dcm"
+    # file_path must NOT be echoed: the report row stores the server-side path
+    # of the retrieved DICOM object, which is not the client's business. The
+    # status is pending (no retriever wired), so this is the branch where the
+    # path used to leak alongside content=None.
+    assert "file_path" not in data
+
+
+def test_report_rows_carry_no_server_path(client: TestClient, spool: Spool, tmp_path: Path) -> None:
+    """No reports endpoint may echo the stored file_path (PHI-adjacent leak).
+
+    All three read paths — the list, the single row and the content body —
+    were built on ``SELECT * FROM reports``, which ships the column
+    unconditionally. A response model that omits the field is the enforcement;
+    these assertions prove the wire is clean rather than trusting the model.
+
+    The content branch reads the file for real, so the leak's own test object
+    is a stored DICOM object whose path must never reach the client.
+    """
+    sr_path = str(tmp_path / "secret-report.dcm")
+    _write_minimal_sr(sr_path)
+
+    study_id = spool.receive("1.1.1")
+    spool._db.insert_report(
+        study_id, "1.1.1", "sr", status="retrieved", file_path=sr_path
+    )
+    rows = client.get("/api/reports").json()
+    assert len(rows) == 1
+    assert "file_path" not in rows[0]
+
+    report_id = rows[0]["id"]
+    one = client.get(f"/api/reports/{report_id}").json()
+    assert "file_path" not in one
+    assert one["report_type"] == "sr"
+
+    content = client.get(f"/api/reports/{report_id}/content").json()
+    assert "file_path" not in content
+    assert content["status"] == "retrieved"
+    # The file was read (this is the dcmread branch, not the pending one) —
+    # a minimal SR renders nothing, so either rendered text or a render error
+    # is a fine outcome; a server path in either branch is not.
+    assert content["content"] is not None or content.get("error") is not None
 
 
 def test_get_report_content_not_found(client: TestClient) -> None:
@@ -970,6 +1052,234 @@ def test_verify_audit(client: TestClient, spool: Spool) -> None:
     data = r.json()
     assert data["valid"] is True
     assert data["errors"] == []
+    # The bounded-error contract (item B7): the UI needs the true total to say
+    # "showing N of M", and truncated is what makes the cap visible.
+    assert data["total_error_count"] == 0
+    assert data["truncated"] is False
+
+
+def test_verify_audit_reports_a_broken_chain(client: TestClient, spool: Spool) -> None:
+    """A tampered row is detected, and the error carries the event id."""
+    from mercure_gateway.audit import AuditLog
+
+    audit = AuditLog(spool._db)
+    audit.append("FIRST")
+    audit.append("SECOND")
+    # The append-only triggers block UPDATE, so the audit module's own prune
+    # path is the honest way to reach a broken link: rewrite a stored hash
+    # underneath the triggers.
+    from mercure_gateway.spool.db import _AUDIT_NO_DELETE, _AUDIT_NO_UPDATE
+
+    with spool._db.transaction() as conn:
+        conn.execute("DROP TRIGGER IF EXISTS audit_events_no_update")
+        conn.execute(
+            "UPDATE audit_events SET hash = 'not-the-real-hash' WHERE event = 'FIRST'"
+        )
+        conn.execute(_AUDIT_NO_UPDATE)
+        conn.execute(_AUDIT_NO_DELETE)
+
+    r = client.get("/api/audit/verify")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["valid"] is False
+    assert data["total_error_count"] >= 1
+    assert data["truncated"] is False
+    assert data["errors"][0]["reason"] == "hash mismatch"
+
+
+def test_verify_audit_caps_the_error_list(client: TestClient, spool: Spool) -> None:
+    """A corrupted log must not rebuild the whole table in the response body.
+
+    The verifier streams row by row; the response spells out at most
+    _MAX_VERIFY_ERRORS_SHOWN and counts the rest. A chain where every link is
+    broken is the worst case — months of history, one error per row.
+    """
+    from mercure_gateway.audit import AuditLog
+    from mercure_gateway.web.routes import _MAX_VERIFY_ERRORS_SHOWN
+
+    audit = AuditLog(spool._db)
+    n_events = _MAX_VERIFY_ERRORS_SHOWN + 500
+    for _ in range(n_events):
+        audit.append("FILLER")
+
+    # Break every link: the verifier propagates the *computed* hash, so
+    # rewriting one row's stored hash fails only that row. A corrupted log is
+    # the worst case only when every stored hash is wrong, which is what an
+    # attacker rewriting history and botching the recomputation looks like.
+    from mercure_gateway.spool.db import _AUDIT_NO_DELETE, _AUDIT_NO_UPDATE
+
+    with spool._db.transaction() as conn:
+        conn.execute("DROP TRIGGER IF EXISTS audit_events_no_update")
+        conn.execute("UPDATE audit_events SET hash = 'tampered'")
+        conn.execute(_AUDIT_NO_UPDATE)
+        conn.execute(_AUDIT_NO_DELETE)
+
+    r = client.get("/api/audit/verify")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["valid"] is False
+    assert data["total_error_count"] == n_events
+    assert data["truncated"] is True
+    assert len(data["errors"]) == _MAX_VERIFY_ERRORS_SHOWN
+    assert data["errors"][0]["reason"] == "hash mismatch"
+
+
+def test_iter_audit_events_steps_a_cursor_not_a_fetchall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chain walk steps a cursor; it never materializes the table (B7).
+
+    The point of the change is bounded peak memory on an appliance that has
+    accumulated months of audit rows.  Memory is awkward to assert on, and
+    the *consequences* people reach for do not actually work: a generator
+    that buffers is still lazy, so "a row appended after the walk starts is
+    not seen" is true under both, and on a file-backed database neither
+    implementation holds the write lock (that fallback only applies to
+    ``:memory:``).  Both of those tests pass against a ``fetchall()``
+    regression and are therefore not load-bearing.
+
+    What does distinguish them is the mechanism, so this asserts it: every
+    ``next()`` steps the cursor with one ``fetchone()``, and ``fetchall()`` is
+    never called.  Reverting to the pre-B7 implementation trips both halves.
+    """
+    import sqlite3
+
+    from mercure_gateway.audit import AuditLog
+    from mercure_gateway.spool.db import open_database
+
+    fetches: list[str] = []
+
+    class _SpyingCursor:
+        """Delegates to the real cursor, recording how it is stepped."""
+
+        def __init__(self, cur: sqlite3.Cursor) -> None:
+            self._cur = cur
+
+        def fetchone(self) -> object:
+            fetches.append("one")
+            return self._cur.fetchone()
+
+        def fetchall(self) -> list[sqlite3.Row]:
+            fetches.append("all")
+            return self._cur.fetchall()
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._cur, name)
+
+    class _SpyingConnection:
+        """Wraps the read connection so every cursor it hands out is spied on.
+
+        ``sqlite3.Cursor`` is an immutable type, so the cursor methods cannot
+        be monkeypatched in place — wrapping the connection at the seam the
+        walk actually goes through is the only way to observe the stepping.
+        """
+
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def execute(self, sql: str, *args: object) -> _SpyingCursor:
+            return _SpyingCursor(self._conn.execute(sql, *args))
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._conn, name)
+
+    db = open_database(tmp_path / "spool.db")
+    try:
+        real_read_connection = db._read_connection
+        monkeypatch.setattr(
+            db,
+            "_read_connection",
+            lambda: _SpyingConnection(real_read_connection()),
+        )
+        audit = AuditLog(db)
+        for name in ("ONE", "TWO", "THREE"):
+            audit.append(name)
+
+        it = iter(db.iter_audit_events())
+        # Interleave the consumer with the stepping: each yield must have
+        # exactly one fetchone behind it, and no fetchall anywhere.
+        seen: list[str] = []
+        while True:
+            before = len(fetches)
+            row = next(it, None)
+            if row is None:
+                break
+            seen.append(row["event"])
+            # One step per row — a buffered read would have done all three
+            # before the first yield.
+            assert fetches[before:] == ["one"], fetches[before:]
+
+        assert seen == ["ONE", "TWO", "THREE"]
+        assert "all" not in fetches, "the walk materialized the whole table"
+        # One step per row, plus the final empty step that ends the walk.
+        assert fetches == ["one", "one", "one", "one"], fetches
+    finally:
+        db.close()
+
+
+def test_iter_audit_events_takes_no_write_lock_mid_walk(tmp_path: Path) -> None:
+    """A walk in progress does not block an append on a file-backed database.
+
+    Before B7 the scan ran under ``_lock``; now it runs on the WAL read
+    connection and takes no write lock at all.  Leaving the iterator open
+    mid-walk while another thread appends is the observation that would hang
+    under the old code.
+
+    Note this is a real property of the read path, not a streaming test: a
+    ``fetchall()`` regression on a file-backed database would also pass it,
+    because the lock only guards the ``:memory:`` fallback.  See the companion
+    test above for the assertion that actually catches that regression.
+    """
+    from mercure_gateway.audit import AuditLog
+    from mercure_gateway.spool.db import open_database
+
+    db = open_database(tmp_path / "spool.db")
+    try:
+        audit = AuditLog(db)
+        audit.append("FILLER")
+
+        it = iter(db.iter_audit_events())
+        assert next(it)["event"] == "FILLER"
+
+        done: list[str] = []
+
+        def append_from_another_thread() -> None:
+            audit.append("MID_WALK")
+            done.append("appended")
+
+        t = threading.Thread(target=append_from_another_thread)
+        t.start()
+        t.join(timeout=10)
+        assert done == ["appended"], "concurrent append blocked on the walk's lock"
+
+        assert next(it, None) is None
+        fresh = open_database(tmp_path / "spool.db")
+        try:
+            rows = list(fresh.iter_audit_events())
+        finally:
+            fresh.close()
+        assert [r["event"] for r in rows] == ["FILLER", "MID_WALK"]
+    finally:
+        db.close()
+
+
+def test_verify_iter_is_lazy(spool: Spool) -> None:
+    """verify_iter yields one ChainError at a time and never buffers the table.
+
+    A healthy chain yields nothing; the point is that it did not read the
+    whole table to reach that answer — see the companion cursor test above for
+    the snapshot property that distinguishes streaming from buffering.
+    """
+    from mercure_gateway.audit import AuditLog
+
+    audit = AuditLog(spool._db)
+    for _ in range(50):
+        audit.append("FILLER")
+    assert list(audit.verify_iter()) == []
+    # verify() keeps its whole-list contract for the callers that want it.
+    ok, errors = audit.verify()
+    assert ok is True
+    assert errors == []
 
 
 def test_export_audit(client: TestClient, spool: Spool) -> None:

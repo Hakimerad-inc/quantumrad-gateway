@@ -430,20 +430,32 @@ class Spool:
 
         Only meaningful when the study was re-opened (new instance on a
         previously routed study); a fresh study has no routes yet.
+
+        Every reset commits in ONE transaction. The intent was an
+        ``executemany`` in the shape of ``Database.claim_next_tasks`` (one
+        statement for N routes, one round trip), but ``spool/db.py`` is owned
+        by another batch in this wave, so no new method can be added there.
+        The resets instead JOIN a single outer transaction opened here and
+        commit once — which delivers the property that actually matters: no
+        partially-requeued study is observable to a concurrent
+        ``claim_next_tasks`` between two route resets. Switching the loop body
+        to a real executemany later is a mechanical db.py change with no
+        caller-side impact.
         """
         routes = self._db.get_routes(study_id)
         row = self._db.get_study(study_id)
         if row is None or row["state"] != StudyState.RECEIVED.value:
             return  # SENDING (in-flight) or no routes — leave everything alone
-        for route in routes:
-            if route["status"] == "complete":
-                self._db.reset_route_waiting(route["id"])
-                logger.info(
-                    "new instance for study %d — route %d (%s) re-queued",
-                    study_id,
-                    route["id"],
-                    route["target_name"],
-                )
+        with self._db.transaction():
+            for route in routes:
+                if route["status"] == "complete":
+                    self._db.reset_route_waiting(route["id"])
+                    logger.info(
+                        "new instance for study %d — route %d (%s) re-queued",
+                        study_id,
+                        route["id"],
+                        route["target_name"],
+                    )
 
     # --- auto-enqueue (US-03: auto-forward received studies) ---------------
 
@@ -722,15 +734,34 @@ class Spool:
 
         When every target for the study is complete the study transitions
         SENDING → SENT; otherwise it stays SENDING. Returns the new study state.
+
+        Every write here runs in ONE transaction (review P2-x): the route
+        completion, the study state, and the retention stamp commit together.
+        They used to be up to four separate commits, and a concurrent
+        claim_next_tasks / complete could read ``route = complete`` with the
+        study still SENDING in the gap between them.
         """
         routes = self._db.get_routes(study_id)
         route = next((r for r in routes if r["target_name"] == target_name), None)
         if route is None:
             raise KeyError(f"no routing task for target {target_name!r} on study {study_id}")
-        self._db.mark_route_sent(route["id"])
-        if self._db.all_routes_complete(study_id):
-            self._db.set_study_state(study_id, StudyState.SENT.value)
-            self._db.set_retention_delivered(study_id)
+        # Resolved inside the transaction, emitted outside it. AuditLog.append
+        # JOINS an open transaction rather than opening its own (db.transaction
+        # nests by joining), so emitting in here would fire the hub sink while
+        # the state change is still uncommitted — reporting an event the outer
+        # commit could still roll back, against the audit invariant that only
+        # persisted events are reported (audit/__init__.py). Paying one extra
+        # transaction after the commit keeps commit-then-audit ordering.
+        all_sent = False
+        with self._db.transaction():
+            self._db.mark_route_sent(route["id"])
+            if self._db.all_routes_complete(study_id):
+                self._db.set_study_state(study_id, StudyState.SENT.value)
+                self._db.set_retention_delivered(study_id)
+                all_sent = True
+            else:
+                self._db.set_study_state(study_id, StudyState.SENDING.value)
+        if all_sent:
             self._emit(
                 STUDY_SENT,
                 {
@@ -739,8 +770,6 @@ class Spool:
                     "target_name": target_name,
                 },
             )
-        else:
-            self._db.set_study_state(study_id, StudyState.SENDING.value)
         return self.state(study_id)
 
     def fail(
@@ -751,15 +780,35 @@ class Spool:
         State: SENDING → ERROR while retries remain, → FAILED once
         ``max_attempts`` is exhausted (local copy is retained; PRD §3.3). Returns
         the new study state.
+
+        The route error and the study state commit in one transaction, so a
+        route is never observed as ``error`` on a study that still reads
+        SENDING. The audit event is emitted after the transaction closes —
+        see :meth:`complete` for why.
         """
         routes = self._db.get_routes(study_id)
         route = next((r for r in routes if r["target_name"] == target_name), None)
         if route is None:
             raise KeyError(f"no routing task for target {target_name!r} on study {study_id}")
+        # PRE-INCREMENT COMPARISON — load-bearing. claim_next bumps ``attempts``
+        # when it takes the route; this snapshot therefore already counts the
+        # attempt in flight, and ``attempts >= max_attempts`` fires on the call
+        # that exhausts the budget — fail(max_attempts=1) goes FAILED on the
+        # FIRST call (test_forwarder.py, test_audit_coverage.py). The read
+        # predates the write transaction below and keeps that arithmetic exactly
+        # as it was; moving it inside the transaction would read the same value
+        # (claim already committed), but the ordering is asserted elsewhere, so
+        # it stays here.
         attempts = int(route["attempts"])
-        self._db.mark_route_error(route["id"], error)
-        if attempts >= max_attempts:
-            self._db.set_study_state(study_id, StudyState.FAILED.value)
+        terminal = False
+        with self._db.transaction():
+            self._db.mark_route_error(route["id"], error)
+            if attempts >= max_attempts:
+                self._db.set_study_state(study_id, StudyState.FAILED.value)
+                terminal = True
+            else:
+                self._db.set_study_state(study_id, StudyState.ERROR.value)
+        if terminal:
             self._emit(
                 STUDY_FAILED,
                 {
@@ -770,8 +819,6 @@ class Spool:
                     "attempts": attempts,
                 },
             )
-        else:
-            self._db.set_study_state(study_id, StudyState.ERROR.value)
         return self.state(study_id)
 
     def enqueue_study(self, study_id: int) -> int:

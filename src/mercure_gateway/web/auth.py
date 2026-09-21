@@ -13,6 +13,8 @@ import hashlib
 import hmac
 import secrets
 import time
+from dataclasses import dataclass, field
+from threading import RLock
 
 from fastapi import HTTPException, Request, Response
 
@@ -20,12 +22,14 @@ from mercure_gateway.config import GatewayConfig
 
 __all__ = [
     "COOKIE_NAME",
+    "RevocationStore",
+    "attach_revocations",
     "create_session_token",
     "hash_password",
     "login",
     "logout",
-    "verify_password",
     "require_auth",
+    "verify_password",
 ]
 
 _COOKIE_NAME = "mercure_session"
@@ -40,6 +44,102 @@ _PBKDF2_ITERATIONS = 200_000
 _PBKDF2_HASH = "sha256"
 _SALT_BYTES = 16
 
+_REVOCATIONS_ATTR = "session_revocations"
+
+
+@dataclass
+class RevocationStore:
+    """In-process revocation list for signed session tokens (review P0-8).
+
+    The token carries nothing per-session — no session id, no issued-at, no
+    token id; its payload is literally the expiry epoch — so the only
+    quantity revocable short of the process-wide signing secret is the token
+    itself.  This holds the tokens ``logout`` has killed and is consulted on
+    every presentment, which is what makes a logout bind on the
+    ``Authorization: Bearer`` path as well as the cookie: a captured cookie
+    or an exfiltrated bearer token stops authorising the moment the operator
+    logs out, and does not spring back to life until its own 12 h TTL would
+    have expired it anyway.
+
+    The shape mirrors :class:`mercure_gateway.web.ratelimit.AttemptTracker`
+    deliberately: an ``RLock``-guarded dict, one instance per app on
+    ``app.state`` (:func:`attach_revocations`), lazily attached by
+    :func:`_revocations` so a router mounted without :func:`create_app` still
+    works.  In-process storage is consistent with the rest of the design —
+    the signing secret is already per-process, and single-worker uvicorn is
+    the documented deployment, so a second worker would mint its own secret
+    and reject this process's tokens regardless of what is stored here.
+
+    Entries cannot accumulate: a revoked token is dead weight only until its
+    own expiry, after which it could never authenticate again, so
+    :meth:`is_revoked` filters on read and drops the stale ones.  No timer
+    thread, no background task — the sweep rides along on the request that
+    would have been checking anyway.
+    """
+
+    _lock: RLock = field(default_factory=RLock, repr=False)
+    _revoked: dict[str, float] = field(default_factory=dict, repr=False)
+
+    def _now(self) -> float:
+        # Indirected (like AttemptTracker._now) so a test can move time
+        # without patching the stdlib.
+        return time.time()
+
+    @staticmethod
+    def _expiry_of(token: str) -> float:
+        """The expiry epoch encoded in *token*, 0 for a malformed token."""
+        try:
+            return float(token.rpartition(".")[0])
+        except ValueError:
+            return 0.0
+
+    def revoke(self, token: str) -> None:
+        """Mark *token* invalid for the remainder of its TTL."""
+        with self._lock:
+            self._revoked[token] = self._expiry_of(token)
+
+    def is_revoked(self, token: str) -> bool:
+        """Whether *token* has been logged out, sweeping stale entries first.
+
+        An entry whose expiry has passed is for a token that is already
+        invalid on its own, so dropping it cannot change any answer — only
+        the memory the list keeps holding.
+        """
+        now = self._now()
+        with self._lock:
+            if not self._revoked:
+                return False
+            stale = [t for t, exp in self._revoked.items() if exp <= now]
+            for t in stale:
+                del self._revoked[t]
+            return token in self._revoked
+
+    def __len__(self) -> int:
+        """Live (unexpired) revoked entries — the bound on the list."""
+        now = self._now()
+        with self._lock:
+            return sum(1 for exp in self._revoked.values() if exp > now)
+
+
+def attach_revocations(app: object) -> RevocationStore:
+    """Mint the revocation list at app construction (called by ``create_app``).
+
+    Not yet wired from :func:`mercure_gateway.web.create_app` — that file is
+    owned by another batch; :func:`_revocations` attaches lazily meanwhile,
+    exactly as :func:`mercure_gateway.web.ratelimit._tracker` does, so the
+    store is per-app either way and tests never share one.
+    """
+    store = RevocationStore()
+    setattr(app.state, _REVOCATIONS_ATTR, store)  # type: ignore[attr-defined]
+    return store
+
+
+def _revocations(request: Request) -> RevocationStore:
+    store = getattr(request.app.state, _REVOCATIONS_ATTR, None)
+    if store is None:
+        store = attach_revocations(request.app)
+    return store
+
 
 def _sign(payload: str, secret: str) -> str:
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
@@ -52,7 +152,9 @@ def create_session_token(secret: str) -> str:
     return f"{payload}.{_sign(payload, secret)}"
 
 
-def _verify_token(token: str | None, secret: str) -> bool:
+def _verify_token(
+    token: str | None, secret: str, revoked: RevocationStore | None = None
+) -> bool:
     if not token:
         return False
     payload, _, signature = token.rpartition(".")
@@ -64,7 +166,15 @@ def _verify_token(token: str | None, secret: str) -> bool:
         expiry = int(payload)
     except ValueError:
         return False
-    return time.time() < expiry
+    if time.time() >= expiry:
+        return False
+    # The revocation check lives HERE rather than in require_auth on purpose:
+    # _verify_token is the single point every presentment path funnels
+    # through — the cookie today, the Authorization: Bearer header today, and
+    # any future path that reuses it.  Checking one layer up would leave a
+    # caller-free path around it, which is precisely how the Bearer path came
+    # to outlive a logout in the first place.
+    return revoked is None or not revoked.is_revoked(token)
 
 
 def hash_password(password: str, *, iterations: int = _PBKDF2_ITERATIONS) -> str:
@@ -153,12 +263,13 @@ def require_auth(request: Request) -> None:
     if not config.web_ui.auth_enabled:
         return
     secret = _session_secret(request)
+    revoked = _revocations(request)
     token = request.cookies.get(_COOKIE_NAME)
-    if _verify_token(token, secret):
+    if _verify_token(token, secret, revoked):
         return
     # Allow Authorization: Bearer <token> (Tauri shell / scripting).
     header = request.headers.get("authorization", "")
-    if header.startswith("Bearer ") and _verify_token(header[7:], secret):
+    if header.startswith("Bearer ") and _verify_token(header[7:], secret, revoked):
         return
     raise HTTPException(status_code=401, detail="authentication required")
 
@@ -190,10 +301,33 @@ def login(request: Request, response: Response, password: str | None) -> None:
     )
 
 
-def logout(response: Response, secure: bool = False) -> None:
-    """Clear the session cookie.
+def logout(
+    response: Response, secure: bool = False, *, request: Request | None = None
+) -> None:
+    """Clear the session cookie and invalidate the token behind it.
 
     *secure* must match the flag the cookie was set with or the browser will
     not match it for deletion — callers pass ``request.url.scheme == "https"``.
+
+    Deleting the cookie alone revokes nothing: the token stays
+    cryptographically valid for its full TTL, so a captured cookie — or a
+    token exfiltrated to a script, which never had a cookie to lose — keeps
+    authorising.  Passing *request* (which the browser-side route does; a
+    bearer-only caller's token is read from the ``Authorization`` header when
+    there is no cookie) revokes the presented token as well, so the token is
+    dead on both paths until its own expiry would have killed it.
+
+    *request* is optional only because the route wiring that threads it
+    through belongs to a batch that owns ``web/routes.py``; without it the
+    call degrades to the old cookie-only behaviour rather than breaking.
     """
     response.delete_cookie(_COOKIE_NAME, secure=secure)
+    if request is None:
+        return
+    token = request.cookies.get(_COOKIE_NAME)
+    if not token:
+        header = request.headers.get("authorization", "")
+        if header.startswith("Bearer "):
+            token = header[7:]
+    if token:
+        _revocations(request).revoke(token)

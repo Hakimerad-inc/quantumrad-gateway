@@ -41,7 +41,14 @@ export interface paths {
         put?: never;
         /**
          * Logout
-         * @description Clear the admin session cookie.
+         * @description Clear the admin session cookie and revoke the token behind it.
+         *
+         *     Deleting the cookie alone revokes nothing — the token stays
+         *     cryptographically valid for its full TTL, so a captured cookie (or a
+         *     bearer token exfiltrated to a script, which never had a cookie to lose)
+         *     kept authorising after logout. Threading *request* through makes the
+         *     revocation reachable from the shipped endpoint instead of only from an
+         *     internal call (review P0-8).
          */
         post: operations["logout_api_logout_post"];
         delete?: never;
@@ -164,6 +171,11 @@ export interface paths {
          *     compute (health, disk, queue/stats, status) — no new data access. PHI-free
          *     by construction: numbers and fixed labels only, no paths, identifiers, or
          *     study metadata (reviewers of the scrape feed may include non-admins).
+         *
+         *     ``response_model`` here is documentation-only: the handler returns a
+         *     Starlette ``Response`` instance, which FastAPI short-circuits before model
+         *     serialization, so this annotates the OpenAPI schema (and the generated TS)
+         *     and performs no runtime filtering of the body.
          *
          *     When ``web_ui.auth_enabled`` is on the router-level ``require_auth``
          *     dependency applies here too — the Prometheus job needs the Bearer session
@@ -575,6 +587,12 @@ export interface paths {
         /**
          * Export Config
          * @description Export configuration as downloadable JSON file (credentials redacted).
+         *
+         *     ``response_model`` is documentation-only: the handler returns a
+         *     ``JSONResponse`` instance, which FastAPI short-circuits before model
+         *     serialization, so it shapes the OpenAPI schema (and the generated TS)
+         *     without filtering the body at runtime — the redaction that actually
+         *     protects secrets happens in :func:`redact_config` above.
          */
         get: operations["export_config_api_config_export_get"];
         put?: never;
@@ -675,6 +693,13 @@ export interface paths {
         /**
          * List Reports
          * @description List reports with optional filtering.
+         *
+         *     ``list_reports`` builds ``SELECT * FROM reports`` and ``get_report`` one
+         *     row the same way, so both would ship ``file_path`` — the server-side path
+         *     of the retrieved DICOM object — straight to the client. The enforcement is
+         *     :class:`ReportRow` above: a model that does not name the field drops it at
+         *     serialization, which is the durable form (a future ``SELECT *`` cannot
+         *     reintroduce it) and is why the endpoints do not hand-build the dicts.
          */
         get: operations["list_reports_api_reports_get"];
         put?: never;
@@ -694,7 +719,7 @@ export interface paths {
         };
         /**
          * Get Report
-         * @description Report detail.
+         * @description Report detail (no file_path — see :class:`ReportRow`).
          */
         get: operations["get_report_api_reports__report_id__get"];
         put?: never;
@@ -743,6 +768,14 @@ export interface paths {
          *     For a RETRIEVED report this loads the stored DICOM file and either renders
          *     the SR as structured text or extracts the raw PDF bytes (base64-encoded).
          *     Pending/failed reports return ``content=None``.
+         *
+         *     ``file_path`` below is read and never echoed: the stored path of the DICOM
+         *     object is how the content is *found*, not something the client needs, and
+         *     shipping it leaked a server-side path on every branch (see
+         *     :class:`ReportContent`). The four literals that used to spell it are the
+         *     one place the model cannot do the job alone — the key is built by hand
+         *     here, so it is gone from each of them and :class:`ReportContent` keeps it
+         *     from coming back.
          */
         get: operations["get_report_content_api_reports__report_id__content_get"];
         put?: never;
@@ -782,7 +815,14 @@ export interface paths {
         };
         /**
          * Verify Audit
-         * @description Verify audit chain integrity.
+         * @description Verify audit chain integrity (streaming, with a bounded error list).
+         *
+         *     Walks the lazy :meth:`AuditLog.verify_iter` generator instead of
+         *     ``verify()``: the generator steps a read-only cursor one row at a time, so
+         *     an integrity check on months of audit history costs bounded memory and
+         *     never holds the write lock every audit append waits on (item B7). The
+         *     generator is consumed row by row and never materialized — only the capped
+         *     ``errors`` list above is ever built.
          */
         get: operations["verify_audit_api_audit_verify_get"];
         put?: never;
@@ -803,6 +843,11 @@ export interface paths {
         /**
          * Export Audit
          * @description Export audit log as downloadable JSON (includes chain hashes).
+         *
+         *     ``response_model`` is documentation-only: the handler returns a
+         *     ``JSONResponse`` instance, which FastAPI short-circuits before model
+         *     serialization, so it shapes the OpenAPI schema (and the generated TS)
+         *     without filtering the body at runtime.
          *
          *     PHI scoping (§6.4): when ``config.audit.phi_scope`` is ``"minimal"``
          *     (the default), patient-identifying detail keys are stripped from the
@@ -906,6 +951,11 @@ export interface paths {
          *     are redacted via :func:`redact_config` (reuses the S04-T2 path); PHI
          *     scoping follows the audit ``phi_scope`` the same way the audit export
          *     does, so the bundle never leaks credentials or patient identifiers.
+         *
+         *     ``response_model`` is documentation-only: the handler returns a
+         *     ``JSONResponse`` instance, which FastAPI short-circuits before model
+         *     serialization, so it annotates the OpenAPI schema (and the generated TS)
+         *     and performs no runtime filtering of the body.
          */
         get: operations["diagnostics_export_api_diagnostics_export_get"];
         put?: never;
@@ -975,6 +1025,98 @@ export interface components {
             hub_reporting?: components["schemas"]["HubReporting"];
         };
         /**
+         * AuditEvent
+         * @description One audit row as ``GET /audit`` returns it.
+         *
+         *     ``detail`` is the raw stored JSON *string* here (not parsed) — that is what
+         *     the SPA's AuditView renders verbatim; the timeline endpoint is where it is
+         *     decoded to an object.
+         */
+        AuditEvent: {
+            /** Id */
+            id: number;
+            /** Ts */
+            ts: string;
+            /** Event */
+            event: string;
+            /** Detail */
+            detail: string;
+            /** User */
+            user?: string | null;
+            /** Hash */
+            hash?: string | null;
+        };
+        /**
+         * AuditExportEvent
+         * @description One audit row inside an export bundle, ``detail`` decoded and PHI-scoped.
+         */
+        AuditExportEvent: {
+            /** Id */
+            id: number;
+            /** Ts */
+            ts: string;
+            /** Event */
+            event: string;
+            /** Detail */
+            detail?: {
+                [key: string]: unknown;
+            };
+            /** User */
+            user?: string | null;
+            /** Hash */
+            hash?: string | null;
+        };
+        /**
+         * AuditExportResponse
+         * @description Downloadable audit log with chain hashes for offline verification.
+         */
+        AuditExportResponse: {
+            /** Events */
+            events?: components["schemas"]["AuditExportEvent"][];
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
+        };
+        /**
+         * AuditVerifyError
+         * @description One broken chain link, as the panel renders it.
+         */
+        AuditVerifyError: {
+            /** Event Id */
+            event_id: number;
+            /** Reason */
+            reason: string;
+        };
+        /**
+         * AuditVerifyResult
+         * @description Audit chain verification result.
+         *
+         *     ``errors`` is capped at :data:`_MAX_VERIFY_ERRORS_SHOWN` because a JSON
+         *     document cannot stream: a corrupted log on an appliance that has run for
+         *     months has a broken link per row, and answering with one object per row
+         *     would rebuild the whole table in memory — the very thing the streaming
+         *     verifier exists to avoid. ``total_error_count`` says how many there really
+         *     are, so the UI can say "showing N of M" instead of silently truncating.
+         */
+        AuditVerifyResult: {
+            /** Valid */
+            valid: boolean;
+            /** Errors */
+            errors?: components["schemas"]["AuditVerifyError"][];
+            /**
+             * Total Error Count
+             * @default 0
+             */
+            total_error_count: number;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
+        /**
          * ConfigImportResponse
          * @description The result of importing a foreign config file.
          */
@@ -1029,6 +1171,42 @@ export interface components {
              * @default 1.0
              */
             config_version: string;
+        };
+        /**
+         * ConsoleAuditEvent
+         * @description One audit row in the console dashboard, ``detail`` decoded to an object.
+         */
+        ConsoleAuditEvent: {
+            /** Id */
+            id: number;
+            /** Ts */
+            ts: string;
+            /** Event */
+            event: string;
+            /** Detail */
+            detail?: {
+                [key: string]: unknown;
+            };
+            /** User */
+            user?: string | null;
+        };
+        /**
+         * ConsoleDashboard
+         * @description Read-only operator dashboard: queue/status/logs/errors (S04-T6).
+         */
+        ConsoleDashboard: {
+            queue: components["schemas"]["QueueStats"];
+            /** Recent Events */
+            recent_events?: components["schemas"]["ConsoleAuditEvent"][];
+            /** Recent Errors */
+            recent_errors?: components["schemas"]["ConsoleAuditEvent"][];
+            /**
+             * Head Hash
+             * @default
+             */
+            head_hash: string;
+            /** Text Log Tail */
+            text_log_tail?: string[];
         };
         /**
          * CredentialEntry
@@ -1196,6 +1374,95 @@ export interface components {
             auth_token?: string | null;
         };
         /**
+         * DestinationRouteRow
+         * @description A pipeline drill-down row: one route joined to its study for display.
+         */
+        DestinationRouteRow: {
+            /** Route Id */
+            route_id: number;
+            /** Study Id */
+            study_id: number;
+            /** Target Type */
+            target_type: string;
+            /**
+             * Status
+             * @default waiting
+             */
+            status: string;
+            /**
+             * Attempts
+             * @default 0
+             */
+            attempts: number;
+            /** Last Error */
+            last_error?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Study Uid */
+            study_uid: string;
+            /** Accession */
+            accession?: string | null;
+            /** Patient Name */
+            patient_name?: string | null;
+            /** Modality */
+            modality?: string | null;
+        };
+        /**
+         * DestinationSummary
+         * @description Read-only destination summary: connection fields for DICOM, never secrets.
+         *
+         *     ``host``/``port``/``aet`` are present only for DICOM destinations, so the
+         *     generated type marks them optional rather than ``unknown``.
+         */
+        DestinationSummary: {
+            /** Name */
+            name: string;
+            /** Type */
+            type: string;
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** Host */
+            host?: string | null;
+            /** Port */
+            port?: number | null;
+            /** Aet */
+            aet?: string | null;
+        };
+        /**
+         * DiagnosticsAuditBundle
+         * @description PHI-scoped audit events plus the chain head for offline verification.
+         */
+        DiagnosticsAuditBundle: {
+            /** Events */
+            events?: components["schemas"]["AuditExportEvent"][];
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
+            /**
+             * Head Hash
+             * @default
+             */
+            head_hash: string;
+        };
+        /**
+         * DiagnosticsBundle
+         * @description One-click support bundle: redacted config + audit + spool summary.
+         */
+        DiagnosticsBundle: {
+            config: components["schemas"]["RedactedGatewayConfig"];
+            audit: components["schemas"]["DiagnosticsAuditBundle"];
+            spool: components["schemas"]["SpoolSummary"];
+            /** Generated At */
+            generated_at: string;
+            /** Version */
+            version: string;
+        };
+        /**
          * DiskStatus
          * @description Live spool filesystem capacity + disk-full management state (S10-T7).
          */
@@ -1235,6 +1502,16 @@ export interface components {
              * @default false
              */
             purge_on_disk_full: boolean;
+        };
+        /**
+         * EchoProbeResponse
+         * @description C-ECHO outcome plus the target it was issued against.
+         */
+        EchoProbeResponse: {
+            /** Status */
+            status: string;
+            /** Target */
+            target: string;
         };
         /** EchoTarget */
         EchoTarget: {
@@ -1350,6 +1627,16 @@ export interface components {
             detail?: components["schemas"]["ValidationError"][];
         };
         /**
+         * HealthResponse
+         * @description Liveness probe answer (no component state, no PHI — safe to scrape).
+         */
+        HealthResponse: {
+            /** Status */
+            status: string;
+            /** Version */
+            version: string;
+        };
+        /**
          * HubReporting
          * @description Optional streaming of audit events to a mercure hub bookkeeper (v1.1).
          */
@@ -1381,6 +1668,40 @@ export interface components {
             password: string;
         };
         /**
+         * LoginResponse
+         * @description A session cookie was issued (or, with auth off, would have been).
+         */
+        LoginResponse: {
+            /** Status */
+            status: string;
+        };
+        /**
+         * LogoutResponse
+         * @description The session cookie was cleared.
+         */
+        LogoutResponse: {
+            /** Status */
+            status: string;
+        };
+        /**
+         * LogsResponse
+         * @description Tail of the rotating operations log plus how much of it was truncated.
+         */
+        LogsResponse: {
+            /** Lines */
+            lines?: string[];
+            /**
+             * Total Available
+             * @default 0
+             */
+            total_available: number;
+            /**
+             * Limit
+             * @default 100
+             */
+            limit: number;
+        };
+        /**
          * PasswordChangeRequest
          * @description Rotate the admin password.
          *
@@ -1393,6 +1714,108 @@ export interface components {
             current_password?: string | null;
             /** New Password */
             new_password: string;
+        };
+        /**
+         * PasswordChangeResponse
+         * @description The password hash was rotated (the hash itself is never returned).
+         */
+        PasswordChangeResponse: {
+            /** Status */
+            status: string;
+        };
+        /**
+         * PipelineComponents
+         * @description Which gateway components are running (the pipeline flow view's left rail).
+         */
+        PipelineComponents: {
+            /** Receiver */
+            receiver?: boolean | null;
+            /** Forwarder */
+            forwarder?: boolean | null;
+            /** Reports */
+            reports?: boolean | null;
+        };
+        /**
+         * PipelineDestination
+         * @description One destination node: route rollup, reachability and connection fields.
+         */
+        PipelineDestination: {
+            /** Name */
+            name: string;
+            /** Type */
+            type: string;
+            routes?: components["schemas"]["PipelineRouteCounts"];
+            /** Last Activity */
+            last_activity?: string | null;
+            /** Host */
+            host?: string | null;
+            /** Port */
+            port?: number | null;
+            /** Aet */
+            aet?: string | null;
+            health?: components["schemas"]["PipelineDestinationHealth"] | null;
+        };
+        /**
+         * PipelineDestinationHealth
+         * @description A cached C-ECHO probe result (absent for non-DICOM destinations).
+         */
+        PipelineDestinationHealth: {
+            /** Status */
+            status: string;
+            /** Checked At */
+            checked_at: string;
+            /** Latency Ms */
+            latency_ms: number;
+        };
+        /**
+         * PipelineReceiverCounts
+         * @description Inbound rate, counted in SQL against idx_studies_created_at.
+         */
+        PipelineReceiverCounts: {
+            /**
+             * Received Last Hour
+             * @default 0
+             */
+            received_last_hour: number;
+        };
+        /**
+         * PipelineRouteCounts
+         * @description A destination's route rollup by lifecycle state.
+         */
+        PipelineRouteCounts: {
+            /**
+             * Complete
+             * @default 0
+             */
+            complete: number;
+            /**
+             * Sending
+             * @default 0
+             */
+            sending: number;
+            /**
+             * Waiting
+             * @default 0
+             */
+            waiting: number;
+            /**
+             * Error
+             * @default 0
+             */
+            error: number;
+        };
+        /**
+         * PipelineSnapshot
+         * @description One-shot payload for the Pipeline flow view (components + queue + rollups).
+         */
+        PipelineSnapshot: {
+            components: components["schemas"]["PipelineComponents"];
+            queue: components["schemas"]["QueueStats"];
+            receiver_counts?: components["schemas"]["PipelineReceiverCounts"];
+            /** Destinations */
+            destinations?: components["schemas"]["PipelineDestination"][];
+            /** Generated At */
+            generated_at: string;
         };
         /** QueueStats */
         QueueStats: {
@@ -1542,6 +1965,27 @@ export interface components {
             report_types?: ("sr" | "pdf")[];
         };
         /**
+         * ReportContent
+         * @description Report content: base64 PDF bytes, rendered SR text, or a failure reason.
+         *
+         *     Like :class:`ReportRow` this carries no ``file_path`` — the server path of
+         *     the DICOM object the content was read from is not the client's business.
+         */
+        ReportContent: {
+            /** Report Id */
+            report_id: number;
+            /** Report Type */
+            report_type: string;
+            /** Status */
+            status: string;
+            /** Content */
+            content?: string | null;
+            /** Mime */
+            mime?: string | null;
+            /** Error */
+            error?: string | null;
+        };
+        /**
          * ReportQuerySource
          * @description PACS endpoint used for report retrieval (C-FIND/C-MOVE or QIDO/WADO).
          */
@@ -1569,6 +2013,57 @@ export interface components {
              * @description Association timeout for the report C-FIND/C-MOVE. None uses the DIMSE default (30 s). A PACS that never answers the association would otherwise hang the report poller and stop retrieval silently (review P1-12).
              */
             timeout_sec?: number | null;
+        };
+        /**
+         * ReportRefreshResponse
+         * @description On-demand retrieval result; ``status`` is the row's new state.
+         */
+        ReportRefreshResponse: {
+            /** Status */
+            status: string;
+            /** Report Id */
+            report_id: string;
+        };
+        /**
+         * ReportRequestResponse
+         * @description A PENDING report row was created; ``report_id`` polls its progress.
+         */
+        ReportRequestResponse: {
+            /** Status */
+            status: string;
+            /** Report Id */
+            report_id: number;
+        };
+        /**
+         * ReportRow
+         * @description One report row.
+         *
+         *     Deliberately has **no** ``file_path``: the reports table stores the
+         *     server-side path of the retrieved DICOM object, which is a PHI-adjacent
+         *     implementation detail the client never needed (ReportsView reads only id,
+         *     report_type and status). A model that does not name the field cannot
+         *     regress the leak even if a future ``SELECT *`` ships it again.
+         */
+        ReportRow: {
+            /** Id */
+            id: number;
+            /** Study Id */
+            study_id: number;
+            /** Accession */
+            accession?: string | null;
+            /** Study Uid */
+            study_uid: string;
+            /** Report Type */
+            report_type: string;
+            /**
+             * Status
+             * @default pending
+             */
+            status: string;
+            /** Sop Class Uid */
+            sop_class_uid?: string | null;
+            /** Retrieved At */
+            retrieved_at?: string | null;
         };
         /**
          * RsyncDestination
@@ -1737,6 +2232,14 @@ export interface components {
             known_hosts: string;
         };
         /**
+         * ServiceActionResponse
+         * @description A Windows service action was applied; ``status`` echoes the action.
+         */
+        ServiceActionResponse: {
+            /** Status */
+            status: string;
+        };
+        /**
          * ServiceStatusModel
          * @description Windows service install/run state for the admin panel.
          */
@@ -1756,6 +2259,21 @@ export interface components {
              * @default unsupported
              */
             state: string;
+        };
+        /**
+         * SpoolSummary
+         * @description Study counts by lifecycle state for the diagnostics bundle.
+         */
+        SpoolSummary: {
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /** States */
+            states?: {
+                [key: string]: number;
+            };
         };
         /**
          * StorageConfig
@@ -1792,6 +2310,61 @@ export interface components {
             purge_on_disk_full: boolean;
         };
         /**
+         * StudyActionResponse
+         * @description A study-level mutating ack. ``study_id`` is a string on the wire today.
+         */
+        StudyActionResponse: {
+            /** Status */
+            status: string;
+            /** Study Id */
+            study_id: string;
+        };
+        /**
+         * StudyDetailResponse
+         * @description ``GET /studies/{id}/detail`` — a study with per-route state + next-retry.
+         */
+        StudyDetailResponse: {
+            /** Id */
+            id: number;
+            /** Study Uid */
+            study_uid: string;
+            /** Accession */
+            accession?: string | null;
+            /** Mrn */
+            mrn?: string | null;
+            /** Patient Name */
+            patient_name?: string | null;
+            /** Modality */
+            modality?: string | null;
+            /** Study Description */
+            study_description?: string | null;
+            /** Study Date */
+            study_date?: string | null;
+            /**
+             * Num Series
+             * @default 0
+             */
+            num_series: number;
+            /**
+             * Num Instances
+             * @default 0
+             */
+            num_instances: number;
+            /**
+             * State
+             * @default RECEIVED
+             */
+            state: string;
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Retention Delivered At */
+            retention_delivered_at?: string | null;
+            /** Routes */
+            routes?: components["schemas"]["StudyRouteDetail"][];
+        };
+        /**
          * StudyPage
          * @description Paginated studies list with metadata for page controls (§7.2).
          */
@@ -1804,6 +2377,64 @@ export interface components {
             page_size: number;
             /** Items */
             items: components["schemas"]["StudySummary"][];
+        };
+        /**
+         * StudyRoute
+         * @description One ``task_routing`` row — per-destination forwarding state for a study.
+         */
+        StudyRoute: {
+            /** Id */
+            id: number;
+            /** Study Id */
+            study_id: number;
+            /** Target Name */
+            target_name: string;
+            /** Target Type */
+            target_type: string;
+            /**
+             * Status
+             * @default waiting
+             */
+            status: string;
+            /**
+             * Attempts
+             * @default 0
+             */
+            attempts: number;
+            /** Last Error */
+            last_error?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+        };
+        /**
+         * StudyRouteDetail
+         * @description A route plus the forwarder's computed next-retry (never persisted).
+         */
+        StudyRouteDetail: {
+            /** Id */
+            id: number;
+            /** Study Id */
+            study_id: number;
+            /** Target Name */
+            target_name: string;
+            /** Target Type */
+            target_type: string;
+            /**
+             * Status
+             * @default waiting
+             */
+            status: string;
+            /**
+             * Attempts
+             * @default 0
+             */
+            attempts: number;
+            /** Last Error */
+            last_error?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Next Retry Sec */
+            next_retry_sec?: number | null;
         };
         /** StudySummary */
         StudySummary: {
@@ -1826,6 +2457,64 @@ export interface components {
              * @default 0
              */
             num_destinations: number;
+        };
+        /**
+         * StudyWithRoutes
+         * @description ``GET /studies/{id}`` — a study with its raw route rows attached.
+         */
+        StudyWithRoutes: {
+            /** Id */
+            id: number;
+            /** Study Uid */
+            study_uid: string;
+            /** Accession */
+            accession?: string | null;
+            /** Mrn */
+            mrn?: string | null;
+            /** Patient Name */
+            patient_name?: string | null;
+            /** Modality */
+            modality?: string | null;
+            /** Study Description */
+            study_description?: string | null;
+            /** Study Date */
+            study_date?: string | null;
+            /**
+             * Num Series
+             * @default 0
+             */
+            num_series: number;
+            /**
+             * Num Instances
+             * @default 0
+             */
+            num_instances: number;
+            /**
+             * State
+             * @default RECEIVED
+             */
+            state: string;
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Retention Delivered At */
+            retention_delivered_at?: string | null;
+            /** Routes */
+            routes?: components["schemas"]["StudyRoute"][];
+        };
+        /**
+         * SystemStartResponse
+         * @description ``/system/start`` result — what actually started, or "none needed".
+         */
+        SystemStartResponse: {
+            /** Status */
+            status: string;
+            /**
+             * Components
+             * @default
+             */
+            components: string;
         };
         /** SystemStatus */
         SystemStatus: {
@@ -1863,6 +2552,46 @@ export interface components {
              * @default false
              */
             config_pending_restart: boolean;
+            /**
+             * Usb Mode
+             * @default false
+             */
+            usb_mode: boolean;
+        };
+        /**
+         * SystemStopResponse
+         * @description ``/system/stop`` result — what actually stopped, or "none running".
+         */
+        SystemStopResponse: {
+            /** Status */
+            status: string;
+            /**
+             * Components
+             * @default
+             */
+            components: string;
+        };
+        /**
+         * TimelineEvent
+         * @description One audit event in a study's timeline (detail parsed to an object).
+         */
+        TimelineEvent: {
+            /** Id */
+            id: number;
+            /** Ts */
+            ts: string;
+            /** Event */
+            event: string;
+            /** Detail */
+            detail?: {
+                [key: string]: unknown;
+            };
+            /** User */
+            user?: string | null;
+            /** Hash */
+            hash?: string | null;
+            /** Study Uid */
+            study_uid?: string | null;
         };
         /**
          * USBModeConfig
@@ -1958,6 +2687,16 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * WizardValidationResponse
+         * @description One wizard step's validation result (empty errors = the gate passes).
+         */
+        WizardValidationResponse: {
+            /** Step */
+            step: string;
+            /** Errors */
+            errors?: string[];
         };
         /**
          * XNATDestination
@@ -2067,9 +2806,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["LoginResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2098,9 +2835,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["LogoutResponse"];
                 };
             };
         };
@@ -2124,9 +2859,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["PasswordChangeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2175,9 +2908,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["HealthResponse"];
                 };
             };
         };
@@ -2217,7 +2948,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": string;
                 };
             };
         };
@@ -2237,9 +2968,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["SystemStartResponse"];
                 };
             };
         };
@@ -2259,9 +2988,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["SystemStopResponse"];
                 };
             };
         };
@@ -2303,9 +3030,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["ServiceActionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2390,9 +3115,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["StudyWithRoutes"];
                 };
             };
             /** @description Validation Error */
@@ -2423,9 +3146,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["StudyRoute"][];
                 };
             };
             /** @description Validation Error */
@@ -2456,9 +3177,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["StudyActionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2489,9 +3208,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["StudyActionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2520,9 +3237,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PipelineSnapshot"];
                 };
             };
         };
@@ -2542,9 +3257,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["DestinationSummary"][];
                 };
             };
         };
@@ -2566,9 +3279,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["DestinationRouteRow"][];
                 };
             };
             /** @description Validation Error */
@@ -2599,9 +3310,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["StudyDetailResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2632,9 +3341,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["TimelineEvent"][];
                 };
             };
             /** @description Validation Error */
@@ -2738,7 +3445,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RedactedGatewayConfig"];
                 };
             };
         };
@@ -2815,9 +3522,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ReportRequestResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2851,9 +3556,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["ReportRow"][];
                 };
             };
             /** @description Validation Error */
@@ -2884,9 +3587,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ReportRow"];
                 };
             };
             /** @description Validation Error */
@@ -2917,9 +3618,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["ReportRefreshResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2950,9 +3649,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ReportContent"];
                 };
             };
             /** @description Validation Error */
@@ -2985,9 +3682,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["AuditEvent"][];
                 };
             };
             /** @description Validation Error */
@@ -3016,9 +3711,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["AuditVerifyResult"];
                 };
             };
         };
@@ -3040,7 +3733,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AuditExportResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3073,9 +3766,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EchoProbeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3112,9 +3803,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WizardValidationResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3145,9 +3834,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["LogsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3176,7 +3863,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DiagnosticsBundle"];
                 };
             };
         };
@@ -3196,9 +3883,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ConsoleDashboard"];
                 };
             };
         };

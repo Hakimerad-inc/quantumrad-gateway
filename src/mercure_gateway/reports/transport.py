@@ -53,8 +53,15 @@ class ReportTransport(Protocol):
         study_uid: str | None = None,
         accession: str | None = None,
         report_types: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[ReportMatch]:
-        """Locate report instances matching the criteria."""
+        """Locate report instances matching the criteria.
+
+        ``limit`` caps how many matches the transport collects before it stops
+        interrogating the remote (``None`` = unbounded).  Transports map it to
+        whatever their protocol supports — the DICOM C-FIND implementation
+        abandons the lazy result iterator, DICOMweb sends it as ``_limit``.
+        """
         ...
 
     def retrieve(self, matches: list[ReportMatch]) -> list[RetrievedReport]:
@@ -133,11 +140,13 @@ class DICOMReportTransport:
         study_uid: str | None = None,
         accession: str | None = None,
         report_types: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[ReportMatch]:
         return self._finder.find(
             study_uid=study_uid,
             accession=accession,
             report_types=report_types,
+            limit=limit,
         )
 
     def retrieve(self, matches: list[ReportMatch]) -> list[RetrievedReport]:

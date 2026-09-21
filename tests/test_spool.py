@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from mercure_gateway.audit import AuditLog
 from mercure_gateway.config import DICOMDestination
 from mercure_gateway.spool import Spool, StudyState
 from mercure_gateway.spool.db import mem_database
@@ -327,3 +331,161 @@ def test_v4_backfill_survives_append_only_triggers(tmp_path):  # type: ignore[no
     assert "audit_events_no_update" in names
     assert "audit_events_no_delete" in names
     db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Atomicity of the complete()/fail() write path (review P2-x)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _trace_begins(spool: Spool, call: Callable[[], object]) -> list[str]:
+    """Run *call* and return every ``BEGIN`` the connection issued.
+
+    sqlite3's trace callback is the only way to count transactions from
+    outside the Database. A test that only asserts the resulting state
+    cannot distinguish one transaction from four — this can.
+    """
+    begins: list[str] = []
+
+    def trace(sql: str) -> None:
+        if sql.startswith("BEGIN"):
+            begins.append(sql)
+
+    spool._db._conn.set_trace_callback(trace)
+    try:
+        call()
+    finally:
+        spool._db._conn.set_trace_callback(None)
+    return begins
+
+
+def test_complete_on_last_route_is_one_transaction(
+    spool: Spool, target_hub: DICOMDestination, target_pacs: DICOMDestination
+) -> None:
+    """The final complete() commits as ONE transaction, not four.
+
+    The old code committed mark_route_sent, set_study_state,
+    set_retention_delivered and the audit append separately, so between
+    commits another thread could read ``route = complete`` on a study still
+    SENDING. Nested ``Database.transaction`` calls join the outer transaction
+    instead of recursing, so wrapping the writes makes them a single BEGIN.
+    """
+    study_id = spool.receive("1.2.3.4")
+    spool.enqueue(study_id, [target_hub, target_pacs])
+    spool.claim_next(limit=2)
+    spool.complete(study_id, "hub")  # not the last route -> stays SENDING
+
+    begins = _trace_begins(spool, lambda: spool.complete(study_id, "pacs"))
+
+    assert spool.state(study_id) == StudyState.SENT
+    assert len(begins) == 1, f"expected one BEGIN for the final complete, got {begins}"
+
+
+def test_fail_is_one_transaction(spool: Spool, target_hub: DICOMDestination) -> None:
+    """mark_route_error and the study state commit together."""
+    study_id = spool.receive("1.2.3.4")
+    spool.enqueue(study_id, [target_hub])
+    spool.claim_next(limit=1)
+
+    begins = _trace_begins(
+        spool, lambda: spool.fail(study_id, "hub", "connection refused", max_attempts=3)
+    )
+
+    assert spool.state(study_id) == StudyState.ERROR
+    assert len(begins) == 1, f"expected one BEGIN for fail, got {begins}"
+
+
+def test_fail_terminal_on_first_call_when_budget_is_one(
+    spool: Spool, target_hub: DICOMDestination
+) -> None:
+    """``max_attempts=1`` must reach FAILED on the FIRST call.
+
+    The comparison uses the attempt count as of the claim (claim_next bumps
+    ``attempts`` when it takes the route), read before the write transaction.
+    That ordering is load-bearing: test_forwarder.py and test_audit_coverage.py
+    both assert FAILED-on-first for ``max_attempts=1``, so it is re-asserted
+    here against the reworked method.
+    """
+    study_id = spool.receive("1.2.3.4")
+    spool.enqueue(study_id, [target_hub])
+    spool.claim_next(limit=1)
+
+    assert spool.fail(study_id, "hub", "boom", max_attempts=1) == StudyState.FAILED
+
+
+def test_requeue_complete_routes_is_one_transaction(
+    spool: Spool, target_hub: DICOMDestination, target_pacs: DICOMDestination
+) -> None:
+    """A re-opened study's complete routes all reset in one commit.
+
+    The intent was an ``executemany`` in the shape of
+    ``Database.claim_next_tasks`` (one statement for N routes), but the resets
+    join one outer transaction instead — the observable property is the same:
+    no partially-requeued study is visible to a concurrent claim between two
+    route resets.
+    """
+    study_id = spool.receive("1.2.3.4")
+    spool.enqueue(study_id, [target_hub, target_pacs])
+    spool.claim_next(limit=2)
+    spool.complete(study_id, "hub")
+    spool.complete(study_id, "pacs")
+    # A new instance re-opens the study (the store upsert demotes it to
+    # RECEIVED) — simulate that state change without the filesystem.
+    spool._db.set_study_state(study_id, StudyState.RECEIVED.value)
+
+    begins = _trace_begins(spool, lambda: spool._requeue_complete_routes(study_id))
+
+    assert len(begins) == 1, f"expected one BEGIN for the requeue, got {begins}"
+    statuses = {r["target_name"]: r["status"] for r in spool._db.get_routes(study_id)}
+    assert statuses == {"hub": "waiting", "pacs": "waiting"}
+
+
+def test_concurrent_complete_of_two_routes_lands_one_sent(tmp_path: Path) -> None:
+    """Two threads completing the two routes of one study at the same time.
+
+    Under the old per-write commits the interleaving could leave the study
+    SENDING after both routes were complete, or let both threads see the
+    study as not-yet-SENT. Each complete() now holds BEGIN IMMEDIATE across
+    its whole write path, so the two serialize and exactly one of them
+    observes the last route completing — one SENT state, one STUDY_SENT.
+    """
+    from test_storage import make_dataset, make_spool
+
+    spool = make_spool(tmp_path, auto_enqueue_delay_sec=600.0)
+    try:
+        audit = AuditLog(spool._db)
+        spool._audit = audit
+        study_id = spool.store_instance(make_dataset("1.2.3.4.5"))
+        hub = DICOMDestination(
+            name="hub", type="dicom", host="hub.local", port=11112, aet_target="MERCURE"
+        )
+        pacs = DICOMDestination(
+            name="pacs", type="dicom", host="pacs.local", port=104, aet_target="PACS"
+        )
+        spool.enqueue(study_id, [hub, pacs])
+        spool.claim_next(limit=2)
+
+        release = threading.Barrier(2, timeout=10)
+        errors: list[BaseException] = []
+
+        def complete(target: str) -> None:
+            try:
+                release.wait()
+                spool.complete(study_id, target)
+            except BaseException as exc:  # noqa: BLE001 — reported, not swallowed
+                errors.append(exc)
+
+        threads = [threading.Thread(target=complete, args=(t,)) for t in ("hub", "pacs")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert errors == [], f"concurrent complete raised: {errors}"
+        assert spool.state(study_id) == StudyState.SENT
+        statuses = {r["target_name"]: r["status"] for r in spool._db.get_routes(study_id)}
+        assert statuses == {"hub": "complete", "pacs": "complete"}
+        # Exactly one thread took the last route and emitted the terminal event.
+        assert len(spool._db.list_audit_events("STUDY_SENT")) == 1
+    finally:
+        spool.stop()

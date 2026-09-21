@@ -74,12 +74,17 @@ class DICOMwebReportTransport:
         study_uid: str | None = None,
         accession: str | None = None,
         report_types: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[ReportMatch]:
         """QIDO-RS query for report instances; follows pagination.
 
         Returns :class:`ReportMatch` records; empty list when the server has
         no matching report instances.  Raises :class:`DICOMwebError` on an
         HTTP failure.
+
+        ``limit`` is sent as the QIDO-RS ``_limit`` parameter (PS3.18), so the
+        server rather than the client decides which page's worth of matches to
+        return; ``None`` leaves it unbounded.
         """
         if not study_uid and not accession:
             raise ValueError("provide study_uid or accession")
@@ -94,6 +99,10 @@ class DICOMwebReportTransport:
             params.append(f"StudyInstanceUID={study_uid}")
         if accession:
             params.append(f"AccessionNumber={accession}")
+        if limit is not None:
+            if limit < 1:
+                raise ValueError("limit must be a positive integer")
+            params.append(f"_limit={limit}")
 
         matches: list[ReportMatch] = []
         next_url: str | None = f"{self._base_url}/studies?" + "&".join(params)

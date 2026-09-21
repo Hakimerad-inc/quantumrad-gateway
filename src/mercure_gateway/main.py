@@ -663,13 +663,13 @@ def _run_web_admin(
     # permanently-down bookkeeper never clears.
     app.state.hub_streamer = hub_streamer
     app.state.anchor_verifier = anchor_verifier
-    # Destination health monitor (pipeline view): daemon thread, stopped when
-    # uvicorn exits the blocking call below.
-    from mercure_gateway.web.pipeline import DestinationHealthMonitor
-
-    health_monitor = DestinationHealthMonitor(config)
-    health_monitor.start()
-    app.state.health_monitor = health_monitor
+    # The destination health monitor is no longer built here: create_app owns
+    # it now, constructing one in its lifespan when app.state.health_monitor is
+    # unset and stopping *and joining* the worker thread on shutdown. Building
+    # it here meant starting a real probing thread before uvicorn took over, so
+    # a caller whose uvicorn never entered the lifespan (any test stubbing
+    # uvicorn.run) left a live probe behind, and the thread could outlive stop()
+    # by a full probe interval.
     # Windows service management (S07-T9): None off Windows — the /api/service
     # endpoints degrade to available=false (GET) / 501 (POST).
     if sys.platform == "win32":
@@ -692,10 +692,15 @@ def _run_web_admin(
         }
     scheme = "https" if tls_kwargs else "http"
     print(f"  web admin : {scheme}://{host}:{port}")
-    try:
-        uvicorn.run(app, host=host, port=port, log_level="info", **tls_kwargs)
-    finally:
-        health_monitor.stop()
+    # lifespan="auto" is uvicorn's default and is stated because it carries the
+    # health monitor's start/stop: uvicorn only runs an app's lifespan when it
+    # is given an ASGI instance (not an import string), which is always the case
+    # here. Passing it explicitly keeps a future caller from flipping to
+    # lifespan="on"/"off" and silently dropping the monitor's teardown — the
+    # join that makes the probe thread exit deterministically lives there.
+    uvicorn.run(
+        app, host=host, port=port, log_level="info", lifespan="auto", **tls_kwargs
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

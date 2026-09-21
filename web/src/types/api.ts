@@ -60,6 +60,14 @@ export interface AuditEvent {
 export interface AuditVerifyResult {
   valid: boolean;
   errors: Array<{ event_id: number; reason: string }>;
+  // The server walks a lazily-streamed chain and caps the list it spells out
+  // (a JSON body cannot stream, and a corrupted log has a broken link per
+  // row). total_error_count is how many there really are; truncated means the
+  // array above is the first N of them. The panel's "showing N of M" display
+  // of that is a follow-up — today the count is surfaced and nothing renders
+  // it yet.
+  total_error_count: number;
+  truncated: boolean;
 }
 
 export interface ReportRow {
@@ -68,7 +76,10 @@ export interface ReportRow {
   accession: string | null;
   report_type: string;
   status: string;
-  file_path: string | null;
+  // No file_path: the reports table stores the server-side path of the
+  // retrieved DICOM object and the API no longer echoes it (the ReportRow /
+  // ReportContent server-side response models omit it). This declaration used
+  // to carry the field with no consumer reading it.
   // The reports table has no created_at column and /api/reports returns the
   // rows unmodified, so this key is always absent at runtime. Optional so the
   // type says what the API actually delivers rather than what a consumer
@@ -82,9 +93,9 @@ export interface ReportContent {
   report_id: number;
   report_type: string;
   status: string;
-  file_path: string | null;
   content: string | null;
   mime: string | null;
+  error?: string | null;
 }
 
 // Save/import results now have server-side response models (review P1-9), so

@@ -11,10 +11,29 @@ use tauri_plugin_shell::ShellExt;
 
 mod sidecar;
 
-// Tray states matching the Python derive_tray_state() output.
+// Tray states matching the Python derive_tray_state() output
+// (src/mercure_gateway/tray.py). Priority: error > sending > removable > idle.
 const TRAY_IDLE: u8 = 0;
 const TRAY_SENDING: u8 = 1;
 const TRAY_ERROR: u8 = 2;
+/// USB variant is active and the gateway is otherwise idle — the spool lives on
+/// removable media and it is safe to unplug (PRD §2.2 Flow C).
+const TRAY_REMOVABLE: u8 = 3;
+
+/// Default assumed for a MISSING component field in the status payload.
+///
+/// DELIBERATE DIVERGENCE from Python: `tray.py` does
+/// `kwargs.get("receiver", "running")` and would read a missing field as
+/// healthy; we read it as stopped, so a status payload that drops a component
+/// key yields TRAY_ERROR ("attention needed") rather than a green idle tray.
+/// Both are defensible — Python is the spec, not a collaborator — but on a
+/// medical appliance the tray is the operator's only at-a-glance signal, and a
+/// schema change silently rendering it "all clear" is worse than a transient
+/// false alarm. Rust fails closed; the live endpoint serializes all three
+/// fields explicitly (web/routes.py `SystemStatus`), so this only ever fires
+/// on a genuine contract change, which is exactly when we want the tray
+/// shouting. Pinned by `derive_state_missing_component_fields_is_error`.
+const COMPONENT_DEFAULT: &str = "stopped";
 
 /// The port the packaged Python sidecar binds (must match
 /// `config.web_ui.port` default and the SPA's `TAURI_API_BASE`).
@@ -114,26 +133,67 @@ fn backend_get_json(path: &str) -> Result<Option<serde_json::Value>, Box<dyn std
 /// Poll the FastAPI status endpoint and map the result to a tray state.
 /// The Rust side mirrors the Python `derive_tray_state` logic so the shell
 /// can update the icon without a round-trip through the Python process.
-fn derive_state(status: &serde_json::Value) -> u8 {
-    let receiver = status["receiver"].as_str().unwrap_or("stopped");
-    let forwarder = status["forwarder"].as_str().unwrap_or("stopped");
-    let retriever = status["report_retriever"].as_str().unwrap_or("stopped");
+///
+/// Split into a pure half ([`derive_state`], both inputs passed in — the only
+/// way the queue branch can be reached from a unit test) and this thin I/O
+/// caller that owns the second fetch. The queue stats are fetched *after* the
+/// status check so a wedged backend short-circuits to error before we spend a
+/// second request on a queue we cannot act on.
+fn derive_state_live(status: &serde_json::Value) -> u8 {
+    let queue_stats = backend_get_json("/api/queue/stats");
+    derive_state(status, queue_stats.ok().flatten().as_ref())
+}
+
+/// Pure half of the tray state machine: map the status + queue stats payloads
+/// (already fetched) to a tray state. Mirrors `derive_tray_state` priority —
+/// error > sending > removable > idle — and is the unit-testable core.
+///
+/// `queue_stats` is `None` when the `/api/queue/stats` request failed at the
+/// transport level. A failed queue fetch does NOT promote to error (the status
+/// endpoint already proved the backend is up and every component running, so a
+/// flaky second request degrading to "idle" matches the pre-split behaviour
+/// and avoids crying wolf on a transient) — but it DOES suppress removable: a
+/// safe-to-remove hint is an invitation to unplug, and without queue data we
+/// have no evidence the spool is quiet. No evidence, no invitation (PRD §2.2
+/// Flow C).
+///
+/// `usb_mode` is read from the same status object the poll loop already holds
+/// rather than a third request or a boot-time snapshot — main.py can flip
+/// `usb_mode.enabled` at runtime, so a snapshot goes stale.
+fn derive_state(status: &serde_json::Value, queue_stats: Option<&serde_json::Value>) -> u8 {
+    let receiver = status["receiver"].as_str().unwrap_or(COMPONENT_DEFAULT);
+    let forwarder = status["forwarder"].as_str().unwrap_or(COMPONENT_DEFAULT);
+    let retriever = status["report_retriever"]
+        .as_str()
+        .unwrap_or(COMPONENT_DEFAULT);
 
     if receiver != "running" || forwarder != "running" || retriever != "running" {
         return TRAY_ERROR;
     }
 
-    if let Ok(Some(data)) = backend_get_json("/api/queue/stats") {
-        let sending = data["sending"].as_u64().unwrap_or(0);
-        let queued = data["queued"].as_u64().unwrap_or(0);
-        let error = data["error"].as_u64().unwrap_or(0);
-        let failed = data["failed"].as_u64().unwrap_or(0);
-        if error > 0 || failed > 0 {
-            return TRAY_ERROR;
+    match queue_stats {
+        Some(data) => {
+            let sending = data["sending"].as_u64().unwrap_or(0);
+            let queued = data["queued"].as_u64().unwrap_or(0);
+            let error = data["error"].as_u64().unwrap_or(0);
+            let failed = data["failed"].as_u64().unwrap_or(0);
+            if error > 0 || failed > 0 {
+                return TRAY_ERROR;
+            }
+            // Removable is only reachable with a provably empty queue: a
+            // safe-to-remove hint shown while studies are mid-transfer is
+            // actively dangerous on a USB appliance, so the sending branch
+            // must come first.
+            if sending > 0 || queued > 0 {
+                return TRAY_SENDING;
+            }
         }
-        if sending > 0 || queued > 0 {
-            return TRAY_SENDING;
-        }
+        // Queue data unavailable: fall to idle, not removable (see above).
+        None => return TRAY_IDLE,
+    }
+
+    if status["usb_mode"].as_bool().unwrap_or(false) {
+        return TRAY_REMOVABLE;
     }
 
     TRAY_IDLE
@@ -141,25 +201,34 @@ fn derive_state(status: &serde_json::Value) -> u8 {
 
 fn state_label(state: u8) -> &'static str {
     match state {
+        TRAY_IDLE => "QuantumRAD Gateway — idle",
         TRAY_SENDING => "QuantumRAD Gateway — sending",
         TRAY_ERROR => "QuantumRAD Gateway — attention needed",
-        _ => "QuantumRAD Gateway — idle",
+        TRAY_REMOVABLE => "QuantumRAD Gateway — safe to remove",
+        // The four states are all u8 constants; this arm is unreachable for
+        // any value this codebase sets. Kept (rather than an unreachable!()) so
+        // a future fifth state added without a label arm degrades to the
+        // neutral idle string instead of panicking the poll thread.
+        _ => "QuantumRAD Gateway",
     }
 }
 
 /// Apply the tray visuals for a state: a distinct icon glyph per state
 /// (green ring = idle, amber ring + dot = sending, red ring + exclamation =
-/// error) plus a tooltip naming the state. Previously the same icon was
-/// applied for every state, so the operator had no at-a-glance status without
-/// opening the window (review M10).
+/// error, blue ring + check = safe to remove) plus a tooltip naming the state.
+/// Previously the same icon was applied for every state, so the operator had
+/// no at-a-glance status without opening the window (review M10).
 fn apply_tray_state(
     tray: &tauri::tray::TrayIcon,
     icons: &TrayIcons,
     state: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let icon = match state {
+        TRAY_IDLE => &icons.idle,
         TRAY_SENDING => &icons.sending,
         TRAY_ERROR => &icons.error,
+        TRAY_REMOVABLE => &icons.removable,
+        // Same reasoning as state_label: never panic the poll thread.
         _ => &icons.idle,
     };
     tray.set_icon(Some(icon.clone()))?;
@@ -167,11 +236,12 @@ fn apply_tray_state(
     Ok(())
 }
 
-/// The three bundled state glyphs, decoded once at startup.
+/// The bundled state glyphs, decoded once at startup.
 struct TrayIcons {
     idle: tauri::image::Image<'static>,
     sending: tauri::image::Image<'static>,
     error: tauri::image::Image<'static>,
+    removable: tauri::image::Image<'static>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -236,6 +306,7 @@ pub fn run() {
                 idle: load_icon(include_bytes!("../icons/tray-idle.png"))?,
                 sending: load_icon(include_bytes!("../icons/tray-sending.png"))?,
                 error: load_icon(include_bytes!("../icons/tray-error.png"))?,
+                removable: load_icon(include_bytes!("../icons/tray-removable.png"))?,
             };
             let icons = Arc::new(icons);
             let icon_handle = Arc::new(icons.idle.clone());
@@ -315,7 +386,7 @@ pub fn run() {
                     // the "attention needed" condition, so map it to TRAY_ERROR
                     // instead of silently skipping the update (review M10).
                     let new_state = match backend_get_json("/api/system/status") {
-                        Ok(Some(status)) => derive_state(&status),
+                        Ok(Some(status)) => derive_state_live(&status),
                         Ok(None) | Err(_) => TRAY_ERROR,
                     };
                     state_clone.store(new_state, Ordering::Relaxed);
@@ -403,5 +474,192 @@ mod tests {
         assert_eq!(backend_port_from(Some("70000".into())), BACKEND_PORT);
         assert_eq!(backend_port_from(Some("0".into())), BACKEND_PORT);
         assert_eq!(backend_port_from(None), BACKEND_PORT);
+    }
+
+    /// Shape of `/api/system/status` as the poll loop receives it. `usb_mode`
+    /// rides the same object so no third request or boot snapshot is needed.
+    fn status_json(usb_mode: bool) -> serde_json::Value {
+        serde_json::json!({
+            "receiver": "running",
+            "forwarder": "running",
+            "report_retriever": "running",
+            "usb_mode": usb_mode,
+        })
+    }
+
+    fn queue_json(sending: u64, queued: u64, error: u64, failed: u64) -> serde_json::Value {
+        serde_json::json!({ "sending": sending, "queued": queued, "error": error, "failed": failed })
+    }
+
+    #[test]
+    fn derive_state_maps_all_four_states() {
+        let empty = queue_json(0, 0, 0, 0);
+        // components running + empty queue + no usb → idle
+        assert_eq!(derive_state(&status_json(false), Some(&empty)), TRAY_IDLE);
+        // components running + empty queue + usb → removable
+        assert_eq!(
+            derive_state(&status_json(true), Some(&empty)),
+            TRAY_REMOVABLE
+        );
+        // active work → sending
+        assert_eq!(
+            derive_state(&status_json(true), Some(&queue_json(1, 0, 0, 0))),
+            TRAY_SENDING
+        );
+        assert_eq!(
+            derive_state(&status_json(false), Some(&queue_json(0, 3, 0, 0))),
+            TRAY_SENDING
+        );
+        // failed/error studies → error
+        assert_eq!(
+            derive_state(&status_json(true), Some(&queue_json(0, 0, 2, 0))),
+            TRAY_ERROR
+        );
+        assert_eq!(
+            derive_state(&status_json(true), Some(&queue_json(0, 0, 0, 1))),
+            TRAY_ERROR
+        );
+    }
+
+    #[test]
+    fn derive_state_priority_is_error_over_sending_over_removable() {
+        // usb_mode is set throughout — removable is the *lowest* of these three
+        // and must never win when anything higher is true.
+        let status = status_json(true);
+        // error beats sending: failed work + active work → error
+        assert_eq!(
+            derive_state(&status, Some(&queue_json(5, 5, 0, 1))),
+            TRAY_ERROR
+        );
+        // error beats removable: failed work, nothing active → error
+        assert_eq!(
+            derive_state(&status, Some(&queue_json(0, 0, 1, 0))),
+            TRAY_ERROR
+        );
+        // sending beats removable: active work, nothing failed → sending
+        assert_eq!(
+            derive_state(&status, Some(&queue_json(1, 1, 0, 0))),
+            TRAY_SENDING
+        );
+        // nothing pending → removable, proving the arm exists and is last
+        assert_eq!(
+            derive_state(&status, Some(&queue_json(0, 0, 0, 0))),
+            TRAY_REMOVABLE
+        );
+    }
+
+    #[test]
+    fn derive_state_usb_mode_with_busy_queue_is_never_removable() {
+        // The dangerous case on a USB appliance: an operator unplugging mid-
+        // transfer. Any non-empty queue must suppress the hint even when the
+        // components are healthy and usb_mode is on.
+        for (sending, queued, error, failed) in [
+            (1, 0, 0, 0),
+            (0, 1, 0, 0),
+            (3, 3, 0, 0),
+            (0, 0, 1, 0),
+            (0, 0, 0, 7),
+        ] {
+            let got = derive_state(
+                &status_json(true),
+                Some(&queue_json(sending, queued, error, failed)),
+            );
+            assert_ne!(
+                got, TRAY_REMOVABLE,
+                "usb_mode + queue(sending={sending}, queued={queued}, error={error}, failed={failed}) must not be removable"
+            );
+        }
+    }
+
+    #[test]
+    fn derive_state_stopped_component_is_error_even_with_usb_mode() {
+        // usb_mode never masks a broken component — removable is only
+        // reachable when every component reports running.
+        for field in ["receiver", "forwarder", "report_retriever"] {
+            let mut status = status_json(true);
+            status[field] = serde_json::json!("stopped");
+            assert_eq!(
+                derive_state(&status, Some(&queue_json(0, 0, 0, 0))),
+                TRAY_ERROR,
+                "{field} stopped with usb_mode must be error"
+            );
+        }
+        // Same for transient non-running states the endpoint may emit.
+        let mut status = status_json(true);
+        status["forwarder"] = serde_json::json!("starting");
+        assert_eq!(
+            derive_state(&status, Some(&queue_json(0, 0, 0, 0))),
+            TRAY_ERROR
+        );
+    }
+
+    #[test]
+    fn derive_state_missing_component_fields_is_error() {
+        // DIVERGENT DEFAULTS, pinned: Python (tray.py:32-34) treats a missing
+        // component field as "running"; Rust treats it as COMPONENT_DEFAULT
+        // ("stopped") and therefore TRAY_ERROR. The live endpoint always
+        // serializes all three fields, so this only fires on a schema change —
+        // exactly when the tray should fail closed rather than show green.
+        let partial = serde_json::json!({"usb_mode": true});
+        assert_eq!(
+            derive_state(&partial, Some(&queue_json(0, 0, 0, 0))),
+            TRAY_ERROR,
+            "missing component fields must not read as a healthy gateway"
+        );
+        // A single missing field is enough; the other two being present does
+        // not rescue it.
+        let mut partial_one = status_json(true);
+        partial_one["forwarder"].take();
+        assert_eq!(
+            derive_state(&partial_one, Some(&queue_json(0, 0, 0, 0))),
+            TRAY_ERROR
+        );
+    }
+
+    #[test]
+    fn derive_state_unavailable_queue_suppresses_removable() {
+        // The queue fetch failed at the transport level. The backend is up
+        // (status came back), so this is not an error — but without queue data
+        // we have no proof the spool is quiet, so the safe-to-remove hint must
+        // not light up.
+        assert_eq!(derive_state(&status_json(true), None), TRAY_IDLE);
+        assert_eq!(derive_state(&status_json(false), None), TRAY_IDLE);
+        // A stopped component still wins over the unavailable queue.
+        let mut broken = status_json(true);
+        broken["receiver"] = serde_json::json!("stopped");
+        assert_eq!(derive_state(&broken, None), TRAY_ERROR);
+    }
+
+    #[test]
+    fn derive_state_missing_usb_mode_is_not_removable() {
+        // Older backend without the B10 field: default false, never a
+        // safe-to-remove hint we are not entitled to claim.
+        let no_field = serde_json::json!({
+            "receiver": "running",
+            "forwarder": "running",
+            "report_retriever": "running",
+        });
+        assert_eq!(
+            derive_state(&no_field, Some(&queue_json(0, 0, 0, 0))),
+            TRAY_IDLE
+        );
+    }
+
+    #[test]
+    fn state_label_names_all_four_states() {
+        // The label is the tooltip an operator reads; each state needs its own
+        // text (the `_` arm used to silently flatten removable to idle).
+        assert_eq!(state_label(TRAY_IDLE), "QuantumRAD Gateway — idle");
+        assert_eq!(state_label(TRAY_SENDING), "QuantumRAD Gateway — sending");
+        assert_eq!(
+            state_label(TRAY_ERROR),
+            "QuantumRAD Gateway — attention needed"
+        );
+        assert_eq!(
+            state_label(TRAY_REMOVABLE),
+            "QuantumRAD Gateway — safe to remove"
+        );
+        // The fallback arm stays neutral rather than claiming a state.
+        assert_eq!(state_label(255), "QuantumRAD Gateway");
     }
 }

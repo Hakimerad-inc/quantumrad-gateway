@@ -88,35 +88,35 @@ commit: 976 tests, 89.71% coverage, web/ lint + `tsc -b` + 93/93 vitest,
 
 | Item | Status | Notes |
 |---|---|---|
-| 2a `Spool.complete`/`fail` atomic completion | todo | needs real-threading contention test |
-| 2b `_requeue_complete_routes` single `executemany` | todo | |
+| 2a `Spool.complete`/`fail` atomic completion | done | 3 methods wrapped in one transaction; transaction-count tests assert one BEGIN, mutation-verified |
+| 2b `_requeue_complete_routes` single `executemany` | done | resolved inside spool/__init__.py via transaction join; db.py left to B7's owner |
 
 ### Step 3 — Reports retrieval
 
 | Item | Status | Notes |
 |---|---|---|
-| 3a Study-level C-MOVE dedup | todo | add a move-count test |
-| 3b Save-in-handler, no RAM buffering | todo | pairs with 3a |
-| 3c C-FIND early stop | todo | |
+| 3a Study-level C-MOVE dedup | done | moved_studies set; move-count test added — 18 failures when reverted |
+| 3b Save-in-handler, no RAM buffering | done | on_c_store saves before acking; UIDs from the dataset, not the match |
+| 3c C-FIND early stop | done | keyword-only `limit` on find() + Protocol/transport pass-through; fake-AE counter proves the early stop |
 
 ### Step 4 — Web layer
 
 | Item | Status | Notes |
 |---|---|---|
-| `response_model` on 31 remaining ops | todo | then `just gen-api` |
-| Absolute `file_path` out of PHI responses | todo | |
-| Audit verify → `iter_audit_events` streaming | todo | |
-| Session revocation | todo | |
-| Health monitor into a `lifespan` | todo | |
+| `response_model` on 31 remaining ops | done | 38 named schema components; 4 Response-returning ops documented as documentation-only |
+| Absolute `file_path` out of PHI responses | done | scrubbed from 6 sites + omitted from the models (durable against SELECT *) |
+| Audit verify → `iter_audit_events` streaming | done | cursor-per-row on the read conn, 100-error cap + total_error_count/truncated |
+| Session revocation | done | RevocationStore + the route wiring that was missing at the shipped endpoint; e2e test added |
+| Health monitor into a `lifespan` | done | starts/stops under lifespan, joins the thread, respects a pre-set app.state monitor |
 
 ### Step 5 — Tray state machine
 
 | Item | Status | Notes |
 |---|---|---|
-| `SystemStatus.usb_mode` field | todo | |
-| Rust `derive_state` `removable` arm + glyph | todo | |
-| Test the shipped `derive_state` | todo | first test it has ever had |
-| Fix divergent defaults (`running` vs `stopped`) | todo | |
+| `SystemStatus.usb_mode` field | done | read live from the in-memory config at request time, not a boot snapshot |
+| Rust `derive_state` `removable` arm + glyph | done | TRAY_REMOVABLE in both state_label and apply_tray_state; glyph authored |
+| Test the shipped `derive_state` | done | derive_state refactored to be testable (live I/O split out); 9 tests |
+| Fix divergent defaults (`running` vs `stopped`) | done | fail-closed chosen and pinned, documented and tested |
 | Update tray docs once behaviour is real | todo | |
 
 ### Step 6 — Documentation
@@ -160,7 +160,7 @@ commit: 976 tests, 89.71% coverage, web/ lint + `tsc -b` + 93/93 vitest,
 | `just gen-api-check` | pass | api-schema.ts matches the exported schema (no response_model work in Wave A, so no regen needed) |
 | `cargo test` + `cargo tauri build` | pass | 12/12 tests, fmt clean, clippy clean; `cargo tauri build` green at edition 2024 |
 
-**Tally:** 29 done · 25 todo · 0 dropped · 1 blocked — of 64 tracked lines
+**Tally:** 43 done · 10 todo · 0 dropped · 1 blocked — of 64 tracked lines
 (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11 findings were
 dropped up front as stale (see the DROPPED table below), so these 51 represent the
 open surface of the original 81.
@@ -228,7 +228,19 @@ WAVE A — LANDED as 2e2c83f (8 parallel batches, 16 agents incl. verify; gate g
           block was normalized with `cargo fmt` (verified edition-induced by revert)
        └─ A5's ae_title fixture fix is an input to C4 (a11y scan scans that document)
 
-WAVE B — needs Wave A's files settled; B1–B11 interleave by file
+WAVE B — LANDED (6 sweep batches + post-barrier tray batch, 14 agents incl. verify;
+       1014 tests, 90% cov, web/ lint+tsc-b+vitest 93/93, gen-api barrier run for
+       real — 773 lines of typed schema added, cargo test 20/20 + fmt + clippy +
+       tauri build). Two verifier flags, both fixed before commit:
+       └─ B8's revocation mechanism existed but no HTTP request could reach it —
+          routes.py:166 did not thread `request`, so logout() degraded to
+          cookie-only and a replayed token still returned 200. One line, plus an
+          end-to-end test that drives the shipped endpoint (mutation-verified).
+       └─ the B7 "steps a cursor not a fetchall" test passed against a fetchall
+          regression — a buffered generator is still lazy, so row visibility
+          cannot tell them apart. Rewritten to assert the mechanism itself via
+          a spying connection wrapper; now fails on the first row under the
+          mutation.
    B1  spool/__init__.py  2a Spool.complete/fail atomic completion
    B2  spool/__init__.py  2b _requeue_complete_routes executemany   ← same file as B1
    B3  reports/move.py    3a study-level C-MOVE dedup + 3b save-in-handler
@@ -240,7 +252,7 @@ WAVE B — needs Wave A's files settled; B1–B11 interleave by file
    B9  web/__init__.py + main.py  health monitor into a lifespan       ← after A1
    B10 web/routes.py      SystemStatus.usb_mode field                 ← after A3/B5
    B11 src-tauri/src/lib.rs  derive_state `removable` arm + glyph + the first test it
-       has ever had + default divergence fix                          ← after B10
+       has ever had + default divergence fix                           ← after B10
 
 WAVE C — regeneration and the frontend that consumes it
    C1  just gen-api → api-schema.ts          ← barrier: after B5/B6, single pass

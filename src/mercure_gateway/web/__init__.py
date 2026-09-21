@@ -16,7 +16,10 @@ credentials are never combined with wildcard origins.
 
 from __future__ import annotations
 
+import logging
 import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,8 +34,11 @@ if TYPE_CHECKING:
     from mercure_gateway.config import GatewayConfig, WebUIConfig
     from mercure_gateway.disk import DiskMonitor
     from mercure_gateway.spool import Spool
+    from mercure_gateway.web.pipeline import DestinationHealthMonitor
 
 __all__ = ["create_app"]
+
+logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -81,6 +87,36 @@ _SECURITY_HEADERS = {
 }
 
 _HSTS_VALUE = "max-age=31536000; includeSubDomains"
+
+# ``DestinationHealthMonitor.stop`` sets the flag the worker polls and returns
+# immediately — the worker can still be inside a probe (or asleep on the
+# interval) when shutdown begins.  This is the bounded wait that makes the
+# thread's exit deterministic instead of "it dies with the process because it
+# is a daemon", which races a fast restart that rebinds the same probe.
+_MONITOR_JOIN_TIMEOUT_SEC = 5.0
+
+
+def _join_health_monitor(
+    monitor: Any, *, timeout: float = _MONITOR_JOIN_TIMEOUT_SEC
+) -> None:
+    """Wait for the monitor's worker thread to actually exit.
+
+    The join lives here rather than on ``DestinationHealthMonitor`` itself
+    because that module is owned separately; it reaches for the monitor's
+    ``_thread`` on purpose.  A hung probe must not hold shutdown hostage, so
+    the wait is bounded and a survivor is logged and left to die with the
+    process (the thread is a daemon by construction).
+    """
+    thread = getattr(monitor, "_thread", None)
+    if thread is None:
+        return
+    thread.join(timeout)
+    if thread.is_alive():
+        logger.warning(
+            "destination health monitor did not exit within %.1fs; leaving the "
+            "daemon thread to terminate with the process",
+            timeout,
+        )
 
 
 def _bracket_host(host: str) -> str:
@@ -174,9 +210,48 @@ def create_app(
     ``--write-default-config`` paths; when present its purge counters reach the
     metrics route, which is the only place a bounded-but-starving purge loop is
     visible (review P0-11).
+
+    The destination health monitor is constructed here when
+    ``app.state.health_monitor`` is not already set, and its whole lifecycle —
+    start on ASGI startup, stop *and join* on shutdown — runs in the app's
+    lifespan.  A caller that assigns its own monitor before the lifespan runs
+    (tests inject a stub this way) keeps it: the lifespan uses what is there
+    and never overwrites it, and a pre-set monitor is expected to implement
+    ``start``/``stop`` since the lifespan drives both.
     """
     from mercure_gateway import __version__
     from mercure_gateway.web.routes import auth_router, router
+
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Run the destination health monitor for the life of the app.
+
+        ``create_app`` returns before the composition root wires the
+        receiver/forwarder/etc. onto ``app.state``, so a lifespan defined here
+        can only see what *this* function has: the config.  That is all the
+        monitor needs, and it is why the scope stops there instead of pulling
+        the whole composition root in.
+        """
+        # Resolved here, not at module import, so a test (or a future caller)
+        # patching ``mercure_gateway.web.pipeline.DestinationHealthMonitor``
+        # still lands on the construction site.
+        from mercure_gateway.web.pipeline import DestinationHealthMonitor
+
+        monitor: DestinationHealthMonitor | Any = getattr(
+            app.state, "health_monitor", None
+        )
+        if monitor is None:
+            monitor = DestinationHealthMonitor(config)
+            app.state.health_monitor = monitor
+        monitor.start()
+        try:
+            yield
+        finally:
+            # stop() flags the worker; the join is what actually reaps it, and
+            # it is the half the old composition root (main._run_web_admin)
+            # never had a safe place to do.
+            monitor.stop()
+            _join_health_monitor(monitor)
 
     # The version an API consumer reads (and the codegen input) is the
     # product's, not a literal left over from the scaffold — a hardcoded
@@ -196,6 +271,10 @@ def create_app(
         docs_url=None if _docs_off else "/docs",
         redoc_url=None if _docs_off else "/redoc",
         openapi_url=None if _docs_off else "/openapi.json",
+        # NOTE: this keyword slot does not affect middleware order — Starlette
+        # runs user middleware in reverse registration order and the lifespan
+        # is not part of that chain (see the middleware comments below).
+        lifespan=_lifespan,
     )
 
     # Store shared references on app state for route access

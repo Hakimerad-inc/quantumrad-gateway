@@ -108,7 +108,25 @@ class LoginRequest(BaseModel):
     password: str
 
 
-@auth_router.post("/login")
+class StatusResponse(BaseModel):
+    """A bare ``{"status": "ok"}`` ack — the base for the named variants below."""
+
+    status: str
+
+
+class LoginResponse(StatusResponse):
+    """A session cookie was issued (or, with auth off, would have been)."""
+
+
+class LogoutResponse(StatusResponse):
+    """The session cookie was cleared."""
+
+
+class PasswordChangeResponse(StatusResponse):
+    """The password hash was rotated (the hash itself is never returned)."""
+
+
+@auth_router.post("/login", response_model=LoginResponse)
 def login(request: Request, response: JSONResponse, payload: LoginRequest) -> dict[str, str]:
     """Authenticate the operator and issue the session cookie.
 
@@ -140,12 +158,20 @@ def login(request: Request, response: JSONResponse, payload: LoginRequest) -> di
     return {"status": "ok"}
 
 
-@auth_router.post("/logout")
+@auth_router.post("/logout", response_model=LogoutResponse)
 def logout(request: Request, response: JSONResponse) -> dict[str, str]:
-    """Clear the admin session cookie."""
+    """Clear the admin session cookie and revoke the token behind it.
+
+    Deleting the cookie alone revokes nothing — the token stays
+    cryptographically valid for its full TTL, so a captured cookie (or a
+    bearer token exfiltrated to a script, which never had a cookie to lose)
+    kept authorising after logout. Threading *request* through makes the
+    revocation reachable from the shipped endpoint instead of only from an
+    internal call (review P0-8).
+    """
     from mercure_gateway.web.auth import logout as _logout
 
-    _logout(response, secure=request.url.scheme == "https")
+    _logout(response, secure=request.url.scheme == "https", request=request)
     return {"status": "ok"}
 
 
@@ -161,7 +187,11 @@ class PasswordChangeRequest(BaseModel):
     new_password: str = Field(min_length=8)
 
 
-@auth_router.post("/web-ui/password", dependencies=[Depends(require_auth)])
+@auth_router.post(
+    "/web-ui/password",
+    response_model=PasswordChangeResponse,
+    dependencies=[Depends(require_auth)],
+)
 def change_password(request: Request, payload: PasswordChangeRequest) -> dict[str, str]:
     """Set the admin password hash.
 
@@ -247,6 +277,16 @@ class SystemStatus(BaseModel):
     # effect. Server-side so it survives a page reload, unlike the client's
     # session flag.
     config_pending_restart: bool = False
+    # The USB dongle variant is active. Read from the live config rather than
+    # a boot-time snapshot or a device probe: ``usb_mode.enabled`` is
+    # auto-detected at boot (main.py flips it when the spool lands on
+    # removable media) and there is no app.state key or detector query API for
+    # the *current* removable state — hotplug.py surfaces removal *events*,
+    # not "is it removable right now". The in-memory config on app.state is
+    # the mutated value, so reading it at request time reflects what boot
+    # decided; a snapshot taken here would go stale the moment a later boot
+    # changed its mind.
+    usb_mode: bool = False
 
 
 def _get_state(request: Request, name: str) -> _Runnable | None:
@@ -279,6 +319,7 @@ def system_status(request: Request) -> SystemStatus:
         hub_registered=hub_registered,
         hub_streaming=hub_streaming,
         config_pending_restart=_config_pending_restart(request),
+        usb_mode=_config(request).usb_mode.enabled,
     )
 
 
@@ -298,7 +339,14 @@ def _config_pending_restart(request: Request) -> bool:
     return _config(request).model_dump_json() != startup
 
 
-@router.get("/system/health")
+class HealthResponse(BaseModel):
+    """Liveness probe answer (no component state, no PHI — safe to scrape)."""
+
+    status: str
+    version: str
+
+
+@router.get("/system/health", response_model=HealthResponse)
 def health() -> dict[str, str]:
     """Health check endpoint."""
     return {"status": "ok", "version": __version__}
@@ -343,7 +391,7 @@ def system_disk(request: Request) -> DiskStatus:
     )
 
 
-@router.get("/system/metrics")
+@router.get("/system/metrics", response_model=str)
 def system_metrics(request: Request) -> Response:
     """Prometheus text-exposition scrape target (D1 — headless monitoring).
 
@@ -351,6 +399,11 @@ def system_metrics(request: Request) -> Response:
     compute (health, disk, queue/stats, status) — no new data access. PHI-free
     by construction: numbers and fixed labels only, no paths, identifiers, or
     study metadata (reviewers of the scrape feed may include non-admins).
+
+    ``response_model`` here is documentation-only: the handler returns a
+    Starlette ``Response`` instance, which FastAPI short-circuits before model
+    serialization, so this annotates the OpenAPI schema (and the generated TS)
+    and performs no runtime filtering of the body.
 
     When ``web_ui.auth_enabled`` is on the router-level ``require_auth``
     dependency applies here too — the Prometheus job needs the Bearer session
@@ -580,7 +633,22 @@ def system_metrics(request: Request) -> Response:
     return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
-@router.post("/system/start")
+class SystemComponentsResponse(BaseModel):
+    """Ack for a receiver/forwarder start or stop; ``components`` is a comma list."""
+
+    status: str
+    components: str = ""
+
+
+class SystemStartResponse(SystemComponentsResponse):
+    """``/system/start`` result — what actually started, or "none needed"."""
+
+
+class SystemStopResponse(SystemComponentsResponse):
+    """``/system/stop`` result — what actually stopped, or "none running"."""
+
+
+@router.post("/system/start", response_model=SystemStartResponse)
 def system_start(request: Request) -> dict[str, str]:
     """Start receiver + forwarder."""
     receiver = _get_state(request, "receiver")
@@ -595,7 +663,7 @@ def system_start(request: Request) -> dict[str, str]:
     return {"status": "started", "components": ",".join(started) or "none needed"}
 
 
-@router.post("/system/stop")
+@router.post("/system/stop", response_model=SystemStopResponse)
 def system_stop(request: Request) -> dict[str, str]:
     """Graceful shutdown of receiver + forwarder."""
     receiver = _get_state(request, "receiver")
@@ -647,7 +715,11 @@ def service_status(request: Request) -> ServiceStatusModel:
     )
 
 
-@router.post("/service/{action}")
+class ServiceActionResponse(StatusResponse):
+    """A Windows service action was applied; ``status`` echoes the action."""
+
+
+@router.post("/service/{action}", response_model=ServiceActionResponse)
 def service_action(action: str, request: Request) -> dict[str, str]:
     """Install/uninstall/start/stop the Windows service (S07-T9).
 
@@ -731,6 +803,84 @@ class StudyPage(BaseModel):
     items: list[StudySummary]
 
 
+class StudyRecord(BaseModel):
+    """One ``studies`` row as the API surfaces it (the table has no file_path).
+
+    ``study_description``/``study_date``/``mrn`` are kept even though the SPA
+    does not render them yet — a response model drops anything it does not
+    name, and narrowing the wire format is not this change's job.
+    """
+
+    id: int
+    study_uid: str
+    accession: str | None = None
+    mrn: str | None = None
+    patient_name: str | None = None
+    modality: str | None = None
+    study_description: str | None = None
+    study_date: str | None = None
+    num_series: int = 0
+    num_instances: int = 0
+    state: str = "RECEIVED"
+    created_at: str | None = None
+    updated_at: str | None = None
+    retention_delivered_at: str | None = None
+
+
+class StudyRoute(BaseModel):
+    """One ``task_routing`` row — per-destination forwarding state for a study."""
+
+    id: int
+    study_id: int
+    target_name: str
+    target_type: str
+    status: str = "waiting"
+    attempts: int = 0
+    last_error: str | None = None
+    updated_at: str | None = None
+
+
+class StudyRouteDetail(StudyRoute):
+    """A route plus the forwarder's computed next-retry (never persisted)."""
+
+    next_retry_sec: float | None = None
+
+
+class StudyWithRoutes(StudyRecord):
+    """``GET /studies/{id}`` — a study with its raw route rows attached."""
+
+    routes: list[StudyRoute] = Field(default_factory=list)
+
+
+class StudyDetailResponse(StudyRecord):
+    """``GET /studies/{id}/detail`` — a study with per-route state + next-retry."""
+
+    routes: list[StudyRouteDetail] = Field(default_factory=list)
+
+
+class StudyActionResponse(BaseModel):
+    """A study-level mutating ack. ``study_id`` is a string on the wire today."""
+
+    status: str
+    study_id: str
+
+
+class DestinationRouteRow(BaseModel):
+    """A pipeline drill-down row: one route joined to its study for display."""
+
+    route_id: int
+    study_id: int
+    target_type: str
+    status: str = "waiting"
+    attempts: int = 0
+    last_error: str | None = None
+    updated_at: str | None = None
+    study_uid: str
+    accession: str | None = None
+    patient_name: str | None = None
+    modality: str | None = None
+
+
 @router.get("/studies", response_model=StudyPage)
 def list_studies(
     request: Request,
@@ -766,7 +916,7 @@ def list_studies(
     )
 
 
-@router.get("/studies/{study_id}")
+@router.get("/studies/{study_id}", response_model=StudyWithRoutes)
 def get_study(request: Request, study_id: int) -> dict[str, Any]:
     """Study detail with routes and timestamps."""
     sp = _spool(request)
@@ -779,7 +929,7 @@ def get_study(request: Request, study_id: int) -> dict[str, Any]:
     return result
 
 
-@router.get("/studies/{study_id}/routes")
+@router.get("/studies/{study_id}/routes", response_model=list[StudyRoute])
 def get_study_routes(request: Request, study_id: int) -> list[dict[str, Any]]:
     """Per-destination routing status for a study."""
     sp = _spool(request)
@@ -790,7 +940,7 @@ def get_study_routes(request: Request, study_id: int) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in routes]
 
 
-@router.post("/studies/{study_id}/retry")
+@router.post("/studies/{study_id}/retry", response_model=StudyActionResponse)
 def retry_study(request: Request, study_id: int) -> dict[str, str]:
     """Re-forward a FAILED study (or any study with incomplete routes)."""
     sp = _spool(request)
@@ -803,7 +953,7 @@ def retry_study(request: Request, study_id: int) -> dict[str, str]:
     return {"status": "queued", "study_id": str(study_id)}
 
 
-@router.post("/studies/{study_id}/enqueue")
+@router.post("/studies/{study_id}/enqueue", response_model=StudyActionResponse)
 def enqueue_study(request: Request, study_id: int) -> dict[str, str]:
     """Route a RECEIVED study that auto-enqueue left stranded.
 
@@ -828,7 +978,61 @@ def enqueue_study(request: Request, study_id: int) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/pipeline")
+class PipelineComponents(BaseModel):
+    """Which gateway components are running (the pipeline flow view's left rail)."""
+
+    receiver: bool | None = None
+    forwarder: bool | None = None
+    reports: bool | None = None
+
+
+class PipelineRouteCounts(BaseModel):
+    """A destination's route rollup by lifecycle state."""
+
+    complete: int = 0
+    sending: int = 0
+    waiting: int = 0
+    error: int = 0
+
+
+class PipelineReceiverCounts(BaseModel):
+    """Inbound rate, counted in SQL against idx_studies_created_at."""
+
+    received_last_hour: int = 0
+
+
+class PipelineDestinationHealth(BaseModel):
+    """A cached C-ECHO probe result (absent for non-DICOM destinations)."""
+
+    status: str
+    checked_at: str
+    latency_ms: int
+
+
+class PipelineDestination(BaseModel):
+    """One destination node: route rollup, reachability and connection fields."""
+
+    name: str
+    type: str
+    routes: PipelineRouteCounts = Field(default_factory=PipelineRouteCounts)
+    last_activity: str | None = None
+    host: str | None = None
+    port: int | None = None
+    aet: str | None = None
+    health: PipelineDestinationHealth | None = None
+
+
+class PipelineSnapshot(BaseModel):
+    """One-shot payload for the Pipeline flow view (components + queue + rollups)."""
+
+    components: PipelineComponents
+    queue: QueueStats
+    receiver_counts: PipelineReceiverCounts = Field(default_factory=PipelineReceiverCounts)
+    destinations: list[PipelineDestination] = Field(default_factory=list)
+    generated_at: str
+
+
+@router.get("/pipeline", response_model=PipelineSnapshot)
 def pipeline(request: Request) -> dict[str, Any]:
     """One-shot payload for the Pipeline flow view (components + queue +
     per-destination rollups with cached C-ECHO health)."""
@@ -849,7 +1053,22 @@ def pipeline(request: Request) -> dict[str, Any]:
     )
 
 
-@router.get("/destinations")
+class DestinationSummary(BaseModel):
+    """Read-only destination summary: connection fields for DICOM, never secrets.
+
+    ``host``/``port``/``aet`` are present only for DICOM destinations, so the
+    generated type marks them optional rather than ``unknown``.
+    """
+
+    name: str
+    type: str
+    enabled: bool = False
+    host: str | None = None
+    port: int | None = None
+    aet: str | None = None
+
+
+@router.get("/destinations", response_model=list[DestinationSummary])
 def list_destinations(request: Request) -> list[dict[str, Any]]:
     """Read-only summary of configured destinations (no credentials)."""
     out: list[dict[str, Any]] = []
@@ -865,13 +1084,13 @@ def list_destinations(request: Request) -> list[dict[str, Any]]:
     return out
 
 
-@router.get("/destinations/{name}/studies")
+@router.get("/destinations/{name}/studies", response_model=list[DestinationRouteRow])
 def destination_studies(request: Request, name: str) -> list[dict[str, Any]]:
     """Latest studies routed to one destination (pipeline drill-down)."""
     return [_row_to_dict(r) for r in _spool(request).list_recent_routes(name, limit=20)]
 
 
-@router.get("/studies/{study_id}/detail")
+@router.get("/studies/{study_id}/detail", response_model=StudyDetailResponse)
 def study_detail(request: Request, study_id: int) -> dict[str, Any]:
     """Study detail with per-route forwarding state and computed next-retry.
 
@@ -897,7 +1116,19 @@ def study_detail(request: Request, study_id: int) -> dict[str, Any]:
     return result
 
 
-@router.get("/studies/{study_id}/timeline")
+class TimelineEvent(BaseModel):
+    """One audit event in a study's timeline (detail parsed to an object)."""
+
+    id: int
+    ts: str
+    event: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+    user: str | None = None
+    hash: str | None = None
+    study_uid: str | None = None
+
+
+@router.get("/studies/{study_id}/timeline", response_model=list[TimelineEvent])
 def study_timeline(request: Request, study_id: int) -> list[dict[str, Any]]:
     """Audit events touching a study, newest first (pipeline timeline)."""
     import json as _json
@@ -1149,9 +1380,16 @@ def config_warnings(request: Request) -> dict[str, Any]:
     }
 
 
-@router.get("/config/export")
+@router.get("/config/export", response_model=RedactedGatewayConfig)
 def export_config(request: Request) -> JSONResponse:
-    """Export configuration as downloadable JSON file (credentials redacted)."""
+    """Export configuration as downloadable JSON file (credentials redacted).
+
+    ``response_model`` is documentation-only: the handler returns a
+    ``JSONResponse`` instance, which FastAPI short-circuits before model
+    serialization, so it shapes the OpenAPI schema (and the generated TS)
+    without filtering the body at runtime — the redaction that actually
+    protects secrets happens in :func:`redact_config` above.
+    """
     cfg = _config(request)
     data: dict[str, Any] = json.loads(cfg.model_dump_json())
     redacted = redact_config(data)
@@ -1357,7 +1595,14 @@ def _report_retriever(request: Request) -> Any:
     return value
 
 
-@router.post("/studies/{study_id}/reports")
+class ReportRequestResponse(BaseModel):
+    """A PENDING report row was created; ``report_id`` polls its progress."""
+
+    status: str
+    report_id: int
+
+
+@router.post("/studies/{study_id}/reports", response_model=ReportRequestResponse)
 def request_report(
     request: Request,
     study_id: int,
@@ -1383,7 +1628,49 @@ def request_report(
     return {"status": "pending", "report_id": report_id}
 
 
-@router.get("/reports")
+class ReportRow(BaseModel):
+    """One report row.
+
+    Deliberately has **no** ``file_path``: the reports table stores the
+    server-side path of the retrieved DICOM object, which is a PHI-adjacent
+    implementation detail the client never needed (ReportsView reads only id,
+    report_type and status). A model that does not name the field cannot
+    regress the leak even if a future ``SELECT *`` ships it again.
+    """
+
+    id: int
+    study_id: int
+    accession: str | None = None
+    study_uid: str
+    report_type: str
+    status: str = "pending"
+    sop_class_uid: str | None = None
+    retrieved_at: str | None = None
+
+
+class ReportContent(BaseModel):
+    """Report content: base64 PDF bytes, rendered SR text, or a failure reason.
+
+    Like :class:`ReportRow` this carries no ``file_path`` — the server path of
+    the DICOM object the content was read from is not the client's business.
+    """
+
+    report_id: int
+    report_type: str
+    status: str
+    content: str | None = None
+    mime: str | None = None
+    error: str | None = None
+
+
+class ReportRefreshResponse(BaseModel):
+    """On-demand retrieval result; ``status`` is the row's new state."""
+
+    status: str
+    report_id: str
+
+
+@router.get("/reports", response_model=list[ReportRow])
 def list_reports(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
@@ -1391,23 +1678,31 @@ def list_reports(
     status: str | None = None,
     report_type: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List reports with optional filtering."""
+    """List reports with optional filtering.
+
+    ``list_reports`` builds ``SELECT * FROM reports`` and ``get_report`` one
+    row the same way, so both would ship ``file_path`` — the server-side path
+    of the retrieved DICOM object — straight to the client. The enforcement is
+    :class:`ReportRow` above: a model that does not name the field drops it at
+    serialization, which is the durable form (a future ``SELECT *`` cannot
+    reintroduce it) and is why the endpoints do not hand-build the dicts.
+    """
     rows = _spool(request).list_reports(
         status=status, report_type=report_type, limit=limit, offset=offset
     )
     return [_row_to_dict(r) for r in rows]
 
 
-@router.get("/reports/{report_id}")
+@router.get("/reports/{report_id}", response_model=ReportRow)
 def get_report(request: Request, report_id: int) -> dict[str, Any]:
-    """Report detail."""
+    """Report detail (no file_path — see :class:`ReportRow`)."""
     row = _spool(request).get_report(report_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
     return _row_to_dict(row)
 
 
-@router.post("/reports/{report_id}/refresh")
+@router.post("/reports/{report_id}/refresh", response_model=ReportRefreshResponse)
 def refresh_report(request: Request, report_id: int) -> dict[str, str]:
     """Trigger on-demand report retrieval (US-06).
 
@@ -1425,13 +1720,21 @@ def refresh_report(request: Request, report_id: int) -> dict[str, str]:
     return {"status": status, "report_id": str(report_id)}
 
 
-@router.get("/reports/{report_id}/content")
+@router.get("/reports/{report_id}/content", response_model=ReportContent)
 def get_report_content(request: Request, report_id: int) -> dict[str, Any]:
     """Get report content (SR rendered text or PDF bytes).
 
     For a RETRIEVED report this loads the stored DICOM file and either renders
     the SR as structured text or extracts the raw PDF bytes (base64-encoded).
     Pending/failed reports return ``content=None``.
+
+    ``file_path`` below is read and never echoed: the stored path of the DICOM
+    object is how the content is *found*, not something the client needs, and
+    shipping it leaked a server-side path on every branch (see
+    :class:`ReportContent`). The four literals that used to spell it are the
+    one place the model cannot do the job alone — the key is built by hand
+    here, so it is gone from each of them and :class:`ReportContent` keeps it
+    from coming back.
     """
     from mercure_gateway.reports.render import RenderError, RenderService
 
@@ -1446,7 +1749,6 @@ def get_report_content(request: Request, report_id: int) -> dict[str, Any]:
             "report_id": report_id,
             "report_type": report_type,
             "status": status,
-            "file_path": file_path,
             "content": None,
             "mime": None,
         }
@@ -1462,7 +1764,6 @@ def get_report_content(request: Request, report_id: int) -> dict[str, Any]:
                 "report_id": report_id,
                 "report_type": report_type,
                 "status": status,
-                "file_path": file_path,
                 "content": base64.b64encode(pdf_bytes).decode("ascii"),
                 "mime": "application/pdf",
             }
@@ -1471,7 +1772,6 @@ def get_report_content(request: Request, report_id: int) -> dict[str, Any]:
             "report_id": report_id,
             "report_type": report_type,
             "status": status,
-            "file_path": file_path,
             "content": text,
             "mime": "text/plain",
         }
@@ -1480,7 +1780,6 @@ def get_report_content(request: Request, report_id: int) -> dict[str, Any]:
             "report_id": report_id,
             "report_type": report_type,
             "status": status,
-            "file_path": file_path,
             "content": None,
             "mime": None,
             "error": str(exc),
@@ -1492,7 +1791,70 @@ def get_report_content(request: Request, report_id: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/audit")
+class AuditEvent(BaseModel):
+    """One audit row as ``GET /audit`` returns it.
+
+    ``detail`` is the raw stored JSON *string* here (not parsed) — that is what
+    the SPA's AuditView renders verbatim; the timeline endpoint is where it is
+    decoded to an object.
+    """
+
+    id: int
+    ts: str
+    event: str
+    detail: str
+    user: str | None = None
+    hash: str | None = None
+
+
+class AuditExportEvent(BaseModel):
+    """One audit row inside an export bundle, ``detail`` decoded and PHI-scoped."""
+
+    id: int
+    ts: str
+    event: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+    user: str | None = None
+    hash: str | None = None
+
+
+class AuditExportResponse(BaseModel):
+    """Downloadable audit log with chain hashes for offline verification."""
+
+    events: list[AuditExportEvent] = Field(default_factory=list)
+    count: int = 0
+
+
+class AuditVerifyError(BaseModel):
+    """One broken chain link, as the panel renders it."""
+
+    event_id: int
+    reason: str
+
+
+class AuditVerifyResult(BaseModel):
+    """Audit chain verification result.
+
+    ``errors`` is capped at :data:`_MAX_VERIFY_ERRORS_SHOWN` because a JSON
+    document cannot stream: a corrupted log on an appliance that has run for
+    months has a broken link per row, and answering with one object per row
+    would rebuild the whole table in memory — the very thing the streaming
+    verifier exists to avoid. ``total_error_count`` says how many there really
+    are, so the UI can say "showing N of M" instead of silently truncating.
+    """
+
+    valid: bool
+    errors: list[AuditVerifyError] = Field(default_factory=list)
+    total_error_count: int = 0
+    truncated: bool = False
+
+
+# The most broken links the verify response spells out. The rest are counted
+# only — see AuditVerifyResult.
+_MAX_VERIFY_ERRORS_SHOWN = 100
+
+
+@router.get("/audit", response_model=list[AuditEvent])
 def list_audit(
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
@@ -1504,24 +1866,43 @@ def list_audit(
     return [_row_to_dict(r) for r in rows]
 
 
-@router.get("/audit/verify")
+@router.get("/audit/verify", response_model=AuditVerifyResult)
 def verify_audit(request: Request) -> dict[str, Any]:
-    """Verify audit chain integrity."""
+    """Verify audit chain integrity (streaming, with a bounded error list).
 
-    sp = _spool(request)
-    audit = AuditLog(sp.database)
-    ok, errors = audit.verify()
-    error_list = [{"event_id": e.event_id, "reason": e.reason} for e in errors]
-    result: dict[str, Any] = {"valid": ok, "errors": error_list}
-    return result
+    Walks the lazy :meth:`AuditLog.verify_iter` generator instead of
+    ``verify()``: the generator steps a read-only cursor one row at a time, so
+    an integrity check on months of audit history costs bounded memory and
+    never holds the write lock every audit append waits on (item B7). The
+    generator is consumed row by row and never materialized — only the capped
+    ``errors`` list above is ever built.
+    """
+    audit = AuditLog(_spool(request).database)
+    shown: list[AuditVerifyError] = []
+    total = 0
+    for error in audit.verify_iter():
+        total += 1
+        if len(shown) < _MAX_VERIFY_ERRORS_SHOWN:
+            shown.append(AuditVerifyError(event_id=error.event_id, reason=error.reason))
+    return {
+        "valid": total == 0,
+        "errors": shown,
+        "total_error_count": total,
+        "truncated": total > len(shown),
+    }
 
 
-@router.get("/audit/export")
+@router.get("/audit/export", response_model=AuditExportResponse)
 def export_audit(
     request: Request,
     limit: int = Query(10000, ge=1, le=100000),
 ) -> JSONResponse:
     """Export audit log as downloadable JSON (includes chain hashes).
+
+    ``response_model`` is documentation-only: the handler returns a
+    ``JSONResponse`` instance, which FastAPI short-circuits before model
+    serialization, so it shapes the OpenAPI schema (and the generated TS)
+    without filtering the body at runtime.
 
     PHI scoping (§6.4): when ``config.audit.phi_scope`` is ``"minimal"``
     (the default), patient-identifying detail keys are stripped from the
@@ -1563,7 +1944,14 @@ class EchoTarget(BaseModel):
     aet_source: str = "GATEWAY"
 
 
-@router.post("/echo")
+class EchoProbeResponse(BaseModel):
+    """C-ECHO outcome plus the target it was issued against."""
+
+    status: str
+    target: str
+
+
+@router.post("/echo", response_model=EchoProbeResponse)
 def echo_probe(payload: EchoTarget) -> dict[str, Any]:
     """C-ECHO a DICOM target and return its connectivity status.
 
@@ -1593,7 +1981,14 @@ def echo_probe(payload: EchoTarget) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/wizard/validate/{step}")
+class WizardValidationResponse(BaseModel):
+    """One wizard step's validation result (empty errors = the gate passes)."""
+
+    step: str
+    errors: list[str] = Field(default_factory=list)
+
+
+@router.post("/wizard/validate/{step}", response_model=WizardValidationResponse)
 def wizard_validate(step: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Validate one wizard step's data (US-08 AC: per-step validation).
 
@@ -1614,7 +2009,15 @@ def wizard_validate(step: str, payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/logs")
+class LogsResponse(BaseModel):
+    """Tail of the rotating operations log plus how much of it was truncated."""
+
+    lines: list[str] = Field(default_factory=list)
+    total_available: int = 0
+    limit: int = 100
+
+
+@router.get("/logs", response_model=LogsResponse)
 def get_logs(
     request: Request,
     limit: int = Query(100, ge=1, le=5000),
@@ -1645,7 +2048,32 @@ def get_logs(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/diagnostics/export")
+class SpoolSummary(BaseModel):
+    """Study counts by lifecycle state for the diagnostics bundle."""
+
+    total: int = 0
+    states: dict[str, int] = Field(default_factory=dict)
+
+
+class DiagnosticsAuditBundle(BaseModel):
+    """PHI-scoped audit events plus the chain head for offline verification."""
+
+    events: list[AuditExportEvent] = Field(default_factory=list)
+    count: int = 0
+    head_hash: str = ""
+
+
+class DiagnosticsBundle(BaseModel):
+    """One-click support bundle: redacted config + audit + spool summary."""
+
+    config: RedactedGatewayConfig
+    audit: DiagnosticsAuditBundle
+    spool: SpoolSummary
+    generated_at: str
+    version: str
+
+
+@router.get("/diagnostics/export", response_model=DiagnosticsBundle)
 def diagnostics_export(request: Request) -> JSONResponse:
     """One-click support bundle: redacted config + audit + spool summary.
 
@@ -1653,6 +2081,11 @@ def diagnostics_export(request: Request) -> JSONResponse:
     are redacted via :func:`redact_config` (reuses the S04-T2 path); PHI
     scoping follows the audit ``phi_scope`` the same way the audit export
     does, so the bundle never leaks credentials or patient identifiers.
+
+    ``response_model`` is documentation-only: the handler returns a
+    ``JSONResponse`` instance, which FastAPI short-circuits before model
+    serialization, so it annotates the OpenAPI schema (and the generated TS)
+    and performs no runtime filtering of the body.
     """
 
     sp = _spool(request)
@@ -1712,7 +2145,27 @@ def diagnostics_export(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/console/dashboard")
+class ConsoleAuditEvent(BaseModel):
+    """One audit row in the console dashboard, ``detail`` decoded to an object."""
+
+    id: int
+    ts: str
+    event: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+    user: str | None = None
+
+
+class ConsoleDashboard(BaseModel):
+    """Read-only operator dashboard: queue/status/logs/errors (S04-T6)."""
+
+    queue: QueueStats
+    recent_events: list[ConsoleAuditEvent] = Field(default_factory=list)
+    recent_errors: list[ConsoleAuditEvent] = Field(default_factory=list)
+    head_hash: str = ""
+    text_log_tail: list[str] = Field(default_factory=list)
+
+
+@router.get("/console/dashboard", response_model=ConsoleDashboard)
 def console_dashboard(request: Request) -> dict[str, Any]:
     """Read-only operator dashboard: queue/status/logs/errors (S04-T6).
 

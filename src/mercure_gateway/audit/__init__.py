@@ -44,7 +44,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -160,9 +160,11 @@ class AuditLog:
         if isinstance(db, sqlite3.Connection):
             self._conn = db
             self._transaction = None
+            self._db = None
         else:
             self._conn = db.connection()
             self._transaction = db.transaction
+            self._db = db
         self._sink: Callable[[str, dict[str, Any], str | None], None] | None = None
         self._head_anchorer: Callable[[str], None] | None = None
 
@@ -268,10 +270,18 @@ class AuditLog:
     def _db_lock(self) -> threading.Lock:
         """The Database read/write lock, or a local lock for raw connections.
 
-        Read paths (``verify``/``head_hash``/``list_events``/``export_bundle``)
-        iterate the shared connection, so they must hold the same lock as the
-        writers — otherwise a concurrent append commits mid-iteration and a
-        ``verify()`` sees a chain state that never existed.
+        Read paths (``head_hash``/``list_events``/``export_bundle``) iterate
+        the shared write connection, so they must hold the same lock as the
+        writers — otherwise a concurrent append commits mid-iteration and the
+        caller sees a chain state that never existed.
+
+        :meth:`verify_iter` is the exception: it streams through
+        :meth:`Database.iter_audit_events`, which steps a cursor on the
+        per-thread *read-only* connection. SQLite hands that statement a WAL
+        snapshot, so the walk sees one consistent state without taking the
+        write lock — and without blocking every audit append for the duration
+        of a full-table scan (see that method for why a tail append cannot
+        corrupt the prefix already walked).
         """
         lock: threading.Lock = (
             self._transaction.__self__._lock if self._transaction is not None else _LEGACY_LOCK
@@ -286,30 +296,63 @@ class AuditLog:
         broken link.  The *computed* hash is propagated between links, so a
         rewritten row (even with its stored hash recomputed) is detected at the
         next link.
+
+        This is :meth:`verify_iter` materialized. It is the right call for the
+        callers that want the whole list, and free for a healthy chain (which
+        yields no errors); a corrupted log on an appliance that has run for
+        months can yield an unbounded list, and the web endpoint deliberately
+        consumes the lazy form instead (see ``verify_iter``).
         """
-        errors: list[ChainError] = []
+        errors = list(self.verify_iter())
+        return len(errors) == 0, errors
+
+    def verify_iter(self) -> Iterator[ChainError]:
+        """Replay the chain lazily, yielding one :class:`ChainError` per broken link.
+
+        Rows are streamed from :meth:`Database.iter_audit_events`, which steps a
+        cursor one row at a time on the read-only connection, so the walk has
+        bounded peak memory and takes no write lock. The previous
+        implementation ran ``fetchall()`` under the write lock — one operator
+        integrity check blocked every audit append for the duration of a
+        full-table scan, and held the whole table in memory while it did.
+
+        The *computed* hash is propagated between links, so a rewritten row
+        (even with its stored hash recomputed) is detected at the next link.
+
+        Callers that cannot tolerate an unbounded result (a JSON response body
+        is one) must cap it themselves rather than calling ``list()`` on this
+        generator — see ``/api/audit/verify`` in the web routes.
+        """
         expected_hash = _GENESIS_HASH
-        with self._db_lock():
-            rows = self._conn.execute(
-                "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
-            ).fetchall()
-        for row in rows:
+        for row in self._iter_chain_rows():
             computed = _compute_hash(
                 expected_hash, row["ts"], row["event"], row["detail"], row["user"]
             )
             if computed != row["hash"]:
-                errors.append(
-                    ChainError(
-                        event_id=row["id"],
-                        expected_hash=computed,
-                        stored_hash=row["hash"],
-                        reason="hash mismatch",
-                    )
+                yield ChainError(
+                    event_id=row["id"],
+                    expected_hash=computed,
+                    stored_hash=row["hash"],
+                    reason="hash mismatch",
                 )
             # Propagate the *computed* hash: a rewritten row cannot forge the
             # chain forward even when its stored hash was also rewritten.
             expected_hash = computed
-        return len(errors) == 0, errors
+
+    def _iter_chain_rows(self) -> Iterator[sqlite3.Row]:
+        """The chain rows oldest-first, streamed when a Database backs this log."""
+        if self._db is not None:
+            yield from self._db.iter_audit_events()
+            return
+        # Legacy raw connection: there is no Database to hand us a read-only
+        # cursor, so the scan is materialized under the legacy lock. Callers
+        # that need streaming must construct the AuditLog from a Database
+        # (every non-test caller does — the web layer uses the spool's).
+        with _LEGACY_LOCK:
+            rows = self._conn.execute(
+                "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
+            ).fetchall()
+        yield from rows
 
     def list_events(self, limit: int = 100, offset: int = 0) -> list[AuditEvent]:
         """Return the most recent audit events, newest first."""

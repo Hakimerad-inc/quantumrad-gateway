@@ -1318,12 +1318,52 @@ class Database:
         return self._read(sql, params)
 
     def iter_audit_events(self) -> Iterator[sqlite3.Row]:
-        """Yield all audit events in append order (oldest first)."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
-            ).fetchall()
-        yield from rows
+        """Yield audit events in append order (oldest first), one row at a time.
+
+        Streaming, not buffering: the cursor is stepped once per ``next()``,
+        so a caller replaying the whole chain (``AuditLog.verify_iter``) has
+        bounded peak memory rather than materializing months of audit rows,
+        and the rows it has not reached yet are never read at all.
+
+        Concurrency — why this is safe *and* lock-free on a real database:
+
+        The cursor runs on the per-thread **read-only** connection
+        (:meth:`_read_connection`, P1-19), so the walk takes no write lock.
+        Before this change the query was a ``fetchall()`` under ``_lock``,
+        which meant one operator integrity check held the lock every audit
+        append waits on for the duration of a full-table scan — on an
+        appliance that has run for months, that is a self-inflicted outage
+        on the audit path.
+
+        SQLite hands the statement a WAL snapshot at its first step and holds
+        it while the statement stays open, so the walk sees one consistent
+        state rather than a mix of before/after an append. That is the
+        property ``AuditLog._db_lock`` used to buy with the write lock, and
+        the answer to the objection "an append mid-walk must not be visible":
+        an appended row lands beyond the snapshot and is simply not seen; it
+        can never appear *behind* the cursor, because appends only add rows
+        at the tail and the walk is ``ORDER BY id`` oldest-first, so the
+        prefix already verified cannot change underneath it.
+
+        Two degraded paths cannot use the reader and fall back to the write
+        connection: an in-memory database (a second connection would see an
+        empty database, not this one) and the reader-could-not-open fallback
+        (:meth:`_read_connection` documents both). An open statement on the
+        *shared* write connection would collide with another thread's
+        ``BEGIN IMMEDIATE`` on the same connection, so there the whole walk
+        stays under ``_lock`` — the serialization the pre-streaming code had,
+        with bounded memory as the improvement that remains.
+        """
+        sql = "SELECT id, ts, event, detail, user, hash FROM audit_events ORDER BY id"
+        conn = self._read_connection()
+        lock = self._lock if conn is self._conn else contextlib.nullcontext()
+        with lock:
+            cur = conn.execute(sql)
+            while True:
+                row = cur.fetchone()
+                if row is None:
+                    return
+                yield row
 
     # -- Durable hub-event outbox (TD-06) ------------------------------------
 

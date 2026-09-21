@@ -45,7 +45,7 @@ A **lightweight desktop DICOM gateway** (`mercure-gateway`) built in **Python (c
 - Acts as a local DICOM **C-STORE SCP (receiver)** on the workstation,
 - **Forwards** received studies automatically to configured destinations (a central mercure hub, vendor PACS, or other DICOM/SFTP/rsync targets),
 - **Retrieves study reports** from PACS via a flexible retrieval layer (DICOM SR via C-FIND/C-MOVE, with pluggable support for other report transports),
-- Maintains a **local encrypted audit log** with **optional reporting back to a mercure hub/bookkeeper**,
+- Maintains a **local tamper-evident audit log** (chained SHA-256) with **optional reporting back to a mercure hub/bookkeeper**,
 - Runs with a simple tray/desktop UI, minimal configuration, and zero server hardware.
 
 ### Success Criteria (KPIs)
@@ -107,7 +107,7 @@ A **lightweight desktop DICOM gateway** (`mercure-gateway`) built in **Python (c
 
 **MVP (v1.0):**
 - DICOM C-STORE SCP receiver (pynetdicom), **all** compressed syntaxes (JPEG 2000, JPEG-LS, RLE) with selective decompression
-- Local encrypted SQLite spool (persist before forward — "store-and-forward")
+- Local SQLite spool, key-guarded (persist before forward — "store-and-forward")
 - Forwarding to DICOM target(s) (pynetdicom C-STORE SCU) — mercure hub or PACS
 - Multiple destinations per study (configurable); **concurrent forwarding workers** (configurable limit)
 - **Basic modality include/exclude routing rules** (MVP); advanced rules in v1.1
@@ -197,10 +197,10 @@ See [Appendix — User Stories & Acceptance Criteria](#14-appendix--user-stories
 | Component | Responsibility | Key technology |
 |-----------|----------------|----------------|
 | **Receiver (SCP)** | Accepts C-STORE associations from modalities; writes received DICOM + extracted tags to spool | `pynetdicom` (or DCMTK `storescp` via wrapper) |
-| **Spool** | Encrypted local store-and-forward queue (study metadata + file paths + state machine) | SQLite (SQLCipher/encrypted), filesystem storage of DICOM |
+| **Spool** | Local store-and-forward queue (study metadata + file paths + state machine) | SQLite + key-required HMAC verifier (ADR-0004); filesystem storage of DICOM |
 | **Forwarding Engine** | Reads spool; sends to configured destinations; tracks per-destination status; retries with backoff | Reuse mercure `target_types` handler pattern (`dcmsend`, pynetdicom, SFTP, etc.) |
 | **Report Retrieval** | Queries PACS for reports (DICOM SR via C-FIND/C-MOVE; pluggable transports) | pynetdicom; later: DICOMweb QIDO/WADO, HL7/FHIR |
-| **Audit Log** | Append-only event log (receive/forward/retrieve/error); encrypted at rest | SQLite + rotating log; optional streaming to mercure bookkeeper |
+| **Audit Log** | Append-only event log (receive/forward/retrieve/error); tamper-evident via chained SHA-256 | SQLite + rotating log; optional streaming to mercure bookkeeper |
 | **Desktop Shell / UI** | Tray icon, main window (queue/status/logs/settings/reports), guided wizard | Qt (PySide6) or Tauri shell wrapping the Python core |
 | **Config Store** | Validated local configuration (JSON, mirrors mercure config style) | `pydantic`-validated JSON |
 | **Hub Reporter** | Optional: registers gateway + streams events to mercure hub bookkeeper | mercure `bookkeeper` API / REST |
@@ -418,7 +418,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 
 ### 6.1 Data Handling
 
-- **At rest**: SQLite encrypted with SQLCipher (AES-256); DICOM files stored on local disk with restrictive ACLs (per-user profile). Optional full-disk reliance documented.
+- **At rest**: plain SQLite, guarded by a key-required HMAC verifier — a database that was opened with a key stores a `salt:hmac` verifier in its `db_meta` table and refuses to open without the same key (`DatabaseEncryptionError`; ADR-0004). This is a plaintext-open guard, not a cipher: the database itself is not SQLCipher-encrypted (that upgrade was formally evaluated and declined on 2026-09-09 — ADR-0004 amendment). DICOM files on disk are plaintext per deployment norm; OS-level full-disk encryption (BitLocker/LUKS/FileVault) on the data volume is the site requirement for the single-user, single-workstation model (§6.2). Secrets — destination passwords, the hub API key, the web UI password hash — are stored as AES-256-GCM blocks in the config vault under a master password (§6.2).
 - **In transit**: DICOM forwarding supports DICOM-TLS target type; SFTP/rsync over SSH; DICOMweb over HTTPS; hub reporting over HTTPS.
 - **PHI**: gateway inherently handles PHI (DICOM studies). No PHI in UI-external telemetry; audit detail includes metadata but configurable PHI scoping.
 
@@ -448,7 +448,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 
 ## 7. Compliance & Audit
 
-- **Audit log**: append-only, chained-hash, encrypted; records every receive/forward/retrieve/error with timestamps.
+- **Audit log**: append-only, chained-hash (tamper-evident, not encrypted — see §6.1); records every receive/forward/retrieve/error with timestamps.
 - **Export**: one-click bundle export (config redacted + structured log) for support/audit.
 - **Regulatory**: align with mercure's posture; document responsibilities in end-user agreement (data processor/controller split depends on deployment).
 - **Log retention**: configurable (default 1 year local).
@@ -487,7 +487,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 - Core: receiver (SCP), spool (SQLite+files), forwarding to DICOM target(s), **concurrent workers**, retry/backoff, fail-safe retention.
 - **Web admin panel**: FastAPI REST API + SPA (queue/status/logs/config/reports/audit).
 - **Web-based guided first-run wizard** (in SPA browser).
-- Audit: local encrypted log + chained SHA-256 hash.
+- Audit: local tamper-evident log (chained SHA-256 hash; at-rest protection is OS-level FDE plus the key-required DB guard — §6.1).
 - Reports MVP: **DICOM SR + Encapsulated PDF** via C-FIND/C-MOVE, report viewer (SR render + embedded PDF).
 - **Encrypted config file** with master password; config import/export via USB.
 - **Recovery scan** on startup (reconcile spool files with DB).
@@ -555,7 +555,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 | Desktop packaging/UI complexity slows MVP | Schedule | Med | Prototype first; keep UI thin (tray + basic window); defer polish |
 | pynetdicom SCP throughput insufficient | Performance | Low-Med | DCMTK `storescp` fallback (mercure-proven) behind an abstraction |
 | Report retrieval heterogeneity across PACS | Scope creep | High | Pluggable transports; MVP only DICOM SR; document per-PACS caveats |
-| Security review findings (PHI handling) | Compliance | Med | Encrypted-at-rest, TLS, audit chain, redacted exports, external security review before v1.0 release |
+| Security review findings (PHI handling) | Compliance | Med | Key-guarded DB + encrypted credential vault (ADR-0004), TLS, audit chain, redacted exports, external security review before v1.0 release |
 | Fragmentation with mercure core (two codebases) | Maintenance | Med | Reuse models/handlers where practical; document boundary; align event vocabulary |
 | Small team capacity for Windows + Linux | Schedule | Med | Ship Windows MVP first (per decision); Linux in v1.1 |
 | TLS/credential management complexity on Windows | Security | Med | OS keyring integration; documented fallback encrypted file |

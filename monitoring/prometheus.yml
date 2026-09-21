@@ -1,0 +1,27 @@
+# Prometheus scrape configuration for mercure Gateway.
+#
+# The gateway exposes a Prometheus text-exposition target at
+# GET /api/system/metrics (content type "text/plain; version=0.0.4").
+#
+# Load this file with e.g.  prometheus --config.file=monitoring/prometheus.yml
+# or drop the scrape_configs entry below into an existing Prometheus config.
+# Alert rules belong in alerts.yml next to this file (see rule_files below).
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: mercure-gateway
+    static_configs:
+      # The web admin panel binds 127.0.0.1:8080 by default (config key
+      # web_ui.port). Scrape from the gateway host itself, or from a Prometheus
+      # that reaches the panel over an SSH tunnel / TLS front-end.
+      - targets: ["127.0.0.1:8080"]
+    metrics_path: /api/system/metrics
+    # The metrics endpoint sits on the same router as the rest of the admin
+    # API, so when web_ui.auth_enabled is set the job must authenticate.
+    # Configure the Bearer session token issued by the Setup wizard —
+    # Authorization: Bearer <token> is accepted alongside the session cookie
+    # (src/mercure_gateway/web/auth.py). With auth disabled (loopback-only
+    # default) leave this commented out.
+    # bearer_token: <setup-wizard session token>

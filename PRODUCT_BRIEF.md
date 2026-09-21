@@ -9,7 +9,7 @@
 
 ## 1. Elevator Pitch
 
-A **lightweight desktop DICOM gateway** that runs on a standard Windows/Linux PC in small clinics and imaging sites. It receives DICOM studies from modalities (CT, MR, US, etc.), stores them locally with encryption, forwards them reliably to a central **mercure hub** or **vendor PACS**, and retrieves study reports (DICOM SR + PDF) back from the PACS — all with a web-based admin UI, zero server infrastructure, and guided setup in under 10 minutes.
+A **lightweight desktop DICOM gateway** that runs on a standard Windows/Linux PC in small clinics and imaging sites. It receives DICOM studies from modalities (CT, MR, US, etc.), stores them locally, forwards them reliably to a central **mercure hub** or **vendor PACS**, and retrieves study reports (DICOM SR + PDF) back from the PACS — all with a web-based admin UI, zero server infrastructure, and guided setup in under 10 minutes.
 
 ---
 
@@ -18,7 +18,7 @@ A **lightweight desktop DICOM gateway** that runs on a standard Windows/Linux PC
 | Problem | Solution |
 |---------|----------|
 | Small clinics lack IT staff for server-side DICOM stacks | Runs on a desktop PC; no server hardware |
-| Vendor PACS / cloud hubs need reliable edge ingestion | Store-and-forward with encrypted local spool + retry/backoff |
+| Vendor PACS / cloud hubs need reliable edge ingestion | Store-and-forward with key-guarded local spool + retry/backoff |
 | Report retrieval is manual or missing | Automated C-FIND/C-MOVE (SR + PDF) + pluggable transports (DICOMweb, FHIR) |
 | Compliance requires tamper-evident audit trails | Chained SHA-256 audit log + optional hub streaming |
 | Deployment must be simple | Web-based setup wizard, Windows installer + Linux AppImage/deb, auto-update |
@@ -32,7 +32,7 @@ A **lightweight desktop DICOM gateway** that runs on a standard Windows/Linux PC
 | Capability | Description |
 |------------|-------------|
 | **DICOM C-STORE SCP** | Accepts all transfer syntaxes (JPEG, JPEG 2000, JPEG-LS, RLE); selective decompression |
-| **Encrypted Local Spool** | SQLite (SQLCipher) + filesystem; persist-before-ack; recovery scan on startup |
+| **Key-Guarded Local Spool** | SQLite + HMAC key-verifier (a database opened with the wrong key is refused) + filesystem; persist-before-ack; recovery scan on startup; OS full-disk encryption expected (ADR-0004) |
 | **Multi-Destination Forwarding** | Concurrent workers; DICOM, DICOM-TLS, DICOMweb, SFTP, rsync, Folder, S3, XNAT |
 | **Smart Routing Rules** | Modality include/exclude (MVP); advanced by patient/accession/series (v1.1) |
 | **Report Retrieval** | DICOM SR + Encapsulated PDF via C-FIND/C-MOVE; DICOMweb QIDO/WADO (v1.1); HL7/FHIR experimental |
@@ -72,7 +72,7 @@ A **lightweight desktop DICOM gateway** that runs on a standard Windows/Linux PC
 ```
 
 **Tech Stack:**
-- **Core:** Python 3.12+, `pynetdicom`, `pydicom`, `SQLCipher`, `FastAPI`, `uv`
+- **Core:** Python 3.12+, `pynetdicom`, `pydicom`, `cryptography` (AES-256-GCM config vault), `FastAPI`, `uv`
 - **Frontend:** React 19 + TypeScript + Vite + Tailwind/Shadcn UI
 - **Desktop Shell:** Tauri v2 (Rust) — replaces earlier PySide6 approach
 - **CI/CD:** GitHub Actions matrix (Ubuntu + Windows), K6 perf gates, pip-audit, coverage ≥80%
@@ -85,7 +85,7 @@ A **lightweight desktop DICOM gateway** that runs on a standard Windows/Linux PC
 | Sprint | Weeks | Theme | Status | Key Deliverables |
 |--------|-------|-------|--------|------------------|
 | 01 | 1–2 | Spikes, Orthanc rig, demo chain | 🔄 (T5/T8 blocked) | Architecture decisions (Tauri+SPA) |
-| 02 | 3–4 | Receiver SCP + spool storage | ✅ | C-STORE SCP, all syntaxes, encrypted spool |
+| 02 | 3–4 | Receiver SCP + spool storage | ✅ | C-STORE SCP, all syntaxes, key-guarded spool |
 | 03 | 5–6 | Forwarding engine + app wiring | ✅ | Multi-dest, concurrent, retry/backoff |
 | 04 | 7–8 | Audit hardening + encrypted config | ✅ | Chained audit, encrypted config, operator console |
 | 05 | 9–10 | Reports MVP (SR + PDF) | ✅ | C-FIND/C-MOVE retrieval, SR render, PDF viewer |
@@ -124,7 +124,7 @@ A **lightweight desktop DICOM gateway** that runs on a standard Windows/Linux PC
 |-----------|-----------------|---------------------|
 | **Deployment** | Desktop app (Windows/Linux) | Server VMs, Docker, cloud |
 | **Setup Time** | ≤10 min guided web wizard | Hours–days IT effort |
-| **Offline Resilience** | Encrypted local spool + retry | Often requires constant connectivity |
+| **Offline Resilience** | Key-guarded local spool + retry | Often requires constant connectivity |
 | **Report Retrieval** | Built-in SR + PDF + pluggable transports | Manual or vendor-specific |
 | **Audit/Compliance** | Chained hash + HIPAA-aware | Often absent or bolted on |
 | **Hub Integration** | Native mercure bookkeeper streaming | Custom integration required |
@@ -134,9 +134,9 @@ A **lightweight desktop DICOM gateway** that runs on a standard Windows/Linux PC
 
 ## 8. Compliance & Security
 
-- **HIPAA-aligned:** BAA-ready design, minimum necessary access, audit logging, encryption at rest
+- **HIPAA-aligned:** BAA-ready design, minimum necessary access, audit logging, encrypted secrets at rest (config vault), OS full-disk encryption expected for the data volume (ADR-0004)
 - **Audit Trail:** Chained SHA-256 hash per event; tamper-evident; redacted export for support
-- **Encryption:** SQLCipher spool, encrypted config file (master password), OS keyring (v1.1)
+- **Encryption:** key-guarded SQLite spool (HMAC verifier — a database opened with the wrong key is refused), AES-256-GCM config vault for secrets (master password), OS keyring with encrypted-file fallback. SQLCipher was evaluated and **declined** (ADR-0004, 2026-09-09 amendment): OS full-disk encryption (BitLocker/LUKS/FileVault) covers the at-rest attack surface for the single-user, single-workstation model, and a native C-extension dependency was not worth the Windows-build and installer-size (K6) risk.
 - **Network:** TLS for all external connections; `verify` control per destination
 - **Supply Chain:** pip-audit in CI; pinned dependencies via `uv.lock`
 - **Auto-Update:** Ed25519-signed artifacts; SHA-256 verification; rollback on failure
@@ -189,7 +189,7 @@ mercure-gateway/
 | Full PRD | `mercure-gateway-PRD.md` |
 | Sprint Plan | `docs/sprints/README.md` |
 | Sprint 09 Detail | `docs/sprints/sprint-09.md` |
-| ADRs | `docs/adr/ADR-0001` … `ADR-0006` |
+| ADRs | `docs/adr/ADR-0001` … `ADR-0007` |
 | User Guide | `docs/guides/user-guide.md` |
 | Admin Guide | `docs/guides/admin-guide.md` |
 | USB Quick-Start | `docs/guides/usb-quickstart.md` |

@@ -177,71 +177,97 @@ The gateway exposes a Prometheus text-exposition scrape target:
 
     GET /api/system/metrics   →  text/plain; version=0.0.4
 
-All series are numeric gauges with fixed labels — no paths, identifiers, or
-study metadata (PHI-free by construction). Key series:
-`mercure_gateway_up`, `mercure_gateway_uptime_seconds`,
-`mercure_gateway_receiver_running` / `_forwarder_running` /
-`_report_retriever_running`, `mercure_gateway_hub_registered` /
-`_hub_streaming`, `mercure_gateway_queue_depth{state="…"}`,
-`mercure_gateway_disk_usage_percent` / `_disk_total_bytes` /
-`_disk_free_bytes` / `_disk_over_threshold`.
+All series are numeric with fixed labels — no paths, identifiers, or study
+metadata (PHI-free by construction). The endpoint sits on the same router as
+the rest of the admin API, so when `web_ui.auth_enabled` is set the scrape job
+must send the Bearer session token issued by the Setup wizard; with the
+loopback default (auth disabled) it answers anonymously.
 
-**Hub delivery health** — `_hub_streaming` is worker *liveness*: it stays 1
-while the bookkeeper has been unreachable since boot, because the worker
-thread is alive and retrying. Alert on these instead:
+Working config ships in the repository — no need to transcribe it from this
+page:
+
+- [`monitoring/prometheus.yml`](../../monitoring/prometheus.yml) — the scrape
+  job (loopback default, `metrics_path: /api/system/metrics`) with the auth
+  note inline. Run Prometheus against it, or fold the `scrape_configs` block
+  into an existing config.
+- [`monitoring/alerts.yml`](../../monitoring/alerts.yml) — the recommended
+  rule group, 12 alerts: scrape liveness, disk, the three component-liveness
+  gauges, queue backlog and dead letters, hub delivery, the purge budget, and
+  the audit anchor.
+
+Every metric named in the rules is exported by the gateway — the names were
+checked against the instrumentation in `src/mercure_gateway/web/routes.py`
+(`system_metrics`).
+
+### Exported series
+
+| Series | Kind | Meaning |
+|--------|------|---------|
+| `mercure_gateway_up` | gauge | Always 1 when the web panel answers. |
+| `mercure_gateway_uptime_seconds` | gauge | Seconds since process start. |
+| `mercure_gateway_build_info{version="…"}` | info | Version as a label; value always 1. |
+| `mercure_gateway_receiver_running` | gauge | 1 while the DICOM SCP accepts associations. |
+| `mercure_gateway_forwarder_running` | gauge | 1 while the forwarding workers run. |
+| `mercure_gateway_report_retriever_running` | gauge | 1 while the report poll loop is active. |
+| `mercure_gateway_hub_registered` | gauge | 1 when registered with the hub bookkeeper. |
+| `mercure_gateway_hub_streaming` | gauge | 1 while the audit-event *worker thread* is alive — liveness, not delivery health (below). |
+| `mercure_gateway_hub_outbox_depth` | gauge | Audit events queued for hub delivery (queued + in flight). |
+| `mercure_gateway_hub_delivering` | gauge | 1 while a batch POST to the bookkeeper is in flight. |
+| `mercure_gateway_hub_delivered_total` | counter | Events delivered since process start. |
+| `mercure_gateway_hub_delivery_failures_total` | counter | Delivery attempts that failed and were requeued or evicted. |
+| `mercure_gateway_hub_events_evicted_total` | counter | Events dropped from the bounded delivery queue. |
+| `mercure_gateway_audit_anchor_ok` | gauge | 1 when the last scheduled anchor verification passed (below). |
+| `mercure_gateway_audit_anchor_errors_total` | counter | Anchor signature lines failing scheduled verification. |
+| `mercure_gateway_queue_depth{state="…"}` | gauge | Studies per spool state; `state` is one of `RECEIVED`, `QUEUED`, `SENDING`, `SENT`, `ERROR`, `FAILED`. |
+| `mercure_gateway_disk_usage_percent` | gauge | Spool filesystem usage percent. |
+| `mercure_gateway_disk_total_bytes` | gauge | Spool filesystem total bytes. |
+| `mercure_gateway_disk_free_bytes` | gauge | Spool filesystem free bytes. |
+| `mercure_gateway_disk_over_threshold` | gauge | 1 once usage reaches `storage.disk_full_warning_pct`. |
+| `mercure_gateway_purge_iterations_total` | gauge | Delivered studies auto-purged since process start. |
+| `mercure_gateway_purge_budget_hits_total` | gauge | Checks that exhausted the purge iteration cap. |
+
+Two presence notes: the hub series are emitted as **zeros** when hub reporting
+is off, and the two purge series are emitted only when the disk monitor is
+part of the running app — it is omitted when the web app is built without it
+(the test suite, `--write-default-config`), never on a deployed gateway. A
+series that is absent rather than zero is indistinguishable from a healthy one
+in Prometheus, which is why the rules above rely on the zero-emitting series.
+
+**Kinds are as-emitted, not as-named.** Both purge series carry a `_total`
+suffix but are emitted as **gauges** — `routes.py` calls `gauge()` for them
+without a `kind=` argument, so the scrape output advertises `# TYPE … gauge`.
+The `_total` suffix reads as a counter convention and the emission site's own
+comment calls them counters, but the live output is what a rule author must
+match. `increase()` over a gauge still evaluates correctly, so the alert above
+is unaffected.
+
+### Hub delivery health
+
+`_hub_streaming` is worker *liveness*: it stays 1 while the bookkeeper has been
+unreachable since boot, because the worker thread is alive and retrying. Alert
+on these instead:
 
 - `mercure_gateway_hub_outbox_depth` — audit events queued for delivery
   (queued + in flight). Nonzero and not draining means the hub is not keeping
   up (or is down).
 - `mercure_gateway_hub_delivering` — 1 while a batch POST is actually in
-  flight; distinguishes "attempting" from "abandoned".
+  flight; distinguishes "attempting" from "abandoned". It is a transient flag,
+  not an alert predicate — it is 0 between batches on a healthy gateway.
 - `mercure_gateway_hub_delivered_total` / `_hub_delivery_failures_total` /
   `_hub_events_evicted_total` — counters since process start. (All zero, and
   the depth zero, when hub reporting is off.)
 
-**Audit anchor integrity** — `mercure_gateway_audit_anchor_ok` is 1 when the
-last scheduled verification of the hub's signatures over the audit chain
-heads passed (and 1, deliberately, when anchoring is unsigned — see below). A
-0 means stored signatures no longer verify: investigate audit tampering.
-`mercure_gateway_audit_anchor_errors_total` counts the offending lines.
+`_hub_registered` is 0 on every site with hub reporting off, so it is not an
+alert either — read it as a diagnostic on the Dashboard, alongside the depth
+and failure counters.
 
-Scrape config (loopback default; with `web_ui.auth_enabled` the job needs the
-session Bearer token from the Setup wizard credentials):
+### Audit anchor integrity
 
-```yaml
-scrape_configs:
-  - job_name: mercure-gateway
-    static_configs:
-      - targets: ["127.0.0.1:8080"]
-    metrics_path: /api/system/metrics
-```
-
-Recommended alerts (Prometheus rule syntax):
-
-```yaml
-groups:
-  - name: mercure-gateway
-    rules:
-      - alert: GatewayDiskNearFull
-        expr: mercure_gateway_disk_over_threshold == 1
-        for: 5m
-      - alert: GatewayReceiverDown
-        expr: mercure_gateway_receiver_running == 0
-        for: 10m
-      - alert: GatewayBacklogGrowing
-        expr: increase(mercure_gateway_queue_depth{state="QUEUED"}[30m]) > 50
-      - alert: GatewayHubNotDelivering
-        # _hub_streaming stays 1 while the bookkeeper is down (the worker
-        # thread is alive and retrying) — depth + failures are the real signal.
-        expr: mercure_gateway_hub_outbox_depth > 0
-        for: 10m
-      - alert: GatewayAuditAnchorBroken
-        expr: mercure_gateway_audit_anchor_ok == 0
-        for: 5m
-      - alert: GatewayScrapeDead
-        expr: up{job="mercure-gateway"} == 0
-        for: 5m
-```
+`mercure_gateway_audit_anchor_ok` is 1 when the last scheduled verification of
+the hub's signatures over the audit chain heads passed (and 1, deliberately,
+when anchoring is unsigned — see below). A 0 means stored signatures no longer
+verify: investigate audit tampering. `mercure_gateway_audit_anchor_errors_total`
+counts the offending lines.
 
 Audit integrity is checked in two complementary ways:
 

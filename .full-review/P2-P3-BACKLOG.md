@@ -117,18 +117,18 @@ commit: 976 tests, 89.71% coverage, web/ lint + `tsc -b` + 93/93 vitest,
 | Rust `derive_state` `removable` arm + glyph | done | TRAY_REMOVABLE in both state_label and apply_tray_state; glyph authored |
 | Test the shipped `derive_state` | done | derive_state refactored to be testable (live I/O split out); 9 tests |
 | Fix divergent defaults (`running` vs `stopped`) | done | fail-closed chosen and pinned, documented and tested |
-| Update tray docs once behaviour is real | todo | |
+| Update tray docs once behaviour is real | done | ADR-0002's 2026-09-21 amendment item 5 documents all four states with priority and the reachability guard; B11 made it real, D1 wrote it |
 
 ### Step 6 — Documentation
 
 | Item | Status | Notes |
 |---|---|---|
-| ADR-0002 rewrite (Method 2 as shipped) | todo | |
-| ADR-0005 stale vs sprint board | todo | |
-| PRD + PRODUCT_BRIEF SQLCipher claims | todo | docs align to code; ADR-0004 declined |
-| README operator entry point | todo | |
-| `web/README.md` + delete stray JSONs | todo | |
-| Monitoring config as real YAML files | todo | |
+| ADR-0002 rewrite (Method 2 as shipped) | done | dated amendment records Method 2 as shipped; plugin claims corrected to Cargo.toml; four tray states documented. Two verifier-flagged mis-citations fixed in-tree (a `PRD §2.2 Flow C` pointer copied from lib.rs comments that lands on "Failure & recovery"; an ADR-0006 attribution ADR-0006 does not make, re-anchored to packaging.md) |
+| ADR-0005 stale vs sprint board | done | amendment records the DICOMweb transport shipped (S08-T4 + `c4a5f82`); three verifier-flagged defects fixed: a phantom `ReportMover` class (it is `ReportRetrieve`), a false "the seam superseded ReportFinder" claim (it is live wiring the seam wraps), "offset pagination" (it is RFC 5988 Link rel=next), and a pre-existing `>95% (per PRD §1 survey)` attribution to a survey that does not exist |
+| PRD + PRODUCT_BRIEF SQLCipher claims | done | docs align to code; ADR-0004 declined. Scope-corrected: the backlog's `main.py:711` target is stale AND wrong — that comment is a swap-point docstring the ADR amendment explicitly retains, so zero Python files were touched. Verifier caught four further PRD spots (48/110/451/490) left contradicting the corrected §6.1; fixed, so the PRD is internally consistent |
+| README operator entry point | done | operator/developer split, all 7 guides + 7 ADRs linked, diagram now shows the Tauri shell over the Python sidecar. Verifier caught "hub bookkeeper stand-in" (test-rig.md says "mercure hub stand-in") and an overstrong "everything else is referenced from there"; both fixed |
+| `web/README.md` + delete stray JSONs | done | web/README.md documents the four load-bearing traps. The three `.bak-*` strays at the repo root were deleted (user-approved, verified untracked/gitignored/unreferenced first; live config and the master-password sidecar confirmed intact). The two live `mercure-gateway.json` files and the master password were left alone by design |
+| Monitoring config as real YAML files | done | `monitoring/prometheus.yml` + `monitoring/alerts.yml` (12 rules), admin-guide points at them. Verifier caught the two `purge_*` metrics documented as `counter` while `routes.py` emits them as plain `gauge()` with no `kind=` — the batch's claim of having verified the `kind=` sites was false. Reclassified as gauge in both files with a "kinds are as-emitted, not as-named" note, since the code's own comment and the `_total` suffix both read counter |
 
 ### Step 7 — Frontend structure
 
@@ -202,7 +202,80 @@ module-scope `lazy(() => import())`, the regression it guards.
 DestinationsView's stateful load resets, the two polling pages under
 `ui/usePoll`), and converting them would delete real behaviour rather than
 boilerplate. The line above is corrected to 3 and each exclusion is
-recorded in the `useAsync.ts` header, so the reason travels with the code. — of 64 tracked lines
+recorded in the `useAsync.ts` header, so the reason travels with the code.
+
+**Tally after Wave D:** 53 done · 1 todo · 0 dropped · 1 blocked of 64 tracked
+lines (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11
+findings were dropped up front as stale (see the DROPPED table below), so
+these 51 represent the open surface of the original 81. The 1 remaining todo
+is Step 8's CI/release cluster (E1/E3/E4/E5, counted as one line in the tally
+but four batches); E2 stays blocked.
+
+Wave D (documentation aligns to shipped behaviour) — gate re-run in full:
+
+| Check | Status | Notes |
+|---|---|---|
+| `ruff check .` | pass | clean — no Python logic changed this wave |
+| `mypy .` | pass | 72 source files, no issues |
+| `pytest -m "not integration"` | pass | 1014 passed, 5 skipped, 3 deselected — identical to the Wave C baseline, which is the expected result for a docs-only wave |
+| coverage ≥ 80 | pass | 90.19% |
+| `web/`: eslint + `tsc -b` + vitest | pass | lint clean, tsc -b exit 0, 105/105 tests |
+| `just gen-api-check` | pass | api-schema.ts matches; the barrier did not need to run |
+| `cargo` | skipped | no `src-tauri` file changed; `web/vite.config.ts` got a comment-only re-point of its ADR-0002 citation |
+
+**Wave D's verifier flags were real and are fixed in-tree** rather than
+deferred — five of six batches came back NEEDS_ATTENTION, and the flags were
+the drift mode the wave exists to catch, not noise:
+
+- D1 cited `PRD §2.2 Flow C` for the removable tray state — copied from
+  `lib.rs`'s own comments, which say the same thing; PRD §2.2 Flow C is
+  "Failure & recovery". Re-pointed to the `usb_mode` config field. D1 also
+  attributed "shell plus frozen backend" to ADR-0006, which never mentions the
+  backend; re-anchored to `docs/dev/packaging.md` where the bundle layout is
+  actually specified.
+- D2 named a `ReportMover` class that does not exist (it is `ReportRetrieve`)
+  and claimed the S08-T3 seam "superseded" `ReportFinder`/`ReportMover` —
+  `ReportFinder` is live production wiring the seam wraps, not retired. It
+  also said QIDO-RS pages "with `offset` pagination"; the code follows the
+  RFC 5988 `Link: rel="next"` header and tracks no offset. Separately, a
+  pre-existing `>95% of report delivery (per PRD §1 survey)` bullet attributed
+  itself to a survey that does not exist — the PRD's only ≥95% figure is the
+  K3 retrieval SLA, a different quantity. Removed and the removal recorded.
+- D3 left the PRD internally self-contradictory: §6.1 was corrected to deny DB
+  encryption, but lines 48/110/451/490 still asserted it. Fixed, so the file
+  is consistent. This was incomplete execution of the batch's own stated scope
+  ("extend the correction to avoid leaving them self-contradictory"), not a
+  scope question.
+- D4 described `test-rig.md` as "the hub bookkeeper stand-in" — the doc says
+  "mercure hub stand-in" and never mentions a bookkeeper; the bookkeeper stub
+  is a sibling artefact that doc does not cover. Also softened an overstrong
+  "everything else is referenced from there" that `user-guide.md` does not
+  satisfy (it cross-references nothing).
+- D6 documented the two `purge_*` metrics as `counter` while
+  `routes.py` emits them as plain `gauge()` with no `kind=`. The batch claimed
+  it verified `kind=` at the emission sites; it did not — there are exactly
+  five `kind=` occurrences in the file, none of them the purge metrics. The
+  `_total` suffix and the code's own comment both read counter, so this is the
+  code contradicting itself; the doc now matches the live scrape output and
+  records why.
+
+**One stale source comment fixed outside the batch file sets:**
+`web/vite.config.ts:6` said "(ADR-0002 Method 1)" while ADR-0002 is now
+amended to record Method 2 as shipped. Re-pointed at the amendment. D1's
+historical "dynamic port assignment" table row was left verbatim — it is
+under an explicit superseded marker and the amendment describes the real
+mechanism (fixed 8080, overridable by `MERCURE_BACKEND_PORT`) nearby, so
+correcting decision history in place would defeat the convention the wave
+adopted.
+
+**Residue recorded, not acted on** (out of scope for a docs wave): PRD §5.5
+declares `audit.encrypt: true` and `AuditConfig.encrypt` exists in the shipped
+model, but no code reads it — the DB key comes from `load_master_password()`
+at `main.py:756`. And `main.py:753`'s "documented as a follow-up" comment is
+stale relative to the 2026-09-09 amendment that declined the follow-up; it is
+one of the swap-point docstrings that same amendment retains, so it is a
+wording nit, not a defect. Both are candidates for a later wave. — of 64
+tracked lines
 (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11 findings were
 dropped up front as stale (see the DROPPED table below), so these 51 represent the
 open surface of the original 81.

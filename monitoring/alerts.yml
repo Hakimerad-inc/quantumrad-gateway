@@ -1,0 +1,161 @@
+# Prometheus alerting rules for mercure Gateway.
+#
+# Every mercure_gateway_* metric named below is exported by the gateway's
+# scrape endpoint (GET /api/system/metrics); the instrumentation lives in
+# src/mercure_gateway/web/routes.py (system_metrics). Names were checked
+# against that handler — do not add a rule for a metric the gateway does not
+# emit. (The one exception is `up`, a Prometheus-internal liveness metric.)
+#
+# Metric kinds, as exported — kinds were taken from the `kind=` argument at
+# each emission site, not from the metric name:
+#   gauges  : mercure_gateway_up, _uptime_seconds, _receiver_running,
+#             _forwarder_running, _report_retriever_running, _hub_registered,
+#             _hub_streaming, _hub_outbox_depth, _hub_delivering,
+#             _audit_anchor_ok, _disk_usage_percent, _disk_total_bytes,
+#             _disk_free_bytes, _disk_over_threshold,
+#             _purge_iterations_total, _purge_budget_hits_total
+#   counters: mercure_gateway_hub_delivered_total,
+#             _hub_delivery_failures_total, _hub_events_evicted_total,
+#             _audit_anchor_errors_total
+#   labelled: mercure_gateway_build_info{version="…"} (info),
+#             mercure_gateway_queue_depth{state="…"} — the state label takes
+#             exactly RECEIVED, QUEUED, SENDING, SENT, ERROR, FAILED.
+#
+# Note on the purge series: both are emitted as gauges despite the _total
+# suffix (routes.py calls gauge() without kind= for them). increase() over a
+# gauge still evaluates correctly, so the purge alert below is unaffected;
+# recording the kind here is what keeps a future rule author from trusting
+# the suffix.
+#
+# Load via rule_files in prometheus.yml.
+
+groups:
+  - name: mercure-gateway
+    rules:
+      # --- Collection -------------------------------------------------------
+      - alert: GatewayScrapeDead
+        expr: up{job="mercure-gateway"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus is not getting metrics from the gateway"
+          description: "The /api/system/metrics scrape has been failing for 5m — web panel down, or auth enabled without a Bearer token on the job."
+
+      # --- Disk (the primary unmanned-box failure mode) ----------------------
+      - alert: GatewayDiskNearFull
+        expr: mercure_gateway_disk_over_threshold == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spool filesystem is over the warning threshold"
+          description: "Usage has reached storage.disk_full_warning_pct (default 90). Raise max_spool_gb, lower retention_delivered_days, or enable purge_on_disk_full."
+
+      # --- Component liveness ------------------------------------------------
+      # Each *_running gauge mirrors /system/status. All three components are
+      # started unconditionally at boot, so a 0 means the component stopped or
+      # its thread died — not that the feature is unused.
+      - alert: GatewayReceiverDown
+        expr: mercure_gateway_receiver_running == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The DICOM SCP is not accepting associations"
+          description: "Modalities cannot push studies. Check the startup log for a port bind failure (another process on receiver.port?)."
+
+      - alert: GatewayForwarderDown
+        expr: mercure_gateway_forwarder_running == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The forwarding workers are not running"
+          description: "Studies are received but nothing is being delivered. Restart the forwarder from the web panel, or the gateway service."
+
+      - alert: GatewayReportRetrieverDown
+        expr: mercure_gateway_report_retriever_running == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The report retrieval poller is not running"
+          description: "Pending reports will not be retrieved and SLA timers stall. Note the poller starts at boot even when reports are disabled, so a 0 here is always a fault."
+
+      # --- Queue -------------------------------------------------------------
+      - alert: GatewayBacklogGrowing
+        expr: increase(mercure_gateway_queue_depth{state="QUEUED"}[30m]) > 50
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queued backlog is growing"
+          description: "More than 50 studies entered QUEUED than left it in 30m — forwarder slower than the receiver, or a destination is unreachable."
+
+      # FAILED studies are never auto-deleted and never retried on their own —
+      # each one is a human action item (Retry after fixing the destination).
+      - alert: GatewayDeadLettersGrowing
+        expr: increase(mercure_gateway_queue_depth{state="FAILED"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Studies are failing delivery"
+          description: "At least one study moved to FAILED in the last hour. Check the destination's reachability and credentials, then Retry from the Queue view."
+
+      # --- Hub reporting -----------------------------------------------------
+      # mercure_gateway_hub_streaming is worker-thread liveness: it reads 1
+      # while the bookkeeper has been unreachable since boot, because the
+      # worker is alive and retrying. It is NOT a delivery health signal and is
+      # deliberately not alerted on. Depth and the failure counters are.
+      - alert: GatewayHubNotDelivering
+        expr: mercure_gateway_hub_outbox_depth > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit events are not reaching the hub bookkeeper"
+          description: "Outbox depth has been nonzero for 10m — the bookkeeper is down or not keeping up. Reporting failure never blocks forwarding."
+
+      - alert: GatewayHubDeliveryFailures
+        expr: increase(mercure_gateway_hub_delivery_failures_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hub delivery attempts are failing"
+          description: "Delivery attempts failed in the last 15m. Correlate with GatewayHubNotDelivering; check the bookkeeper URL and API key."
+
+      # Eviction = an audit event was dropped from the bounded delivery queue.
+      # Hub reporting is best-effort, but evictions are audit-trail loss and
+      # should be investigated.
+      - alert: GatewayHubEventsEvicted
+        expr: increase(mercure_gateway_hub_events_evicted_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit events were dropped from the hub delivery queue"
+          description: "The bounded outbox overflowed. The bookkeeper was unreachable long enough for events to be discarded."
+
+      # --- Retention ---------------------------------------------------------
+      # The purge loop is iteration-capped so a fast-filling spool cannot pin
+      # the DB write lock. A budget hit means the cap bit: the spool is growing
+      # faster than purge can reclaim it. These counters are emitted only when
+      # the disk monitor is part of the running app (it is omitted for the test
+      # suite and --write-default-config, never on a deployed gateway); an
+      # absent series simply will not fire.
+      - alert: GatewayPurgeBudgetExhausted
+        expr: increase(mercure_gateway_purge_budget_hits_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Purge hit its iteration cap"
+          description: "A single check exhausted its purge budget — the spool is filling faster than purge can reclaim it. Raise max_spool_gb or shorten retention_delivered_days."
+
+      # --- Audit anchor ------------------------------------------------------
+      - alert: GatewayAuditAnchorBroken
+        expr: mercure_gateway_audit_anchor_ok == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hub signatures over the audit chain no longer verify"
+          description: "The last scheduled verification failed. Investigate audit tampering and restore from backup; do not hand-edit rows."

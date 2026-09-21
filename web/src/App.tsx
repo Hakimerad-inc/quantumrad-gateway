@@ -1,15 +1,34 @@
-import { useState, useEffect } from "react";
+import { lazy, Suspense, useState, useEffect } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
-import QueueView from "./pages/QueueView";
-import DestinationsView from "./pages/DestinationsView";
-import ConfigView from "./pages/ConfigView";
-import LogsView from "./pages/LogsView";
-import ReportsView from "./pages/ReportsView";
-import AuditView from "./pages/AuditView";
-import SetupWizardPage from "./pages/SetupWizard";
-import PipelineView from "./pages/PipelineView";
+// Route-level code splitting (batch W4). What this is, and is not:
+//
+//   IS  — a bound on the initial parse/eval of the JS bundle. On a cold start
+//          on a slow machine that shows up as first-paint time, and it is the
+//          whole point for the headless HTTP deployment (05-final-report.md
+//          §"Do not invest in route-level code splitting for the Tauri origin
+//          — there is no network to wait on. It only matters for the headless
+//          HTTP deployment."). An operator who only opens the Dashboard no
+//          longer parses SetupWizard, ConfigView and friends.
+//   IS NOT — a network win in the Tauri build: the frontend is served from
+//          the same process on localhost, so a split chunk costs a
+//          same-process fetch and gains nothing over a warm bundle cache.
+//
+// Dashboard (below) is deliberately NOT lazy: it is the default page and
+// renders on first paint, so putting it behind a chunk boundary would make
+// first paint worse and defeat the point. LoginView and BackendDownView stay
+// eager for the same reason — they are the pre-auth and connection-failure
+// entry points, and the page you land on must not itself be subject to a
+// chunk load failure.
 import LoginView from "./pages/LoginView";
 import BackendDownView from "./pages/BackendDownView";
+const QueueView = lazy(() => import("./pages/QueueView"));
+const DestinationsView = lazy(() => import("./pages/DestinationsView"));
+const ConfigView = lazy(() => import("./pages/ConfigView"));
+const LogsView = lazy(() => import("./pages/LogsView"));
+const ReportsView = lazy(() => import("./pages/ReportsView"));
+const AuditView = lazy(() => import("./pages/AuditView"));
+const SetupWizardPage = lazy(() => import("./pages/SetupWizard"));
+const PipelineView = lazy(() => import("./pages/PipelineView"));
 import { fetchDiskStatus, fetchQueueStats, fetchSystemStatus, isRestartRequired, onRestartRequired, type DiskStatus, type SystemStatus } from "./api";
 import UpdaterBanner from "./ui/UpdaterBanner";
 import ErrorBoundary from "./ui/ErrorBoundary";
@@ -149,6 +168,10 @@ function pageFromHash(): Page {
   return (PAGES.has(h as Page) ? h : "dashboard") as Page;
 }
 
+function PageFallback() {
+  return <div className="loading">Loading page…</div>;
+}
+
 function AppContent() {
   const [page, setPage] = useState<Page>(pageFromHash);
   const [version, setVersion] = useState("");
@@ -260,16 +283,24 @@ function AppContent() {
         {/* Feature boundary (fault-tolerant-error-boundaries): a crash in one
             panel degrades to a banner inside the panel area — the shell (nav,
             banners) stays alive. Keyed by page so switching resets the gate. */}
+        {/* One Suspense boundary for the lazy pages above. It sits inside the
+            ErrorBoundary, which is what makes a chunk that fails to load
+            recoverable rather than a permanently blank pane — see
+            ErrorBoundary's module-load branch. The fallback is deliberately a
+            plain loading line, not a full-page mask: the shell (nav, banners)
+            stays visible and usable while the chunk resolves. */}
         <ErrorBoundary key={page}>
-          {page === "dashboard" && <Dashboard />}
-          {page === "pipeline" && <PipelineView />}
-          {page === "queue" && <QueueView />}
-          {page === "destinations" && <DestinationsView />}
-          {page === "setup" && <SetupWizardPage />}
-          {page === "reports" && <ReportsView />}
-          {page === "audit" && <AuditView />}
-          {page === "config" && <ConfigView />}
-          {page === "logs" && <LogsView />}
+          <Suspense fallback={<PageFallback />}>
+            {page === "dashboard" && <Dashboard />}
+            {page === "pipeline" && <PipelineView />}
+            {page === "queue" && <QueueView />}
+            {page === "destinations" && <DestinationsView />}
+            {page === "setup" && <SetupWizardPage />}
+            {page === "reports" && <ReportsView />}
+            {page === "audit" && <AuditView />}
+            {page === "config" && <ConfigView />}
+            {page === "logs" && <LogsView />}
+          </Suspense>
         </ErrorBoundary>
       </main>
     </div>

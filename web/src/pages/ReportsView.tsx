@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import type { ReportRow, ReportContent } from "../api";
 import { fetchReports, fetchReportContent, refreshReport } from "../api";
+import { useAsync } from "../hooks/useAsync";
 import { IconFileStack, IconRefresh } from "../ui/icons";
 
 const STATUS_BADGE: Record<string, string> = {
@@ -11,28 +12,17 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 export default function ReportsView() {
-  const [reports, setReports] = useState<ReportRow[]>([]);
+  // No loading flag: the panel renders an empty list until the fetch lands.
+  const { data, error, setError, reload } = useAsync<ReportRow[]>((signal) =>
+    fetchReports(200, { signal }),
+  );
+  const reports = data ?? [];
   const [selected, setSelected] = useState<ReportContent | null>(null);
-  const [error, setError] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      setReports(await fetchReports(200));
-      setError("");
-    } catch (e) {
-      // A failed fetch previously left a permanently blank panel (review M8).
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
-  useEffect(function loadReportsOnMount() {
-    load();
-  }, [load]);
 
   const view = async (reportId: number) => {
     try {
       setSelected(await fetchReportContent(reportId));
-      setError("");
+      setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -41,7 +31,7 @@ export default function ReportsView() {
   const doRefresh = async (reportId: number) => {
     try {
       await refreshReport(reportId);
-      await load();
+      await reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }

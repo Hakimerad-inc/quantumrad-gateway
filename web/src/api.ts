@@ -118,16 +118,19 @@ export function isAbortError(e: unknown): boolean {
   return e instanceof DOMException && e.name === "AbortError";
 }
 
+// `init` carries the AbortSignal useAsync owns, so a page change or unmount
+// cancels the request at the network rather than only dropping its result.
 export function fetchStudies(
   page: number,
   pageSize: number,
   state?: string,
   modality?: string,
+  init?: RequestInit,
 ): Promise<StudyPage> {
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
   if (state) params.set("state", state);
   if (modality) params.set("modality", modality);
-  return getJson<StudyPage>(`/api/studies?${params}`);
+  return getJson<StudyPage>(`/api/studies?${params}`, init ?? {});
 }
 
 export function fetchQueueStats(): Promise<QueueStats> {
@@ -201,16 +204,16 @@ export function fetchLogs(limit = 200, init: RequestInit = {}): Promise<LogsResp
   return getJson<LogsResponse>(`/api/logs?limit=${limit}`, init);
 }
 
-export function fetchAudit(limit = 200): Promise<AuditEvent[]> {
-  return getJson<AuditEvent[]>(`/api/audit?limit=${limit}`);
+export function fetchAudit(limit = 200, init?: RequestInit): Promise<AuditEvent[]> {
+  return getJson<AuditEvent[]>(`/api/audit?limit=${limit}`, init ?? {});
 }
 
 export function verifyAudit(): Promise<AuditVerifyResult> {
   return getJson<AuditVerifyResult>("/api/audit/verify");
 }
 
-export function fetchReports(limit = 200): Promise<ReportRow[]> {
-  return getJson<ReportRow[]>(`/api/reports?limit=${limit}`);
+export function fetchReports(limit = 200, init?: RequestInit): Promise<ReportRow[]> {
+  return getJson<ReportRow[]>(`/api/reports?limit=${limit}`, init ?? {});
 }
 
 export function fetchReportContent(reportId: number): Promise<ReportContent> {

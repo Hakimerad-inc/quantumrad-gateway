@@ -134,9 +134,9 @@ commit: 976 tests, 89.71% coverage, web/ lint + `tsc -b` + 93/93 vitest,
 
 | Item | Status | Notes |
 |---|---|---|
-| `useAsync` hook + migrate 7 pages | todo | |
-| Route-level code splitting | todo | |
-| a11y-scan parametrization | todo | |
+| `useAsync` hook + migrate **3** of 7 pages | done | QueueView/AuditView/ReportsView — the other 4 are honest exclusions, not skips: ConfigView's fetch feeds the edit-guard, DestinationsView resets `dirty`/`error` and seeds a list the operator mutates in place, LogsView/PipelineView are pollers under `ui/usePoll` (abort + `document.hidden` gating, P1-20). Documented in the hook header |
+| Route-level code splitting | done | 8 of 10 views lazy under one Suspense; Dashboard/LoginView/BackendDownView stay eager (the page you land on must not be behind a chunk). Failed chunk load → ErrorBoundary module-load branch + full reload, not a blank pane |
+| a11y-scan parametrization | done | 10 `it()` blocks → one `CASES` table + `it.each`; still exactly 10 cases, still `toEqual([])` |
 
 ### Step 8 — CI and release
 
@@ -160,7 +160,49 @@ commit: 976 tests, 89.71% coverage, web/ lint + `tsc -b` + 93/93 vitest,
 | `just gen-api-check` | pass | api-schema.ts matches the exported schema (no response_model work in Wave A, so no regen needed) |
 | `cargo test` + `cargo tauri build` | pass | 12/12 tests, fmt clean, clippy clean; `cargo tauri build` green at edition 2024 |
 
-**Tally:** 43 done · 10 todo · 0 dropped · 1 blocked — of 64 tracked lines
+Wave B (`8f9a57a`) — gate re-run in full after the wave, including the barrier:
+
+| Check | Status | Notes |
+|---|---|---|
+| `ruff check .` | pass | clean |
+| `mypy .` | pass | 72 source files, no issues |
+| `pytest -m "not integration"` | pass | 1014 passed, 5 skipped, 3 deselected (was 976) |
+| coverage ≥ 80 | pass | 90% |
+| `web/`: eslint + `tsc -b` + vitest | pass | lint clean, tsc -b exit 0, 93/93 tests |
+| `just gen-api` (the barrier — run for real) | pass | 773 lines of typed schema added to api-schema.ts; 38 new named components from B5's response_model work |
+| `cargo test` + `cargo tauri build` | pass | 20/20 tests, fmt clean, clippy clean; 3 bundles produced |
+
+**Tally:** 46 done · 8 todo · 0 dropped · 1 blocked
+
+Wave C (frontend structure) — gate re-run in full after the wave:
+
+| Check | Status | Notes |
+|---|---|---|
+| `ruff check .` | pass | clean — no Python changed this wave, re-run anyway |
+| `mypy .` | pass | 72 source files, no issues |
+| `pytest -m "not integration"` | pass | 1014 passed, 5 skipped, 3 deselected; `test_25_concurrent_associations` failed once under full-suite load and passes in isolation and in its file (a concurrency race, not a Wave C regression — Wave C touched no Python) |
+| coverage ≥ 80 | pass | 90% |
+| `web/`: eslint + `tsc -b` + vitest | pass | lint clean, tsc -b exit 0, **105 tests / 17 files** (93 baseline + 8 `useAsync` + 4 `app-lazy`; the a11y refactor is count-neutral) |
+| `just gen-api-check` | pass | api-schema.ts matches — no response_model work this wave, so the barrier did not need to run |
+| `cargo` | skipped | no `src-tauri` file changed; `static/assets/` is gitignored build output |
+
+**Wave C's one verifier flag was real and is fixed in-tree** rather than
+deferred: `app-lazy.test.tsx`'s first case claimed "Dashboard renders on
+first paint, not behind the Suspense boundary" while only asserting that
+Dashboard content renders — a property it could not observe, since
+AuthProvider starts in its loading state and clears it asynchronously, and
+jsdom resolves a registered dynamic import synchronously. It now pins the
+observable part of the decision (`typeof Dashboard === "function`", a
+lazy wrapper is never a function) and is mutation-verified against a real
+module-scope `lazy(() => import())`, the regression it guards.
+
+**Scope correction carried back to the tracker:** the Step 7 line read
+"useAsync hook + migrate 7 pages"; 3 of the 7 are genuine fits. The other
+4 have behaviour the hook cannot express (ConfigView's edit-guard,
+DestinationsView's stateful load resets, the two polling pages under
+`ui/usePoll`), and converting them would delete real behaviour rather than
+boilerplate. The line above is corrected to 3 and each exclusion is
+recorded in the `useAsync.ts` header, so the reason travels with the code. — of 64 tracked lines
 (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11 findings were
 dropped up front as stale (see the DROPPED table below), so these 51 represent the
 open surface of the original 81.
@@ -255,10 +297,11 @@ WAVE B — LANDED (6 sweep batches + post-barrier tray batch, 14 agents incl. ve
        has ever had + default divergence fix                           ← after B10
 
 WAVE C — regeneration and the frontend that consumes it
-   C1  just gen-api → api-schema.ts          ← barrier: after B5/B6, single pass
-   C2  useAsync hook + migrate 7 pages       ← after C1 if adopting generated types
-   C3  route-level code splitting            ← independent of C1/C2
-   C4  a11y-scan parametrization             ← after A5's fixture fix
+   C1  just gen-api → api-schema.ts          DONE during Wave B's serial gate
+       (773 lines of typed schema; the barrier ran once, as designed)
+   C2  useAsync hook + migrate 7 pages       DONE — 3 of 7 (see Step 7 notes)
+   C3  route-level code splitting            DONE — 8 of 10 views, 3 kept eager
+   C4  a11y-scan parametrization             DONE — 10 cases preserved
 
 WAVE D — documentation aligns to shipped behaviour
    D1  ADR-0002 rewrite (Method 2 as shipped)  ← after B11 (4 tray states must be real)

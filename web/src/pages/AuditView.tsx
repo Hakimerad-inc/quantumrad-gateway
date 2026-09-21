@@ -1,33 +1,22 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import type { AuditEvent, AuditVerifyResult } from "../api";
 import { fetchAudit, verifyAudit } from "../api";
+import { useAsync } from "../hooks/useAsync";
 import { IconList, IconCheck, IconX } from "../ui/icons";
 
 export default function AuditView() {
-  const [events, setEvents] = useState<AuditEvent[]>([]);
+  // No loading flag here: the panel renders an empty list until the fetch
+  // lands, exactly as before.
+  const { data, error, setError } = useAsync<AuditEvent[]>((signal) => fetchAudit(200, { signal }));
+  const events = data ?? [];
   const [verify, setVerify] = useState<AuditVerifyResult | null>(null);
   const [checking, setChecking] = useState(false);
-  const [error, setError] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      setEvents(await fetchAudit(200));
-      setError("");
-    } catch (e) {
-      // A failed fetch previously left a permanently blank panel (review M8).
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
-  useEffect(function loadAuditOnMount() {
-    load();
-  }, [load]);
 
   const doVerify = async () => {
     setChecking(true);
     try {
       setVerify(await verifyAudit());
-      setError("");
+      setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

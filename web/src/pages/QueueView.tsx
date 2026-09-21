@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
-import type { StudySummary } from "../api";
+import { useState } from "react";
+import type { StudyPage } from "../api";
 import { fetchStudies, retryStudy, enqueueStudy, requestReport } from "../api";
+import { useAsync } from "../hooks/useAsync";
 import { IconInbox, IconChevronLeft, IconChevronRight } from "../ui/icons";
 
 const PAGE_SIZE = 50;
@@ -25,26 +26,10 @@ function TruncateUid({ uid }: { uid: string }) {
 
 export default function QueueView() {
   const [page, setPage] = useState(1);
-  const [data, setData] = useState<{ items: StudySummary[]; total: number } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await fetchStudies(page, PAGE_SIZE);
-      setData(result);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [page]);
-
-  useEffect(function loadOnMountAndPageChange() {
-    load();
-  }, [load]);
+  const { data, loading, error, setError, reload } = useAsync<StudyPage>(
+    (signal) => fetchStudies(page, PAGE_SIZE, undefined, undefined, { signal }),
+    { deps: [page] },
+  );
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
 
@@ -54,7 +39,7 @@ export default function QueueView() {
       setError("Retry failed — the study has no incomplete routes, or the request was rejected.");
       return;
     }
-    load();
+    void reload();
   };
 
   const handleEnqueue = async (studyId: number) => {
@@ -67,12 +52,12 @@ export default function QueueView() {
       );
       return;
     }
-    load();
+    void reload();
   };
 
   const handleRequestReport = async (studyId: number) => {
     await requestReport(studyId, "sr");
-    load();
+    void reload();
   };
 
   return (

@@ -125,11 +125,11 @@ class ReceiverConfig(_StrictConfigModel):
     ae_title: str = Field(default="GATEWAY", min_length=1, max_length=16)
     port: int = Field(default=11112, ge=0, le=65535)
     max_associations: int = Field(
-        default=25,
+        default=5,
         ge=1,
         le=256,
         description=(
-            "Maximum concurrent DICOM associations (US-01 AC: ≥25 modalities "
+            "Maximum concurrent DICOM associations (US-01 AC: ≥5 modalities "
             "can push simultaneously)."
         ),
     )

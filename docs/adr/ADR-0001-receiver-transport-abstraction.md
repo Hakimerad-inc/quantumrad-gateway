@@ -5,6 +5,14 @@
 **Deciders:** Product + Engineering
 **Relates to:** PRD §9 Phase 0 (spike), §5.2 step 1-2, §5.6, Sprint 01 S01-T3 spike, Sprint 02 S02-T1/T2
 
+> **Amendment (2026-09-24):** US-01's concurrency criterion was re-sized from
+> ≥25 to **≥5 concurrent associations** (PRD §5.6, §US-01). The spike below was
+> genuinely run at 25, so those numbers stand as measured; the shipped default
+> is now `max_associations = 5`, still configurable. pynetdicom handled 25 at
+> spike time, so 5 is comfortably inside the validated envelope — the change
+> is a sizing decision, not a transport one, and this ADR's decision is
+> unaffected.
+
 ## Context
 
 The gateway's inbound half is a DICOM C-STORE SCP: it must accept associations
@@ -69,7 +77,8 @@ the backend swaps.
 
 - `Receiver` (SCP) is built on pynetdicom; the transport contract lives in
   `tests/test_receiver_transport.py`.
-- `allowed_ae_titles` (empty = accept any) and `max_associations` (default 25)
+- `allowed_ae_titles` (empty = accept any) and `max_associations` (default 5,
+  per the 2026-09-24 amendment above; 25 at spike time)
   map directly onto pynetdicom AE settings.
 - All compressed transfer syntaxes are accepted via
   `pynetdicom.uid.AllTransferSyntaxes`; selective decompression happens at

@@ -46,9 +46,14 @@ Remaining todo rows in the tracker (Step 6 = Wave D, Step 8 = Wave E):
 | `eslint` / `globals` / `whatwg-encoding` bumps | E4 |
 | Runbook §4 Windows flake wording | E5 |
 
-**E2 stays blocked** — the perf gate's `--real` mode needs a live Orthanc on the CI
-runner; the receive-scaling ratio assertion is unverifiable without one. Tracked as
-blocked, not forced. Do not unblock it.
+**E2 is closed** — it was blocked on a false premise. The block said the perf
+gate's `--real` mode needs a live Orthanc on the CI runner; it does not.
+`--real` ships its own in-process pynetdicom SCP (`_CountingScp`, bound to an
+ephemeral loopback port — `grep -i orthanc` over `scripts/` and `tests/`
+returns no hit in the perf code). E2a (the `perf-gates-real` CI job) and E2b
+(`scripts/check_receive_scaling.py`, report-only) both landed; see
+`P2-P3-BACKLOG.md`'s "No wave-E item is blocked" for why the 3× scaling floor
+was declined rather than gated.
 
 ---
 
@@ -78,9 +83,12 @@ These are all lessons learned the hard way. None of them are in the repo's docs.
 - **Long-running gates exceed the 120s default Bash timeout.** The full pytest suite
   is ~390–440s; `cargo tauri build` is >600s. Run them in the background
   (`run_in_background: true`) or with an extended `timeout`.
-- **`test_receiver_wire.py::test_25_concurrent_associations` is flaky under
-  full-suite load.** It passes in isolation (3.3s) and in its own file (9/9). If it
-  is the only failure in a full run, re-run it alone before treating it as real.
+- **`test_receiver_wire.py::test_5_concurrent_associations` (formerly
+  `test_25_concurrent_associations`) is flaky under full-suite load.** It passes
+  in isolation and in its own file. If it is the only failure in a full run,
+  re-run it alone before treating it as real. Note the flake was observed at
+  25 associations; the 2026-09-24 re-size to 5 makes it far less likely, but
+  the watch-item stands until a few full runs confirm it.
 
 ### The serial gate — run after each wave, never inside an agent
 
@@ -240,7 +248,8 @@ is width; there is no critical path inside it.
 | Batch | Files | Notes |
 |---|---|---|
 | E1 | `.github/workflows/ci.yml` | Add a `-m "not slow and not integration"` job. The `slow`/`integration` markers are genuinely used (8 decorators across 4 files); integration is already deselected but `slow` is deselected nowhere, so there is no unit-only fast loop. |
-| E2 | — | **BLOCKED.** Perf gate `--real` needs a test-rig Orthanc on the CI runner. Leave blocked. |
+| E2a | `.github/workflows/ci.yml` | **Landed.** `perf-gates-real` job runs `scripts/check_perf_gates.py --real`; `continue-on-error` on PRs, blocking on `main`. The Orthanc dependency was a false attribution — `--real` ships its own in-process pynetdicom SCP. |
+| E2b | `scripts/check_receive_scaling.py` (new) | **Landed, report-only.** Re-establishes the receive-path benchmark that was never committed. Measured 1.77–2.18× at 5 assoc; the 3× floor is declined — it would bake the store-before-ack fsync ceiling in as a target, and US-01's AC requires *accepting* concurrent associations, not scaling throughput. |
 | E3 | `src-tauri/tauri.conf.json`, `update.py`, `.github/workflows/release.yml` | Single global `latest.json` (`tauri.conf.json:36-38`, `release.yml:189`); `PublishedUpdate`/`_is_newer` (`update.py:109,147`) have no channel field to filter on. Runbook §7 is documented discipline, not enforcement. **Touches Rust — the gate needs `cargo tauri build`.** |
 | E4 | `web/package.json` + lockfile | `eslint` 9.39.5 carries a deprecation notice; `globals` a major behind (15.x vs 16.x); `whatwg-encoding` also deprecated. eslint already runs in CI, so this is toolchain currency. |
 | E5 | the runbook | §4 prescribes "re-run the job before treating it as a regression" for two timing flakes — the exact property that makes a red gate carry no information. |
@@ -258,7 +267,8 @@ coverage, the whole frontend gate, `just gen-api-check`, and `cargo test` +
 longer; background them.
 
 Then update `.full-review/P2-P3-BACKLOG.md` to the final tally, which should read
-`57 done · 0 todo · 0 dropped · 1 blocked` (11 remaining rows, E2 the sole blocked).
+`58 done · 0 todo · 0 dropped · 0 blocked` — the sole blocked row (E2) closed when
+its Orthanc premise turned out to be false; it splits to E2a/E2b, both landed.
 
 ---
 

@@ -151,7 +151,7 @@ the job that went red:
 
 | Test | Markers | Runs in | Skipped by |
 | --- | --- | --- | --- |
-| `tests/test_receiver_wire.py:133` — 25 concurrent associations | `@pytest.mark.slow` | `test` (both OSes), `coverage` | `test-fast` |
+| `tests/test_receiver_wire.py:133` — 5 concurrent associations | `@pytest.mark.slow` | `test` (both OSes), `coverage` | `test-fast` |
 | `tests/test_main.py:93`, `:159` — port-readiness after a real subprocess boot | none | `test` (Linux only), `test-fast`, `coverage` | nothing |
 
 The port-readiness pair is `skipif(win32)` — Windows shutdown is the clean-VM

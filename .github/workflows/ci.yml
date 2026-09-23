@@ -132,7 +132,7 @@ jobs:
   # nowhere else in the pipeline — so this is the one place a push gets a
   # signal without waiting on the timing tests. It carries 5 tests
   # (test_backoff_holds_route_against_other_workers, the read-connection
-  # starvation test, the 25-concurrent-associations wire test, and the two
+  # starvation test, the 5-concurrent-associations wire test, and the two
   # real-handler perf-gate runs, which are also `integration` and so already
   # off the per-push matrix); the `test` job above keeps all of them except
   # the integration three. One OS, no coverage, no matrix, so it lands while
@@ -140,7 +140,7 @@ jobs:
   # authoritative full run is still the `test` job above, which `perf-gates`
   # and `coverage` still depend on. A selector that quietly matched
   # everything or nothing would defeat the point — the intent is
-  # `-m "not slow and not integration"` = 1016 of 1022 tests (6 deselected:
+  # `-m "not slow and not integration"` = 1030 of 1036 tests (6 deselected:
   # the 5 slow + 3 integration markers, minus the 2 that carry both).
   test-fast:
     name: unit tests (fast loop)
@@ -209,16 +209,43 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --all-extras
-      # P1-7: the CI gate stays in synthetic mode. That mode's scripted
+      # P1-7: this gate stays in synthetic mode. That mode's scripted
       # handler does no I/O, so it measures the forwarder's queue/claim/route
       # path only — deliberately, because that part's regression is
       # CI-detectable. --real delivers the same batch through the real
       # DICOMHandler to a live C-STORE SCP (the two numbers differ by ~300×),
-      # but a socket-bound measurement flaps on a loaded shared runner. It
-      # belongs on the integration path: `just perf-gates-real`, and the
-      # integration-marked tests the test job deselects below.
+      # but a socket-bound measurement flaps on a loaded shared runner, so it
+      # runs as its own non-blocking-on-PR job below: `perf-gates-real`. This
+      # job is the regression detector; that job is the honest number.
       - name: Run perf gates
         run: uv run python scripts/check_perf_gates.py
+
+  perf-gates-real:
+    # E2a: the same gate through a real socket and real disk I/O. The shipped
+    # --real mode brings its own in-process C-STORE SCP (pynetdicom on an
+    # ephemeral loopback port), so this needs no Docker and no test-rig
+    # Orthanc — it runs on a plain Linux runner.
+    #
+    # Reported on every push and PR but only *required* on main. A
+    # socket-bound measurement varies with runner load, and a flaky gate is
+    # worse than a narrow one: a pass that sometimes means "the runner was
+    # quiet" teaches nothing. The number lands in the job log either way;
+    # making it non-blocking on PRs is how it stays honest while we learn the
+    # variance. See scripts/check_perf_gates.py for the 300x synthetic/real
+    # gap that makes this run worth having at all.
+    name: performance gates --real (integration path)
+    runs-on: ubuntu-latest
+    needs: [quality, test]
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - name: Run perf gates (real mode)
+        run: uv run python scripts/check_perf_gates.py --real
 
   e2e:
     name: E2E (Playwright, seeded gateway)

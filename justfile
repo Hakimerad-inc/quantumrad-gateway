@@ -55,9 +55,11 @@ perf:
 # The same batch delivered by the real DICOMHandler through an actual socket
 # to a local C-STORE SCP, reading real .dcm files off a temp spool and
 # counting instances that arrived on the wire. The synthetic number and the
-# real one differ by ~300×, and only the real one means anything. Runs the
-# integration path, not the CI gate: a socket-bound measurement flaps on a
-# loaded shared runner (see the integration marker in the test suite).
+# real one differ by ~300×, and only the real one means anything. This is the
+# integration path — also run by CI's perf-gates-real job, which reports on
+# every push but is only required on main because a socket-bound measurement
+# flaps on a loaded shared runner (see the integration marker in the test
+# suite).
 perf-gates-real:
     uv run python scripts/check_perf_gates.py --real
 

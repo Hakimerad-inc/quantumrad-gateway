@@ -55,7 +55,10 @@ class Receiver:
         self._running = False
         self._ae = AE(ae_title=self.config.ae_title)
         self._ae.maximum_pdu_size = _MAX_PDU_SIZE
-        # US-01 AC: ≥25 concurrent modalities; pynetdicom default is 10.
+        # US-01 AC: ≥5 concurrent modalities. Set explicitly rather than
+        # inheriting pynetdicom's default of 10, so the shipped ceiling tracks
+        # the sized requirement — operators with more modalities than that
+        # raise it in config.
         self._ae.maximum_associations = self.config.max_associations
         # Accept every standard transfer syntax (compressed + native) on each
         # supported SOP class — the refinement requires ALL compressed syntaxes

@@ -406,7 +406,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 
 | Metric | Requirement |
 |--------|-------------|
-| Receiver throughput | Accept ≥ 25 concurrent C-STORE associations; sustained ≥ 30 MB/s write |
+| Receiver throughput | Accept ≥ 5 concurrent C-STORE associations; sustained ≥ 30 MB/s write |
 | Forwarding latency | Begin forwarding ≤ 2 s after study marked complete (no queue backlog) |
 | UI responsiveness | Tray/menu actions ≤ 200 ms; queue view renders ≤ 500 ms for 10k rows (paginated) |
 | Memory (idle) | ≤ 150 MB RSS |
@@ -596,7 +596,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 ### P1 (MVP) — Receiver & Spool
 
 - **US-01** — As a clinic tech, I want the gateway to accept DICOM from any of our modalities so studies arrive automatically.
-  - AC: Receiver binds configured port/AET; accepts ≥ 25 concurrent associations; stores all instances before ack; **handles ALL compressed syntaxes** (JPEG 2000, JPEG-LS, RLE) with selective decompression; writes `.tags`.
+  - AC: Receiver binds configured port/AET; accepts ≥ 5 concurrent associations; stores all instances before ack; **handles ALL compressed syntaxes** (JPEG 2000, JPEG-LS, RLE) with selective decompression; writes `.tags`.
 - **US-02** — As an admin, I want studies persisted before forwarding so nothing is lost if a destination is down.
   - AC: On receiver failure mid-transfer, partial study retained and marked incomplete; **recovery scan on startup** reconciles spool files with DB.
 

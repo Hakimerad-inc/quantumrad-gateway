@@ -17,12 +17,16 @@ Two modes (review P1-7 — the throughput gate used to measure a fake):
   through an actual TCP socket to a local C-STORE SCP, reading real DICOM
   files off a real (temp) spool.  This is the gate that means something;
   it is marked ``slow``/``integration`` in ``tests/test_perf_gates.py`` and
-  runs on the integration path, not on every push.
+  is run by CI's ``perf-gates-real`` job.  That mode brings its own
+  in-process SCP (pynetdicom on an ephemeral loopback port), so it needs no
+  Docker and no test-rig Orthanc — it runs on a plain Linux runner.
 
 The CI default is deliberately the fast mode: on a loaded free-tier runner
 a socket-bound measurement has enough variance to flap, and a flaky gate is
-worse than a narrow one.  ``--real`` is the number to watch on a quiet
-machine and in the nightly / integration run.
+worse than a narrow one.  ``--real`` therefore reports on every push and PR
+but is only required on ``main`` (``continue-on-error`` off-main); the number
+lands in the job log either way.  ``--real`` is the number to watch on a
+quiet machine and in the nightly / integration run.
 
 Measured 2026-09-19 (dev ext4, quiet box, 3 runs): synthetic 2442 items/s
 vs real 8.1–8.6 items/s — roughly **300×** apart.  The fake measurement was

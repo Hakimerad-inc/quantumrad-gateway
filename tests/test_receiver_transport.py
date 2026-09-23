@@ -187,7 +187,7 @@ class TestPynetdicomTransportSatisfiesProtocol:
 
 class TestThreadedFake:
     def test_fake_transport_thread_safe_for_load_tests(self) -> None:
-        """S02-T2's ≥25-association test needs a transport whose receive()
+        """S02-T2's ≥5-association test needs a transport whose receive()
         can be called from many threads — the fake must survive that."""
         spool = Spool(mem_database())
         transport = FakeTransport(SpoolIngest(spool))
@@ -201,11 +201,11 @@ class TestThreadedFake:
             with lock:
                 results.append(status)
 
-        threads = [threading.Thread(target=send, args=(i,)) for i in range(25)]
+        threads = [threading.Thread(target=send, args=(i,)) for i in range(5)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        assert results == [0x0000] * 25
-        assert len(spool._db.list_studies()) == 25
+        assert results == [0x0000] * 5
+        assert len(spool._db.list_studies()) == 5

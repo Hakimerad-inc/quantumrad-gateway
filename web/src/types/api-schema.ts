@@ -1871,8 +1871,8 @@ export interface components {
             port: number;
             /**
              * Max Associations
-             * @description Maximum concurrent DICOM associations (US-01 AC: ≥25 modalities can push simultaneously).
-             * @default 25
+             * @description Maximum concurrent DICOM associations (US-01 AC: ≥5 modalities can push simultaneously).
+             * @default 5
              */
             max_associations: number;
             /**

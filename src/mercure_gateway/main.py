@@ -753,8 +753,12 @@ def main(argv: list[str] | None = None) -> int:
     spool_dir.mkdir(parents=True, exist_ok=True)
     # Activate the at-rest guard on the spool database (review H3): when a master
     # password is configured, open_database derives an HMAC verifier from it so a
-    # database opened with a different/again key is refused (ADR-0004). True
-    # SQLite *encryption* still requires SQLCipher — documented as a follow-up.
+    # database opened with a different/again key is refused (ADR-0004). This is
+    # a plaintext-open guard, not SQLite encryption: at-rest confidentiality
+    # rests on OS full-disk encryption, and ADR-0004's 2026-09-09 amendment
+    # formally declined the SQLCipher path (packaging weight vs. the residual
+    # exposure under FDE). The swap points remain documented in spool/db.py and
+    # audit/__init__.py should that posture change.
     from mercure_gateway.config.encryption import load_master_password
 
     database = open_database(spool_dir / "mercure-gateway.db", encrypt_key=load_master_password())

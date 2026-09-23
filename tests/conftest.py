@@ -6,6 +6,7 @@ protocol contracts without real DICOM/network I/O.
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 
@@ -34,6 +35,71 @@ def pytest_configure(config: pytest.Config) -> None:
     if config.getoption("cov_source"):
         os.environ["COVERAGE_PROCESS_START"] = str(
             (Path(config.rootpath) / "pyproject.toml").resolve(),
+        )
+
+    _reject_undeclared_markers(config)
+
+
+# Markers pytest registers itself and therefore accepts under --strict-markers
+# without a matching `markers` entry in pyproject.toml. Read out explicitly
+# because there is no public registry: `pytest.mark._markers` is populated
+# lazily and is empty at import time (pytest 9.1.1).
+_BUILTIN_MARKERS = frozenset(
+    {"filterwarnings", "parametrize", "skip", "skipif", "usefixtures", "xfail", "xpass"}
+)
+
+
+def _referenced_marker_names(markexpr: str) -> list[str]:
+    """Return the marker names a ``-m`` expression references.
+
+    Parsed with the stdlib ``ast`` rather than pytest's internal
+    ``_pytest.mark.expression``: that API is undocumented and its compiled
+    ``co_names`` carry a ``$`` prefix in 9.1.x. The marker grammar is plain
+    Python identifiers joined by ``and``/``or``/``not`` and parentheses, so an
+    ``ast`` expression parses all of it.
+
+    A syntactically broken expression is reported by pytest itself (exit 4),
+    so there is nothing to add here — returning an empty list lets that error
+    stand rather than competing with it.
+    """
+    try:
+        tree = ast.parse(markexpr.strip(), mode="eval")
+    except SyntaxError:
+        return []
+    return [node.id for node in ast.walk(tree) if isinstance(node, ast.Name)]
+
+
+def _reject_undeclared_markers(config: pytest.Config) -> None:
+    """Fail a run whose ``-m`` selector names a marker that was never declared.
+
+    ``--strict-markers`` validates markers *applied to a test*, but not the
+    names inside a ``-m`` expression: an unknown name there simply matches
+    nothing. A typo in the CI selector (``-m "not sloww and not integration"``)
+    therefore degrades silently to the full selection — the test-fast job would
+    run the slow tests it exists to skip, and still pass. The failure is
+    invisible unless you notice the deselected count, which nothing asserts.
+    """
+    markexpr: str | None = config.getoption("markexpr")
+    if not markexpr:
+        return
+
+    declared = {m.split(":", 1)[0].strip() for m in config.getini("markers")}
+    if not declared:
+        # No markers declared means --strict-markers is not in force either;
+        # this check has nothing to compare against.
+        return
+
+    unknown = sorted(
+        {
+            name
+            for name in _referenced_marker_names(markexpr)
+            if name not in declared and name not in _BUILTIN_MARKERS
+        }
+    )
+    if unknown:
+        raise pytest.UsageError(
+            f"Unknown marker(s) referenced by -m {markexpr!r}: {', '.join(unknown)}. "
+            f"Declared markers: {', '.join(sorted(declared))}."
         )
 
 

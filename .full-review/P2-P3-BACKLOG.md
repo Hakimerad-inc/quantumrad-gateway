@@ -341,14 +341,22 @@ the measured pydicom import cost that motivates it), and makes "it passes in
 isolation" explicitly *not* flake evidence — the jsdom 28 failure was
 deterministic in the full run and invisible standalone.
 
-**Residue recorded, not acted on** (E1's agent found it, deliberately not
-fixed as out of scope): `--strict-markers` does not validate marker names
-*inside* a `-m` expression, so `pytest -m "not sloww and not integration"`
-silently degrades to the full selection and still passes. The `test-fast`
-job's own selector is correct as committed; the blind spot is that a future
-typo in it is caught by nothing. A `conftest.py` hook that resolves the
-expression against the declared markers would close it — candidate for a
-later wave.
+**Residue closed out** (`1a13bb9`, 2026-09-23): `--strict-markers` does not
+validate marker names *inside* a `-m` expression, so `pytest -m "not sloww and
+not integration"` silently degraded to the full selection and still passed —
+measured at 1030 collected / 3 deselected against the correct 1027 / 6. The
+`test-fast` job's own selector was correct as committed; the blind spot was that
+a future typo in it was caught by nothing. `tests/conftest.py` now resolves the
+`-m` expression against the declared markers (stdlib `ast`, since pytest's
+internal expression API is undocumented and its compiled `co_names` carry a `$`
+prefix in 9.1.x) and raises `pytest.UsageError` on an unknown name. The parser
+strips the expression first: argparse yields a leading space for a `-m VALUE`
+single argv token, which `ast.parse(..., mode="eval")` rejects as an indent
+error — unstripped, the guard no-ops on exactly the malformed input it exists
+for. Pinned by `tests/test_marker_selection.py`, which runs pytest in a real
+subprocess because the hook fires at configure time; the typo test is
+mutation-verified to fail when the guard is disabled, while the two
+false-positive controls pass either way.
 
 ### Known blockers
 

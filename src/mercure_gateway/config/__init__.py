@@ -373,6 +373,14 @@ class AuditConfig(_StrictConfigModel):
     """Local tamper-evident audit log configuration."""
 
     local: bool = True
+    # Reserved, not yet wired. The shipped at-rest posture is ADR-0004's:
+    # OS full-disk encryption + the HMAC plaintext-open guard on the spool
+    # database (keyed from the config master password), and SQLCipher was
+    # formally declined 2026-09-09. Nothing reads this field today — the DB
+    # key comes from load_master_password() unconditionally — so it must not
+    # be presented as enabling encryption. It is kept (not removed) so an
+    # existing operator config that sets it still loads under extra="forbid";
+    # flip it to a real switch only alongside an ADR that changes the posture.
     encrypt: bool = True
     phi_scope: Literal["minimal", "full"] = Field(
         default="minimal",

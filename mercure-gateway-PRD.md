@@ -370,7 +370,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
   },
   "audit": {
     "local": true,
-    "encrypt": true,
+    "encrypt": true,                     // RESERVED — accepted but not yet wired; see §6.1
     "hub_reporting": { "enabled": false, "bookkeeper_url": "", "api_key": "" }
   },
   "storage": {
@@ -617,7 +617,7 @@ These are **explicitly non-goals for MVP** and are listed only to bound scope. I
 ### P1 — Audit & UI
 
 - **US-07** — As an admin, I want a complete, tamper-evident local audit log.
-  - AC: Every event recorded with **chained SHA-256 hash**; log exportable (redacted) via web admin; encryption enabled by default.
+  - AC: Every event recorded with **chained SHA-256 hash**; log exportable (redacted) via web admin; the spool database's key-required at-rest guard on by default (ADR-0004 — a guard, not SQLCipher; see §6.1).
 - **US-08** — As a clinic tech, I want a guided first-run wizard.
   - AC: Non-technical user completes **web-based setup** ≤ 10 min; connectivity validated at each step; status clearly shown in SPA.
 

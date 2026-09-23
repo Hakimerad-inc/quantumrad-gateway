@@ -44,7 +44,7 @@ jobs:
             target: linux-x86_64
             bundles: deb,appimage
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # tag-push: GITHUB_REF_NAME is the tag. workflow_dispatch with the
           # tag input: check the (immutable) tag's commit so built sources match
@@ -58,7 +58,7 @@ jobs:
       - name: Setup Rust (Tauri)
         uses: dtolnay/rust-toolchain@stable
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: web/.nvmrc
           cache: npm
@@ -95,7 +95,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.MERCURE_TAURI_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --bundles ${{ matrix.bundles }} --config tauri.release.conf.json
       - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bundles-${{ matrix.target }}
           path: |
@@ -113,14 +113,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Download all bundle artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: bundles-windows-x86_64
           path: dist
       - name: Download linux bundles
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: bundles-linux-x86_64
           path: dist

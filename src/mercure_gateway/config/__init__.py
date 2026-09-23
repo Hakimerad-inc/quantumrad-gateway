@@ -417,6 +417,18 @@ class UpdateConfig(_StrictConfigModel):
             "archives. Empty = updates cannot verify (fail-closed)."
         ),
     )
+    channel: str = Field(
+        default="",
+        description=(
+            "Release channel this install tracks: 'stable' or 'rc'. "
+            "Empty = derive from the running version (an X.Y.Z-rcN suffix "
+            "means rc), which is what almost every deployment wants. A stable "
+            "install is never offered a pre-release. Pin 'rc' here only to "
+            "deliberately run the candidate track — this is the supported "
+            "replacement for repointing update_url at a channel-specific "
+            "manifest."
+        ),
+    )
 
 
 def _default_spool_dir() -> str:

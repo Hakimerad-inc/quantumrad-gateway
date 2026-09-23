@@ -108,22 +108,37 @@ def test_check_update_none_when_up_to_date(mock_get: MagicMock, updater: Updater
 # ══════════════════════════════════════════════════════════════════════
 
 
-def _check_with(manifest_version: str, current_version: str) -> UpdateResult:
-    """Run check_update() with a manifest version against a running version."""
+def _check_with(
+    manifest_version: str,
+    current_version: str,
+    *,
+    manifest_channel: str | None = None,
+    channel: str | None = None,
+) -> UpdateResult:
+    """Run check_update() with a manifest version against a running version.
+
+    ``manifest_channel=None`` omits the key entirely (the shape of every
+    pre-channel latest.json); a string emits it. ``channel`` pins the
+    install's channel the way ``config.update.channel`` does.
+    """
+    payload: dict[str, object] = {
+        "version": manifest_version,
+        "url": f"https://updates.example.com/releases/{manifest_version}.tar.gz",
+        "signature": "",
+        "checksum_sha256": "",
+    }
+    if manifest_channel is not None:
+        payload["channel"] = manifest_channel
     with patch("requests.get") as mock_get:
         resp = MagicMock()
         resp.ok = True
-        resp.json.return_value = {
-            "version": manifest_version,
-            "url": f"https://updates.example.com/releases/{manifest_version}.tar.gz",
-            "signature": "",
-            "checksum_sha256": "",
-        }
+        resp.json.return_value = payload
         mock_get.return_value = resp
         return Updater(
             update_url="https://updates.example.com/latest.json",
             current_version=current_version,
             public_key=_PUBLIC_B64,
+            channel=channel,
         ).check_update()
 
 
@@ -170,6 +185,124 @@ def test_check_update_fails_closed_on_an_unparseable_version() -> None:
 
     assert result.available is False
     assert result.error is not None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Channel gate — a stable install is never offered a pre-release
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_channel_for_version_derives_from_the_suffix() -> None:
+    """The channel follows the form sync_version.py actually publishes."""
+    from mercure_gateway.update import _channel_for_version
+
+    assert _channel_for_version("1.1.0") == "stable"
+    assert _channel_for_version("1.1.0-rc1") == "rc"
+    assert _channel_for_version("0.9.0-rc7") == "rc"
+
+
+def test_channel_for_version_fails_closed_on_an_unparseable_version() -> None:
+    """A version we cannot classify is not guessed at."""
+    from mercure_gateway.update import _channel_for_version
+
+    with pytest.raises(ValueError):
+        _channel_for_version("latest")
+
+
+def test_a_stable_install_is_not_offered_a_higher_prerelease() -> None:
+    """THE GAP THIS GATE CLOSES: 1.2.0-rc1 is strictly newer than 1.1.0, so
+    version ordering alone would offer a release candidate to a stable box.
+
+    A stable install must see "no update", not a candidate — and not an error
+    either, so the panel reads it as up-to-date rather than as a fault.
+    """
+    result = _check_with("1.2.0-rc1", "1.1.0", manifest_channel="rc")
+
+    assert result.available is False
+    assert result.manifest is None
+    assert result.error is None, "a refused pre-release is not a fault"
+
+
+def test_a_manifest_without_the_channel_field_counts_as_stable() -> None:
+    """Every pre-channel latest.json was a final release, so a missing
+    ``channel`` key means stable: the manifest is offered to a stable box.
+    The field's absence must neither widen nor narrow the stable track — it
+    cannot mean "rc", because no rc was ever published without the field."""
+    result = _check_with("1.2.0", "1.1.0")
+
+    assert result.available is True
+    assert result.manifest is not None
+    assert result.manifest.version == "1.2.0"
+
+
+def test_a_stable_install_is_offered_a_higher_final() -> None:
+    """The gate blocks pre-releases only — finals still reach stable boxes."""
+    result = _check_with("1.2.0", "1.1.0", manifest_channel="stable")
+
+    assert result.available is True
+    assert result.manifest is not None
+    assert result.manifest.version == "1.2.0"
+
+
+def test_an_rc_install_is_offered_the_next_rc() -> None:
+    """The rc track keeps moving forward within its own channel."""
+    result = _check_with("1.1.0-rc3", "1.1.0-rc2", manifest_channel="rc")
+
+    assert result.available is True
+    assert result.manifest is not None
+    assert result.manifest.version == "1.1.0-rc3"
+
+
+def test_an_rc_install_graduates_to_the_final() -> None:
+    """The reverse direction stays open: the final outranks its own rc."""
+    result = _check_with("1.1.0", "1.1.0-rc3", manifest_channel="stable")
+
+    assert result.available is True
+    assert result.manifest is not None
+    assert result.manifest.version == "1.1.0"
+
+
+def test_a_pinned_channel_overrides_the_running_version() -> None:
+    """config.update.channel pins the track regardless of the running version.
+
+    A box pinned to rc sees the candidate; a box pinned to stable running an
+    rc build is still withheld the next rc (fail-closed direction).
+    """
+    offered_rc = _check_with("1.2.0-rc1", "1.1.0", manifest_channel="rc", channel="rc")
+    assert offered_rc.available is True
+
+    withheld_rc = _check_with("1.2.0-rc1", "1.2.0-rc0", manifest_channel="rc", channel="stable")
+    assert withheld_rc.available is False
+    assert withheld_rc.error is None
+
+
+def test_the_channel_is_derived_from_the_running_version_by_default() -> None:
+    """No channel passed: the -rcN suffix of the running version decides."""
+    updater = Updater(
+        update_url="https://updates.example.com/latest.json",
+        current_version="1.1.0-rc2",
+        public_key=_PUBLIC_B64,
+    )
+    assert updater.channel == "rc"
+
+    updater = Updater(
+        update_url="https://updates.example.com/latest.json",
+        current_version="1.1.0",
+        public_key=_PUBLIC_B64,
+    )
+    assert updater.channel == "stable"
+
+
+def test_an_unclassifiable_running_version_defaults_to_stable() -> None:
+    """A version we cannot derive a channel from withholds rc builds (fail
+    closed), rather than raising out of construction — a caller that only
+    wants verify_signature never had to pass a parseable version."""
+    updater = Updater(
+        update_url="https://updates.example.com/latest.json",
+        current_version="dev-build",
+        public_key=_PUBLIC_B64,
+    )
+    assert updater.channel == "stable"
 
 
 @patch("requests.get")

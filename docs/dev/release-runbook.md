@@ -117,13 +117,79 @@ curl -fsSL https://github.com/Hakimerad-inc/quantumrad-gateway/releases/download
   was mutated; the Python updater must refuse. The Tauri in-app updater path
   requires the desktop shell on a real install (§3).
 
+### 3.1 Update channels and the pre-release gate
+
+`latest.json` carries a `channel` field (`"stable"` or `"rc"`) — emitted by
+the release job in §2, derived from the tag (an `X.Y.Z-rcN` tag is `rc`,
+everything else `stable`; override with a `RELEASE_CHANNEL` env var on a
+re-dispatch, exactly like `RELEASE_PUB_DATE`). The Tauri updater client
+ignores the key (its manifest parser tolerates unknown top-level fields); it
+exists for the Python-side check.
+
+The gate: **a stable install is never offered a pre-release**, even one with
+a higher version number — `1.2.0-rc1` is strictly newer than `1.1.0`, so
+version comparison alone would offer an rc to every stable box. A
+`stable` install seeing an `rc` manifest reports "no update available",
+which is the normal not-for-you outcome (logged at INFO, not as a fault).
+The reverse direction stays open: an rc install graduates to the final the
+moment it is published. A manifest with the field absent counts as stable —
+every `latest.json` published before the field existed was a final release.
+
+An operator can pin a track with `config.update.channel` (`"stable"` or
+`"rc"`; empty = derive from the running version, which is what almost every
+deployment wants). That is the supported way to deliberately run the
+candidate track, replacing the old advice to repoint `update_url` at a
+channel-specific manifest.
+
 ## 4. Known CI caveats
 
-- Full-suite wall-clock flake budget: a few timing-sensitive tests
-  (`test_main.py` port-readiness, `test_receiver_wire` 25-association burst)
-  can exceed per-test timeouts on a loaded free-tier Windows runner; they pass
-  deterministically in isolation (verified 2026-09-14). If red in CI, re-run
-  the job before treating it as a regression.
+### 4.1 Timing flakes, and how to tell one from a regression
+
+Two tests are timing-sensitive. What matters is not "flake or real" but *which
+jobs can see them*, because that decides whether a red is even reachable from
+the job that went red:
+
+| Test | Markers | Runs in | Skipped by |
+| --- | --- | --- | --- |
+| `tests/test_receiver_wire.py:133` — 25 concurrent associations | `@pytest.mark.slow` | `test` (both OSes), `coverage` | `test-fast` |
+| `tests/test_main.py:93`, `:159` — port-readiness after a real subprocess boot | none | `test` (Linux only), `test-fast`, `coverage` | nothing |
+
+The port-readiness pair is `skipif(win32)` — Windows shutdown is the clean-VM
+UAT's job, not the matrix's. Note this corrects a claim this section used to
+make: it attributed their flakiness to "a loaded free-tier Windows runner",
+which predates the skipif (added 2026-09-14, ~20 h after this text) and has
+been wrong since. **If you are chasing a Windows red, those two are not it.**
+
+Their timeout budget inverts across jobs, which is worth knowing before you
+read a failure: `conftest.py` sets `COVERAGE_PROCESS_START` only under
+`--cov`, so in `test`/`test-fast` the child boots untraced and `wait_for_port`
+allows 10 s; in `coverage` the child boots *traced* (pydicom's module-level
+import goes 0.8 s → ~18 s under any trace function) and the budget rises to
+60 s. Both have headroom on an idle runner and both lose it on a loaded one —
+a red in `coverage` is not evidence that the 60 s budget is too small.
+
+The ratchet — apply it *before* re-running, not after:
+
+1. **Is the red test one of the three above?** No → it is a regression. Do not
+   re-run; a passing re-run here is the worse outcome, because it buries the
+   only signal the failure carried.
+2. **Yes — did it clear on the *immediate* re-run?** Only an immediate re-run
+   counts. A red that survives the immediate re-run is a regression even for
+   a known timing test: the load is now reproducible, which means the budget
+   is genuinely too small for that runner, and the fix is the budget or the
+   test, not the re-run.
+3. **A re-run that passes later in the day, or on a different runner, is not
+   evidence of anything.** Shared-runner load is not a property of the commit.
+
+The trap this section exists for: **"it passes in isolation" is not evidence
+of a flake.** The jsdom 28 bump (see web/README.md, "Known deprecated
+transitive dependencies") failed one test *deterministically in the full
+vitest run* while passing standalone every time — cold-cache-only, invisible
+to any isolated repro. Isolation removes exactly the contention that produces
+the failure, so an isolated pass is what both a flake and a load-dependent
+regression look like. Demonstrate the flake in full-suite context, or do not
+call it a flake.
+
 - AppImage bundling downloads linuxdeploy at build time — a flaky network can
   fail `package-linux`; the deb leg is authoritative for the size gate.
 

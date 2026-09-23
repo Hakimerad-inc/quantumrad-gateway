@@ -398,6 +398,38 @@ def test_main_update_check_runs_when_configured(tmp_path, monkeypatch, caplog): 
     assert any("no update available" in r.message for r in caplog.records)
 
 
+def test_main_update_check_passes_the_configured_channel(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """config.update.channel reaches the Updater (empty = derived, not None)."""
+    import mercure_gateway.main as main_mod
+
+    cfg = default_config()
+    cfg.update.enabled = True
+    cfg.update.update_url = "https://updates.example.com/latest.json"
+    cfg.update.public_key = "MCowBQYDK2VwAyEA"
+    cfg.update.channel = "rc"
+
+    seen = []
+
+    class FakeUpdater:
+        def __init__(self, **kw):  # type: ignore[no-untyped-def]
+            seen.append(kw)
+
+        def check_update(self):  # type: ignore[no-untyped-def]
+            from mercure_gateway.update import UpdateResult
+
+            return UpdateResult(available=False)
+
+    monkeypatch.setattr("mercure_gateway.update.Updater", lambda **kw: FakeUpdater(**kw))
+    main_mod._check_for_updates(cfg)
+    assert seen and seen[0]["channel"] == "rc"
+
+    # Empty config channel => None, meaning "derive from the running version".
+    seen.clear()
+    cfg.update.channel = ""
+    main_mod._check_for_updates(cfg)
+    assert seen and seen[0]["channel"] is None
+
+
 def test_main_update_check_never_raises(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     """A crashing updater must not break boot (boundary isolation)."""
     import mercure_gateway.main as main_mod

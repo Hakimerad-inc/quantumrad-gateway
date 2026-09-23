@@ -204,12 +204,13 @@ DestinationsView's stateful load resets, the two polling pages under
 boilerplate. The line above is corrected to 3 and each exclusion is
 recorded in the `useAsync.ts` header, so the reason travels with the code.
 
-**Tally after Wave D:** 53 done · 1 todo · 0 dropped · 1 blocked of 64 tracked
+**Tally after Wave E:** 57 done · 0 todo · 0 dropped · 1 blocked of 64 tracked
 lines (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11
 findings were dropped up front as stale (see the DROPPED table below), so
-these 51 represent the open surface of the original 81. The 1 remaining todo
-is Step 8's CI/release cluster (E1/E3/E4/E5, counted as one line in the tally
-but four batches); E2 stays blocked.
+these 51 represent the open surface of the original 81. Step 8's CI/release
+cluster (E1/E3/E4/E5, counted as one line in the tally but four batches) is
+done; E2 stays blocked — the `--real` perf mode needs a test-rig Orthanc
+instance, and it is tracked as blocked, not forced.
 
 Wave D (documentation aligns to shipped behaviour) — gate re-run in full:
 
@@ -279,6 +280,75 @@ tracked lines
 (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11 findings were
 dropped up front as stale (see the DROPPED table below), so these 51 represent the
 open surface of the original 81.
+
+Wave E (CI and release) — gate re-run in full:
+
+| Check | Status | Notes |
+|---|---|---|
+| `ruff check .` | pass | clean |
+| `mypy .` | pass | 72 source files, no issues |
+| `pytest -m "not integration"` | pass | 1025 passed, 5 skipped, 3 deselected in 528.65 s — exactly +11 on the Wave D baseline (1014), which is the 10 new `test_updater.py` channel tests plus the 1 new `test_main.py` plumbing test |
+| coverage ≥ 80 | pass | 90.19% — unchanged from the Wave D baseline |
+| `web/`: eslint + `tsc -b` + vitest | pass | lint clean, tsc -b exit 0, 105/105 tests in 79 s |
+| `just gen-api-check` | pass, **after a fix** | E3 added `channel` to `UpdateConfig` — a response model — and did not regenerate. The committed `web/src/types/api-schema.ts` was stale: the drift check found the missing `channel: string` field. Regenerated via the `gen-api` recipe; the check now passes. This is the exact failure mode `web/README.md` trap 4 exists for |
+| `cargo` | skipped | `git status` shows no `src-tauri` change — E3 was instructed not to touch it, and the channel gate is entirely client-side Python |
+
+**E3 scope deviation, recorded as the brief requires** rather than shipped
+silently: E3's owns list was `update.py`, `config/__init__.py`, `main.py`,
+`tests/test_updater.py`, `release.yml`, `release-runbook.md`. It also added
+one test to `tests/test_main.py` (+32): `test_main_update_check_passes_the_configured_channel`,
+which asserts the `channel=` kwarg E3 itself threaded into `Updater` in
+`main.py` reaches it — `cfg.update.channel = "rc"` forwards `"rc"`, an empty
+config forwards `None` (the derive-from-version path). No other batch in Wave
+E owned that file, and the test covers E3's own new line rather than
+importing scope from elsewhere, so it is kept. Recorded here because an
+owns-list edit is exactly what the "flag it, don't smuggle it" rule covers.
+
+**E3's `tauri.conf.json` note is corrected above:** the batch line read
+"← tauri.conf.json + update.py + release.yml", implying a Tauri config edit.
+It made none, by design — the gate is Python-side, and the manifest key is
+safe for the Tauri client only because `tauri-plugin-updater` 2.11.0's
+`InnerRemoteRelease` (src/updater.rs:~1460) has no `deny_unknown_fields`
+(verified by reading the crate source; zero matches for that attribute
+across the whole crate). A design that *needed* a `tauri.conf.json` change
+would also have needed a `cargo tauri build`, which is why it was avoided.
+
+**E3's own verifier died mid-run** and its re-run returned nothing usable, so
+the adversarial pass was re-done by hand: both directions mutation-tested
+(neutralising the stable→rc gate killed
+`test_a_stable_install_is_not_offered_a_higher_prerelease` and
+`test_a_pinned_channel_overrides_the_running_version`; flipping the
+absent-channel default to rc killed `test_a_manifest_without_the_channel_field_counts_as_stable`
+*and* the pre-existing `test_check_update_returns_available`), the
+fail-closed paths re-confirmed, and the release.yml diff reviewed for signer
+key material — it writes and logs none; the only secrets in the manifest are
+the pre-existing per-platform `.sig` contents. One real defect was found that
+the dead verifier would have missed: the channel-gate comment asserted it
+"logs at INFO like the not-newer path above", but that path logs nothing at
+all. The comment now states the truth — the gate returns `available=False`
+exactly like the not-newer path and *additionally* logs at INFO, precisely
+because that path is silent and a withheld pre-release is worth one line.
+
+**E5 landed as a ratchet, not the blanket re-run advice it replaced.** The
+old §4 bullet also carried a claim that had gone stale: it attributed
+port-readiness flakiness to "a loaded free-tier Windows runner", but those
+two tests have been `skipif(win32)` since `eb80a58` — added ~20 h *after*
+the bullet was written — so they have not run on Windows at all in the
+entire time the doc has been claiming they flake there. §4.1 now tables the
+three timing tests against the jobs that can actually see them, states the
+timeout-budget inversion across `--cov` (10 s untraced vs 60 s traced, with
+the measured pydicom import cost that motivates it), and makes "it passes in
+isolation" explicitly *not* flake evidence — the jsdom 28 failure was
+deterministic in the full run and invisible standalone.
+
+**Residue recorded, not acted on** (E1's agent found it, deliberately not
+fixed as out of scope): `--strict-markers` does not validate marker names
+*inside* a `-m` expression, so `pytest -m "not sloww and not integration"`
+silently degrades to the full selection and still passes. The `test-fast`
+job's own selector is correct as committed; the blind spot is that a future
+typo in it is caught by nothing. A `conftest.py` hook that resolves the
+expression against the declared markers would close it — candidate for a
+later wave.
 
 ### Known blockers
 
@@ -385,11 +455,11 @@ WAVE D — documentation aligns to shipped behaviour
    D6  monitoring/prometheus.yml + alert rules as real files
 
 WAVE E — CI and release
-   E1  test-fast CI job (`not slow and not integration`)
+   E1  test-fast CI job (`not slow and not integration`)          ✓ landed
    E2  perf gate --real in CI + scaling ratio     ← BLOCKED: needs test-rig Orthanc
-   E3  staged rollout / update channel field      ← tauri.conf.json + update.py + release.yml
-   E4  eslint / globals / whatwg-encoding bumps
-   E5  runbook §4 Windows flake wording
+   E3  staged rollout / update channel field      ✓ landed (client-side only; tauri.conf.json untouched — see below)
+   E4  eslint / globals / whatwg-encoding bumps                   ✓ landed, whatwg-encoding declined (measured)
+   E5  runbook §4 Windows flake wording                           ✓ landed as a ratchet (§4.1)
 
 GATE — full suite, serially, after each wave:
    ruff check . · mypy . · pytest -m "not integration" · --cov-fail-under=80
@@ -640,6 +710,20 @@ default divergence. Update the doc once the behaviour is real.
 - **`eslint` deprecated in lockfile** — `node_modules/eslint` 9.39.5 carries a
   deprecation notice; `globals` is a major behind (15.x vs 16.x); `whatwg-encoding`
   also deprecated. Bump. eslint already runs in CI, so this is toolchain currency.
+  → **DONE, partly declined (2026-09-22).** `@eslint/js@9.39.5` and `globals@15.15.0`
+  carry *no* deprecation notice — only `eslint` itself does. The eslint 10 bump is
+  blocked by `eslint-plugin-react-hooks` (peer caps at eslint ^9; the 7.1.0+ releases
+  that accept ^10 add three ERROR rules to the recommended preset) and by the
+  `@eslint/js@^10.11.0` range having never been published (latest is 10.0.1). The
+  7 findings that block it are deliberate documented patterns in 6 files outside this
+  batch, so the correct fix is a source refactor, not a toolchain bump. `whatwg-encoding`
+  is dropped only by jsdom ≥27.7.0; the `jsdom ^24 → ^28` bump removes it from the tree
+  but was **reverted** — jsdom 28's slower environment construction pushes
+  `SetupWizard.test.tsx > writes receiver fields…` past its 5000ms timeout whenever the
+  vitest cache is cold (every CI run); cold-cache A/B was 3/3 green on 24 vs 3/3 red on
+  28, warm runs pass on both. Recorded in `web/README.md` so the experiment is not
+  repeated blind. (Boundary version, verified against the registry: jsdom 27.4.0 is the
+  first release without whatwg-encoding; 27.3.0 still pins it.)
 - **Runbook §4 Windows flakes** — still prescribes "re-run the job before treating
   it as a regression" for two timing flakes, which is the exact property that makes
   a red gate carry no information.

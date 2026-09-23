@@ -554,6 +554,10 @@ def _check_for_updates(config: GatewayConfig) -> None:
             update_url=upd.update_url,
             current_version=__version__,
             public_key=upd.public_key,
+            # Empty config channel => Updater derives it from __version__
+            # (an -rcN suffix means rc), so a stable install never sees a
+            # pre-release. Pinning config.update.channel overrides that.
+            channel=upd.channel or None,
         )
         result = updater.check_update()
     except Exception as exc:  # noqa: BLE001 — boundary: update check must not kill boot

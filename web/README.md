@@ -98,3 +98,29 @@ One dev-server detail worth knowing: the `/api` proxy target defaults to
 systemd deployment documents 8081, and `MERCURE_BACKEND_PORT` moves a packaged
 install — set `VITE_API_BASE_URL` before `npm run dev`, or the proxy points at
 a port nothing answers on and every request fails with no useful diagnostic.
+
+## Known deprecated transitive dependencies
+
+`npm install` reports a deprecation for `whatwg-encoding@3.1.1`, a transitive
+dev-only dependency reached only through `jsdom` (directly, and via its
+`html-encoding-sniffer` dependency). Nothing in `dependencies` reaches it, so
+it never ships in the bundle or the Tauri binary, and the warning is cosmetic.
+
+The version itself cannot be bumped — 3.1.1 is the latest published, and its
+deprecation notice points at `@exodus/bytes`, a different implementation that is
+not an API-compatible drop-in (adopting it would mean patching jsdom's
+internals, not editing a version range).
+
+The range *can* be bumped, and was tried: jsdom dropped `whatwg-encoding` in
+27.4.0 (the last 27.x release — 27.3.0 still pins `^3.1.1`), so `jsdom ^24` →
+`^28` removes it from the tree entirely. That bump was
+reverted. jsdom 28's slower environment construction pushes
+`SetupWizard.test.tsx > writes receiver fields into the receiver section, not
+general` past its 5000ms timeout whenever the vitest cache is cold — which is
+every CI run. The test sits at ~3100ms on jsdom 24, so the margin it lost was
+already thin. Measured on the full suite, cold cache, no other changes:
+jsdom 24 — 3/3 runs green; jsdom 28 — 3/3 runs red at the same assertion.
+
+If you retry this, first raise that test's timeout or split it, and re-run the
+full suite cold (`rm -rf node_modules/.vite`) several times — warm runs pass on
+both versions and will hide the regression.

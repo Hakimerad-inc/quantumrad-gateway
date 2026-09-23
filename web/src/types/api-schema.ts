@@ -2674,6 +2674,12 @@ export interface components {
              * @default
              */
             public_key: string;
+            /**
+             * Channel
+             * @description Release channel this install tracks: 'stable' or 'rc'. Empty = derive from the running version (an X.Y.Z-rcN suffix means rc), which is what almost every deployment wants. A stable install is never offered a pre-release. Pin 'rc' here only to deliberately run the candidate track — this is the supported replacement for repointing update_url at a channel-specific manifest.
+             * @default
+             */
+            channel: string;
         };
         /** ValidationError */
         ValidationError: {

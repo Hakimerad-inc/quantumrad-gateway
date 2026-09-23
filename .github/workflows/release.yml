@@ -174,10 +174,19 @@ jobs:
           # default to "now" unless the tag-day runbook pins one explicitly.
           pub_date = os.environ.get("RELEASE_PUB_DATE") or datetime.now(timezone.utc).strftime(
               "%Y-%m-%dT%H:%M:%SZ")
+          # The channel tells the Python-side updater which track this release
+          # is on: an "rc" tag must never be offered to a stable install. The
+          # Tauri updater client itself ignores the key (its manifest parser
+          # tolerates unknown top-level fields), so this is safe to emit.
+          # Derived from the tag; override only to publish a final from a tag
+          # that does not say so (or vice versa).
+          channel = os.environ.get("RELEASE_CHANNEL") or (
+              "rc" if "-rc" in version else "stable")
           manifest = {
               "version": version,
               "notes": f"QuantumRAD Gateway {version}",
               "pub_date": pub_date,
+              "channel": channel,
               "platforms": platforms,
           }
           # Written into dist/ so the upload step's `find dist -type f`

@@ -112,6 +112,9 @@ class UpdateManifest:
     url: str
     signature: str
     checksum_sha256: str = ""
+    # Release channel ("stable" or "rc"). Empty on every manifest published
+    # before the field existed — see the channel gate in check_update().
+    channel: str = ""
 
 
 # A final release outranks any pre-release of the same X.Y.Z (PEP 440: 1.1.0
@@ -157,6 +160,28 @@ def _is_newer(manifest_version: str, current_version: str) -> bool:
     return _version_key(manifest_version) > _version_key(current_version)
 
 
+# The two update channels this project publishes. "stable" is the default
+# track; "rc" is the release-candidate track used to rehearse a final.
+_STABLE_CHANNEL = "stable"
+_RC_CHANNEL = "rc"
+
+
+def _channel_for_version(version: str) -> str:
+    """Derive the update channel a version string belongs to.
+
+    The two forms ``sync_version.py`` ever writes are ``X.Y.Z`` (a final
+    release → ``stable``) and ``X.Y.Z-rcN`` (a release candidate → ``rc``).
+    This reuses :func:`_version_key`'s parser, so a version that cannot be
+    classified raises ``ValueError``: the caller fails closed rather than
+    guessing a channel for a string the project would never publish.
+
+    Note that ``_is_newer`` alone is not a channel gate: ``1.2.0-rc1`` *is*
+    strictly newer than ``1.1.0``, so without this distinction a stable
+    install would be offered a pre-release of a higher version.
+    """
+    return _STABLE_CHANNEL if _version_key(version)[3] == _FINAL_RELEASE else _RC_CHANNEL
+
+
 
 @dataclass
 class UpdateResult:
@@ -185,6 +210,7 @@ class Updater:
         current_version: str,
         timeout_sec: float = _DEFAULT_TIMEOUT_SEC,
         public_key: str | bytes | Ed25519PublicKey | None = None,
+        channel: str | None = None,
     ) -> None:
         self.update_url = update_url.rstrip("/")
         self.current_version = current_version
@@ -193,6 +219,25 @@ class Updater:
         # which fail-closes: every signature check returns False.
         self.public_key = _load_public_key(public_key)
         self.pending_update: UpdateManifest | None = None
+        # The channel this install tracks. None/empty means derive it from the
+        # running version (config.update.channel documents this as the default;
+        # pinning it there is the supported way to force a track). A version we
+        # cannot classify falls back to stable, which is the fail-closed
+        # direction: it can only *withhold* rc builds, never offer one to a
+        # stable box. check_update() also refuses to order such a version.
+        resolved = channel.strip() if channel else ""
+        if not resolved:
+            try:
+                resolved = _channel_for_version(current_version)
+            except ValueError as exc:
+                logger.warning(
+                    "cannot derive update channel from version %r: %s — "
+                    "treating this install as stable",
+                    current_version,
+                    exc,
+                )
+                resolved = _STABLE_CHANNEL
+        self.channel = resolved
 
     def check_update(self) -> UpdateResult:
         """Fetch the update manifest and report if a newer version exists.
@@ -200,9 +245,11 @@ class Updater:
         Returns ``available=True`` with the manifest only when
         ``manifest.version`` is strictly *newer* than the running version — a
         differing version is not necessarily an upgrade, and an older one must
-        never be offered (downgrade protection).  HTTP failures surface as an
-        error result (never an exception — an offline check must not crash
-        startup).
+        never be offered (downgrade protection) — **and** the manifest is on a
+        channel this install tracks: a stable install is never offered a
+        pre-release, even one with a higher version number.  HTTP failures
+        surface as an error result (never an exception — an offline check must
+        not crash startup).
         """
         try:
             resp = requests.get(self.update_url, timeout=self.timeout_sec)
@@ -218,6 +265,7 @@ class Updater:
             url=str(data.get("url", "")),
             signature=str(data.get("signature", "")),
             checksum_sha256=str(data.get("checksum_sha256", "")),
+            channel=str(data.get("channel", "")),
         )
         if not manifest.version:
             return UpdateResult(error="update manifest missing version")
@@ -229,6 +277,29 @@ class Updater:
             logger.warning("update not offered: %s", exc)
             return UpdateResult(error=str(exc))
         if not newer:
+            return UpdateResult(available=False)
+        # Channel gate: a stable install is never offered a pre-release, even
+        # one with a higher version number (1.2.0-rc1 is strictly newer than
+        # 1.1.0, so _is_newer alone would offer it). This is the normal
+        # "nothing for you" outcome, not a fault: it returns available=False
+        # exactly like the not-newer path above so the admin panel reads it as
+        # "up to date". It additionally logs at INFO — the not-newer path is
+        # silent, but a deliberately withheld pre-release is worth one line,
+        # since it is the only outcome where "you are up to date" is false on
+        # the rc track.
+        # A manifest whose channel field is absent counts as stable: every
+        # latest.json published before the field existed was a final release
+        # (the rc track only ever shipped with the field), and a manifest for
+        # an older final would already have been refused by _is_newer.
+        # The reverse direction stays open — an rc install graduates to the
+        # final the moment it is published.
+        manifest_channel = manifest.channel.strip() or _STABLE_CHANNEL
+        if self.channel == _STABLE_CHANNEL and manifest_channel == _RC_CHANNEL:
+            logger.info(
+                "update not offered: %s is a pre-release and this install "
+                "tracks the stable channel",
+                manifest.version,
+            )
             return UpdateResult(available=False)
         return UpdateResult(available=True, manifest=manifest)
 

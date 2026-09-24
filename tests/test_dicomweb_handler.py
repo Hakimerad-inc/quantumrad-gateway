@@ -104,6 +104,95 @@ def test_dicomweb_connection_error(mock_post, tmp_path: Path, spool: Spool) -> N
 
 
 @patch("requests.post")
+def test_dicomweb_sends_the_bearer_token_when_configured(
+    mock_post, tmp_path: Path, spool: Spool
+) -> None:
+    """A cloud PACS behind an authenticating proxy needs the token on the wire.
+
+    ``auth_token`` is declared on the destination, encrypted at rest, restored
+    on boot, and redacted from the API — so a operator who sets it reasonably
+    expects it to reach the server.  This fails today: the request carried only
+    a Content-Type header, so every instance came back 401 and the study
+    exhausted its retry budget with no field left to try.
+    """
+    from mercure_gateway.forwarder.handlers.dicomweb import DICOMwebHandler
+
+    resp = MagicMock()
+    resp.ok = True
+    resp.status_code = 200
+    mock_post.return_value = resp
+
+    dest = DICOMwebDestination(
+        name="cloud", url="https://pacs.cloud/studies", auth_token="sek-123"
+    )
+    handler = DICOMwebHandler(dest, spool)
+    sid = _write_study(spool)
+    task = _claim_task(spool, sid, dest)
+    result = handler.deliver(task, spool.spool_dir)
+
+    assert result.ok is True
+    headers = mock_post.call_args[1]["headers"]
+    assert headers["Authorization"] == "Bearer sek-123"
+
+
+@patch("requests.post")
+def test_dicomweb_sends_the_ae_title_when_configured(
+    mock_post, tmp_path: Path, spool: Spool
+) -> None:
+    """The AE title travels as an X-AE-Title header.
+
+    DICOMweb defines no on-the-wire AE title, so this is a convention rather
+    than a spec — some cloud PACS use it to attribute the upload to a modality.
+    It is only sent when set, and only alongside the studies endpoint.
+    """
+    from mercure_gateway.forwarder.handlers.dicomweb import DICOMwebHandler
+
+    resp = MagicMock()
+    resp.ok = True
+    resp.status_code = 200
+    mock_post.return_value = resp
+
+    dest = DICOMwebDestination(
+        name="cloud", url="https://pacs.cloud/studies", aet="GATEWAY"
+    )
+    handler = DICOMwebHandler(dest, spool)
+    sid = _write_study(spool)
+    task = _claim_task(spool, sid, dest)
+    result = handler.deliver(task, spool.spool_dir)
+
+    assert result.ok is True
+    headers = mock_post.call_args[1]["headers"]
+    assert headers["X-AE-Title"] == "GATEWAY"
+
+
+@patch("requests.post")
+def test_dicomweb_omits_authorization_when_no_token(
+    mock_post, tmp_path: Path, spool: Spool
+) -> None:
+    """An unauthenticated endpoint must not receive a header it may reject.
+
+    Some STOW-RS servers are strict about unexpected Authorization headers
+    (a mismatched scheme can be a hard reject), so the default is to send none.
+    """
+    from mercure_gateway.forwarder.handlers.dicomweb import DICOMwebHandler
+
+    resp = MagicMock()
+    resp.ok = True
+    resp.status_code = 200
+    mock_post.return_value = resp
+
+    dest = DICOMwebDestination(name="web", url="https://pacs.local/studies")
+    handler = DICOMwebHandler(dest, spool)
+    sid = _write_study(spool)
+    task = _claim_task(spool, sid, dest)
+    result = handler.deliver(task, spool.spool_dir)
+
+    assert result.ok is True
+    headers = mock_post.call_args[1]["headers"]
+    assert "Authorization" not in headers
+
+
+@patch("requests.post")
 def test_dicomweb_through_forwarder(mock_post, tmp_path: Path, spool: Spool) -> None:
     from mercure_gateway.forwarder.handlers.dicomweb import DICOMwebHandler
 

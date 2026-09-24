@@ -3,7 +3,10 @@
 Satisfies the :class:`~mercure_gateway.forwarder.DestinationHandler` protocol.
 
 Delivery sends study DICOM instances to a STOW-RS endpoint via ``requests``.
-The handler sends the raw DICOM file bytes as a multipart/related POST.
+Each instance is POSTed as a single ``application/dicom`` body to the configured
+URL, which must already name the studies resource.  ``auth_token`` is sent as a
+bearer header so an authenticating cloud PACS will accept the upload; ``aet``
+rides along as ``X-AE-Title`` for servers that attribute uploads that way.
 """
 
 from __future__ import annotations
@@ -38,15 +41,22 @@ class DICOMwebHandler:
         import requests
 
         base_url = self.destination.url.rstrip("/")
+        headers = {"Content-Type": "application/dicom"}
+        # An authenticating cloud PACS rejects the POST without this; the token
+        # is decrypted back onto the model at boot, so it is live here.
+        if self.destination.auth_token:
+            headers["Authorization"] = f"Bearer {self.destination.auth_token}"
+        # DICOMweb defines no on-the-wire AE title; this is a convention some
+        # cloud PACS honour to attribute the upload to a modality.
+        if self.destination.aet:
+            headers["X-AE-Title"] = self.destination.aet
         try:
             for f in files:
                 raw = f.read_bytes()
                 resp = requests.post(
                     url=f"{base_url}",
                     data=raw,
-                    headers={
-                        "Content-Type": "application/dicom",
-                    },
+                    headers=headers,
                     timeout=60,
                 )
                 if not resp.ok:

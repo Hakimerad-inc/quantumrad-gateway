@@ -116,6 +116,7 @@ If you scrape `/api/system/metrics`, the new series are:
 `mercure_gateway_hub_delivery_failures_total`,
 `mercure_gateway_hub_events_evicted_total`,
 `mercure_gateway_audit_anchor_ok`, `mercure_gateway_audit_anchor_errors_total`,
+`mercure_gateway_audit_chain_ok`, `mercure_gateway_audit_chain_errors_total`,
 `mercure_gateway_purge_iterations_total`,
 `mercure_gateway_purge_budget_hits_total`.
 
@@ -128,7 +129,10 @@ rules are in `docs/guides/admin-guide.md` (Monitoring).
 `audit_anchor_ok` is 0 only when stored hub signatures no longer verify —
 investigate audit tampering. It is deliberately 1 when anchoring is unsigned
 (no `anchor_public_key` configured), which is "not checked", not "checked and
-fine".
+fine". The new `audit_chain_ok` covers that gap: it replays the chained hashes
+every 5 minutes on every deployment and is 0 when a link no longer matches its
+neighbours. Alert on it — it is the only integrity series a stock install
+emits.
 
 ## If the upgrade goes wrong
 

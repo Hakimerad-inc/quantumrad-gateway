@@ -1818,3 +1818,45 @@ def test_metrics_expose_anchor_verification_failure(app, client: TestClient) -> 
     body = client.get("/api/system/metrics").text
     assert "mercure_gateway_audit_anchor_ok 0" in body
     assert "mercure_gateway_audit_anchor_errors_total 1" in body
+
+
+def test_metrics_expose_chain_verification_failure(app, client: TestClient) -> None:
+    """A broken audit chain surfaces as chain_ok 0 in the scrape feed.
+
+    This is the series that exists on *every* deployment, signed or not: the
+    anchor series above is only meaningful when a hub public key is
+    configured.  On the stock install this gauge is the whole integrity
+    signal, so it must not be a constant 1.
+    """
+    from mercure_gateway.audit import ChainError, ChainVerification
+
+    class _Verifier:
+        last_result = ChainVerification(
+            ok=False, errors=(ChainError(3, "a" * 64, "b" * 64, "hash mismatch"),)
+        )
+        failures_total = 2
+
+    app.state.chain_verifier = _Verifier()  # type: ignore[assignment]
+    body = client.get("/api/system/metrics").text
+    assert "mercure_gateway_audit_chain_ok 0" in body
+    assert "mercure_gateway_audit_chain_errors_total 2" in body
+
+
+def test_metrics_chain_ok_before_the_first_pass(app, client: TestClient) -> None:
+    """No finding yet: the first scheduled pass has not run (5s deferred).
+
+    An unset verifier (tests, or a composition root that never wired one) and a
+    wired one that has not completed a pass both report 1 — a boot-time zero
+    would cry wolf on every restart.
+    """
+    body = client.get("/api/system/metrics").text
+    assert "mercure_gateway_audit_chain_ok 1" in body
+
+    class _Pending:
+        last_result = None
+        failures_total = 0
+
+    app.state.chain_verifier = _Pending()  # type: ignore[assignment]
+    body = client.get("/api/system/metrics").text
+    assert "mercure_gateway_audit_chain_ok 1" in body
+    assert "mercure_gateway_audit_chain_errors_total 0" in body

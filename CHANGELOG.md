@@ -94,6 +94,17 @@ recovery.
   verified every 5 minutes when `audit.hub_reporting.anchor_public_key` is
   set, surfacing as `mercure_gateway_audit_anchor_ok` and an
   `AUDIT_ANCHOR_FAILED` audit event. Deliberately **not** on the scrape path.
+- **Audit chain integrity is scheduled on every deployment (P0-10).** The
+  anchor timer above only runs where a hub public key is configured — the
+  default install has none. The chain's own hash replay was reachable only
+  from `/api/audit/verify`, which an operator has to ask for, so on a stock
+  gateway a broken audit chain (a partial write, a dropped append-only
+  trigger, a botched migration, a hand-edited row) was undetected until
+  someone looked. It is now replayed on the same 5-minute timer unconditionally,
+  surfacing as `mercure_gateway_audit_chain_ok` and a deduped
+  `AUDIT_CHAIN_FAILED` audit event. Honest limit, carried in the code: this is
+  accident detection, not attacker detection — the chain is unkeyed and
+  recomputable, so only the anchor series detects a deliberate rewrite.
 
 ### Provenance & release
 

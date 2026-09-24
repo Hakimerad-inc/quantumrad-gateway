@@ -22,6 +22,8 @@ from pathlib import Path
 from mercure_gateway.audit import AuditLog
 from mercure_gateway.audit.events import (
     ALL_EVENTS,
+    AUDIT_ANCHOR_FAILED,
+    AUDIT_CHAIN_FAILED,
     FORWARD_COMPLETE,
     FORWARD_ERROR,
     FORWARD_START,
@@ -178,6 +180,8 @@ def test_event_vocabulary_is_consistent() -> None:
         STUDY_FAILED,
         RETRY_MANUAL,
         PRUNE_AUDIT,
+        AUDIT_CHAIN_FAILED,
+        AUDIT_ANCHOR_FAILED,
         REPORT_REQUESTED,
         REPORT_RETRIEVING,
         REPORT_RETRIEVED,

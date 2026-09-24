@@ -47,7 +47,7 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,8 @@ __all__ = [
     "AnchorVerifier",
     "SignedHeadAnchorer",
     "verify_anchor_signatures",
+    "ChainVerification",
+    "ChainVerifier",
 ]
 
 
@@ -514,6 +516,179 @@ class AuditLog:
 
 # Serializes appends when AuditLog was built around a raw connection.
 _LEGACY_LOCK = threading.Lock()
+
+
+# Verification cadence shared by the two integrity timers (review P0-10):
+# often enough that a broken audit chain surfaces between scrape intervals,
+# rarely enough that a large log is not replayed constantly. The first pass
+# is deferred so a boot with a cold cache is not charged for it.
+_DEFAULT_VERIFY_INTERVAL_SEC = 300.0
+_DEFAULT_VERIFY_INITIAL_DELAY_SEC = 5.0
+
+R = TypeVar("R")
+
+
+class _PeriodicVerifier[R]:
+    """Runs a verification pass on a daemon timer and records the result.
+
+    Shared by the audit's two integrity checks: the hub-signature verifier
+    (authenticity — configured deployments) and the chain replay (integrity —
+    always on). Both share one contract: a pass runs on a fixed cadence, never
+    raises, holds the last result for the metrics route to read as a cheap
+    field access, and fans a failure out to a callback that carries the finding
+    into the audit stream an unmanned box is being watched by.
+
+    Verification belongs on a timer, never in the scrape path — a full-table
+    scan per scrape is a DoS vector — which is why the metrics route reads
+    ``last_result`` instead of triggering a pass.
+    """
+
+    def __init__(
+        self,
+        *,
+        interval_sec: float,
+        initial_delay_sec: float,
+        on_failure: Callable[[R], None] | None,
+        thread_name: str,
+    ) -> None:
+        self._interval = interval_sec
+        self._initial_delay = initial_delay_sec
+        self._thread_name = thread_name
+        self._on_failure = on_failure
+        self._last: R | None = None
+        self._failures_total = 0
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def last_result(self) -> R | None:
+        """The most recent pass; None until the first one completes."""
+        return self._last
+
+    @property
+    def failures_total(self) -> int:
+        """Verification failures recorded since process start."""
+        return self._failures_total
+
+    @property
+    def interval_sec(self) -> float:
+        """The cadence the timer runs at (logged once at boot)."""
+        return self._interval
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Start the background timer (idempotent)."""
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._work, name=self._thread_name, daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, *, join_timeout: float = 5.0) -> None:
+        """Signal the timer to stop and join it, so shutdown leaves no thread."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=join_timeout)
+            self._thread = None
+
+    # ── machinery ────────────────────────────────────────────────────────
+
+    def _record(self, result: R) -> None:
+        """Bookkeep one pass and fan a failure out to the callback."""
+        self._last = result
+        if not getattr(result, "ok", False):
+            self._failures_total += len(getattr(result, "errors", ())) or 1
+            if self._on_failure is not None:
+                try:
+                    self._on_failure(result)
+                except Exception:  # noqa: BLE001 — reporting must not kill the timer
+                    logger.exception("verification failure callback raised")
+
+    def _work(self) -> None:
+        # Let the boot settle (and the first rows land) before the first pass;
+        # afterwards the interval is the cadence an operator alerts on.
+        self._stop_event.wait(self._initial_delay)
+        while not self._stop_event.is_set():
+            self.verify_now()
+            self._stop_event.wait(self._interval)
+
+    def verify_now(self) -> R:
+        """Run one verification pass synchronously; records and reports it.
+
+        Never raises: a verifier that took down its caller would be worse than
+        a late finding, and every failure mode here is itself a finding.
+        """
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class ChainVerification:
+    """One scheduled replay of the audit chain (review P0-10 remainder)."""
+
+    ok: bool
+    errors: tuple[ChainError, ...] = ()
+
+
+class ChainVerifier(_PeriodicVerifier[ChainVerification]):
+    """Replay the audit chain on a timer (review P0-10 remainder).
+
+    ``AnchorVerifier`` guards the *authenticity* half of tamper evidence —
+    hub-held Ed25519 signatures over each anchored chain head — but unsigned
+    deployments (the default: no ``anchor_public_key`` configured) have no
+    signature to check, and until this timer existed the chain's own hash
+    replay had no scheduled caller at all. ``/api/audit/verify`` runs only
+    when an operator asks for it, and deliberately not on every scrape (a
+    full-table scan per scrape is a DoS vector). So on a stock box a broken
+    chain — a partial write, a dropped trigger, a botched migration, a
+    hand-edited row — sat undetected until a human thought to look.
+
+    This replays the chain at the same cadence the anchor verifier runs, so
+    the failure shows up in the metrics feed an operator is already alerting
+    on. It needs no external key, so it runs on every deployment, signed or
+    not.
+
+    Honest threat-model limit: this is *accident* detection, not *attacker*
+    detection. The chain is an unkeyed SHA-256 over public columns — whoever
+    can write the database can recompute it end to end and the replay would
+    pass. Only an anchor stored outside the database (the signed anchor file,
+    or the bookkeeper's signature over each head) can detect a deliberate
+    rewrite. What this *does* catch is every failure mode that is not a
+    deliberate rewrite, on a box nobody is watching.
+    """
+
+    def __init__(
+        self,
+        audit: AuditLog,
+        *,
+        interval_sec: float = _DEFAULT_VERIFY_INTERVAL_SEC,
+        initial_delay_sec: float = _DEFAULT_VERIFY_INITIAL_DELAY_SEC,
+        on_failure: Callable[[ChainVerification], None] | None = None,
+    ) -> None:
+        super().__init__(
+            interval_sec=interval_sec,
+            initial_delay_sec=initial_delay_sec,
+            on_failure=on_failure,
+            thread_name="audit-chain-verifier",
+        )
+        self._audit = audit
+
+    def verify_now(self) -> ChainVerification:
+        try:
+            # Drain the generator *before* the failure callback can append:
+            # verify_iter() steps a cursor on the read-only connection while
+            # the callback's append takes the write lock — overlapping them
+            # would deadlock the timer against itself.
+            errors = tuple(self._audit.verify_iter())
+        except Exception:  # noqa: BLE001 — a crash here must not kill the timer
+            logger.exception("audit chain verification failed unexpectedly")
+            result = ChainVerification(ok=False)
+        else:
+            result = ChainVerification(ok=not errors, errors=errors)
+        self._record(result)
+        return result
 
 
 # Re-exports: the signed anchorer composes anchor_head_to_file, so importing

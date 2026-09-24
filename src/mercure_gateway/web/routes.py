@@ -533,8 +533,10 @@ def system_metrics(request: Request) -> Response:
     # Hub-signed audit anchors, verified on a timer (review P0-10). The
     # verifier holds the *last* pass — this is a cheap field read, never an
     # on-demand verification (see the AuditLog.verify() note above). Absent
-    # verifier = unsigned anchoring, where chain integrity is covered by
-    # /api/audit/verify; report ok=1 rather than a misleading zero.
+    # verifier = unsigned anchoring, where only the chain replay below can
+    # report integrity; report ok=1 rather than a misleading zero. The
+    # complementary chain series follows, and that one is wired on every
+    # deployment — it does not need the hub key.
     anchor_verifier = getattr(request.app.state, "anchor_verifier", None)
     anchor_ok = 1
     anchor_errors = 0
@@ -554,6 +556,36 @@ def system_metrics(request: Request) -> Response:
         "Anchor signature lines that failed scheduled verification since "
         "process start.",
         anchor_errors,
+        kind="counter",
+    )
+
+    # The chain itself, replayed on a timer (review P0-10 remainder). This
+    # series exists on *every* deployment — the anchor series above only means
+    # something when a hub public key is configured, and on the stock install
+    # this gauge is the whole integrity signal. Same rule as the anchors: a
+    # field read of the last scheduled pass, never an on-demand replay (the
+    # full-table scan is exactly what the timer exists to keep out of here).
+    chain_verifier = getattr(request.app.state, "chain_verifier", None)
+    chain_ok = 1
+    chain_errors = 0
+    if chain_verifier is not None:
+        chain_last = chain_verifier.last_result
+        chain_ok = 1 if chain_last is None or chain_last.ok else 0
+        chain_errors = chain_verifier.failures_total
+    gauge(
+        "mercure_gateway_audit_chain_ok",
+        "1 when the last scheduled replay of the audit chain's chained hashes "
+        "passed. 0 = a broken link — a partial write, a dropped trigger, a "
+        "botched migration, or a hand-edited row. Detects accidents, not an "
+        "attacker who can rewrite the database (that needs the anchor series "
+        "above, which requires a hub public key configured).",
+        chain_ok,
+    )
+    gauge(
+        "mercure_gateway_audit_chain_errors_total",
+        "Audit chain links that failed scheduled verification since process "
+        "start.",
+        chain_errors,
         kind="counter",
     )
 

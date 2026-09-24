@@ -495,6 +495,7 @@ def _start_anchor_verification(config: GatewayConfig, audit: Any) -> Any:
     if not (hub.enabled and hub.bookkeeper_url and hub.anchor_public_key):
         return None
     from mercure_gateway.audit.anchoring import AnchorVerifier
+    from mercure_gateway.audit.events import AUDIT_ANCHOR_FAILED
 
     def _on_failure(result: object) -> None:
         errors = getattr(result, "errors", ())
@@ -509,7 +510,7 @@ def _start_anchor_verification(config: GatewayConfig, audit: Any) -> Any:
         )
         try:
             audit.append(
-                "AUDIT_ANCHOR_FAILED",
+                AUDIT_ANCHOR_FAILED,
                 detail={
                     "errors": [
                         {"line": getattr(e, "line_no", None), "reason": getattr(e, "reason", "")}
@@ -531,6 +532,73 @@ def _start_anchor_verification(config: GatewayConfig, audit: Any) -> Any:
         verifier.interval_sec,
         _signed_anchor_path(config),
     )
+    return verifier
+
+
+def _start_chain_verification(audit: Any) -> Any:
+    """Replay the audit chain on a timer (review P0-10 remainder).
+
+    Returns the started :class:`~mercure_gateway.audit.ChainVerifier` so the
+    caller can ``stop()`` it at shutdown.  Unlike the anchor verifier this
+    needs no external key — the chain is already in the local database — so it
+    runs on every deployment, signed or not.
+
+    The anchor verifier covers *authenticity*: hub-held signatures detect a
+    whole-chain rewrite, which the internal replay cannot see.  This covers
+    *integrity* on the deployments that have no signature to check, where
+    ``/api/audit/verify`` was the only caller of the replay and it runs only
+    when an operator asks for it.  See ``ChainVerifier``'s docstring for the
+    threat-model limit: this detects accidents, not an attacker who can
+    rewrite the database.
+
+    A verification failure is recorded as an audit event as well as logged: on
+    an unmanned box the event is what carries the finding to the hub, and the
+    recorded copy cannot be suppressed by tampering with what it describes.
+    The event is deduped on the first broken link — the verifier measures the
+    chain it also writes to, so re-recording on every pass would grow the log
+    it is checking (one event per distinct finding, not one per cadence tick),
+    while the metrics still carry the failure live on every pass.
+    """
+    from mercure_gateway.audit import ChainVerifier
+    from mercure_gateway.audit.events import AUDIT_CHAIN_FAILED
+
+    last_signature: tuple[Any, ...] | None = None
+
+    def _on_failure(result: object) -> None:
+        nonlocal last_signature
+        errors = getattr(result, "errors", ())
+        signature = (
+            (getattr(errors[0], "event_id", None), getattr(errors[0], "reason", None))
+            if errors
+            else None
+        )
+        logger.error(
+            "audit chain verification FAILED: %d broken link(s), first at event %s",
+            len(errors),
+            signature[0] if signature is not None else "?",
+        )
+        if signature is not None and signature == last_signature:
+            return  # already recorded — the gauge still reports the live failure
+        last_signature = signature
+        try:
+            audit.append(
+                AUDIT_CHAIN_FAILED,
+                detail={
+                    "errors": [
+                        {
+                            "event_id": getattr(e, "event_id", None),
+                            "reason": getattr(e, "reason", ""),
+                        }
+                        for e in list(errors)[:10]
+                    ]
+                },
+            )
+        except Exception:  # noqa: BLE001 — a reporting failure must not hide the finding
+            logger.warning("could not record the AUDIT_CHAIN_FAILED audit event")
+
+    verifier = ChainVerifier(audit, on_failure=_on_failure)
+    verifier.start()
+    logger.info("audit chain verification scheduled every %.0fs", verifier.interval_sec)
     return verifier
 
 
@@ -651,6 +719,7 @@ def _run_web_admin(
     disk_monitor: Any = None,
     hub_streamer: Any = None,
     anchor_verifier: Any = None,
+    chain_verifier: Any = None,
 ) -> None:
     """Start the FastAPI web admin panel (blocking)."""
     import uvicorn
@@ -667,6 +736,7 @@ def _run_web_admin(
     # permanently-down bookkeeper never clears.
     app.state.hub_streamer = hub_streamer
     app.state.anchor_verifier = anchor_verifier
+    app.state.chain_verifier = chain_verifier
     # The destination health monitor is no longer built here: create_app owns
     # it now, constructing one in its lifespan when app.state.health_monitor is
     # unset and stopping *and joining* the worker thread on shutdown. Building
@@ -778,6 +848,13 @@ def main(argv: list[str] | None = None) -> int:
     # undetectable without an operator remembering to look.
     anchor_verifier = _start_anchor_verification(config, audit)
 
+    # P0-10 remainder: replay the chain itself on the same cadence. Needs no
+    # hub key, so this is the check that runs on a stock install — without it,
+    # a broken chain waited for an operator to ask /api/audit/verify. The two
+    # are complementary: signatures catch a rewrite of the whole chain, the
+    # replay catches everything that is not (and costs no network round-trip).
+    chain_verifier = _start_chain_verification(audit)
+
     # Hub reporting (S08): streams every audit event to the bookkeeper and
     # registers the gateway in the background — boot never blocks on the hub.
     # TD-06: the event stream rides the spool database (durable outbox).
@@ -884,6 +961,7 @@ def main(argv: list[str] | None = None) -> int:
                     disk_monitor=disk_monitor,
                     hub_streamer=hub_streamer,
                     anchor_verifier=anchor_verifier,
+                    chain_verifier=chain_verifier,
                 )
             except KeyboardInterrupt:
                 print("\nShutting down web admin...")
@@ -911,6 +989,8 @@ def main(argv: list[str] | None = None) -> int:
             head_anchorer.stop()
         if anchor_verifier is not None:
             anchor_verifier.stop()
+        if chain_verifier is not None:
+            chain_verifier.stop()
         spool.stop()
         # Graceful shutdown marker: its presence lets the next boot skip the
         # recovery scan (a crash/power-loss leaves no marker → scan runs).

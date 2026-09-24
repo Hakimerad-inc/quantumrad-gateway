@@ -218,6 +218,8 @@ checked against the instrumentation in `src/mercure_gateway/web/routes.py`
 | `mercure_gateway_hub_events_evicted_total` | counter | Events dropped from the bounded delivery queue. |
 | `mercure_gateway_audit_anchor_ok` | gauge | 1 when the last scheduled anchor verification passed (below). |
 | `mercure_gateway_audit_anchor_errors_total` | counter | Anchor signature lines failing scheduled verification. |
+| `mercure_gateway_audit_chain_ok` | gauge | 1 when the last scheduled replay of the audit chain passed (below). |
+| `mercure_gateway_audit_chain_errors_total` | counter | Audit chain links failing scheduled verification. |
 | `mercure_gateway_queue_depth{state="…"}` | gauge | Studies per spool state; `state` is one of `RECEIVED`, `QUEUED`, `SENDING`, `SENT`, `ERROR`, `FAILED`. |
 | `mercure_gateway_disk_usage_percent` | gauge | Spool filesystem usage percent. |
 | `mercure_gateway_disk_total_bytes` | gauge | Spool filesystem total bytes. |
@@ -271,16 +273,32 @@ counts the offending lines.
 
 Audit integrity is checked in two complementary ways:
 
-- **Anchor authenticity** (`mercure_gateway_audit_anchor_ok`) is verified on a
-  timer every 5 minutes when `audit.hub_reporting.anchor_public_key` is set.
-  Only the hub-held Ed25519 signatures can detect a *whole-chain* rewrite —
-  the internal hash replay below recomputes, so an attacker who rewrites the
-  database recomputes those too. The timer, never the scrape path, does the
-  work: each pass is one local file read plus one verify per line.
-- **Chain integrity** (`/api/audit/verify`) replays every row per call — fine
-  operator-triggered, a self-DoS at 15 s scrape intervals, so it is
-  deliberately **not** on the scrape path. Schedule it as a low-frequency
-  external check (e.g. cron + `curl … /api/audit/verify | jq -e .valid`).
+- **Chain integrity** (`mercure_gateway_audit_chain_ok`) replays the chained
+  hashes on a timer every 5 minutes, on *every* deployment — it needs no hub
+  key, so this is the series that guards a stock install. A 0 means a link no
+  longer matches its neighbours: a partial write, a dropped append-only
+  trigger, a botched migration, or a hand-edited row. It detects accidents,
+  not an attacker: the chain is an unkeyed SHA-256 over public columns, so
+  whoever can rewrite the database can recompute it end to end and the replay
+  would pass. That is what the anchor series is for.
+- **Anchor authenticity** (`mercure_gateway_audit_anchor_ok`) is verified on
+  the same timer when `audit.hub_reporting.anchor_public_key` is set. Only the
+  hub-held Ed25519 signatures can detect a *whole-chain* rewrite — the
+  internal hash replay recomputes, so an attacker who rewrites the database
+  recomputes those too. The timer, never the scrape path, does the work: each
+  pass is one local file read plus one verify per line.
+
+Both timers defer their first pass for 5 s after boot and report 1 until it
+completes, so a restart never cries wolf. A persistent failure records an
+`AUDIT_CHAIN_FAILED` (or `AUDIT_ANCHOR_FAILED`) audit event — one per distinct
+finding, not one per timer tick — so the finding reaches the hub event feed a
+manned dashboard is watching, and the recorded copy cannot be suppressed by
+tampering with the log it describes.
+
+`/api/audit/verify` remains available as an on-demand replay of the whole
+chain. It is deliberately not on the scrape path (a full-table scan per scrape
+is a self-DoS), so treat it as a diagnostic: the two timers above have already
+taken the scheduled job.
 
 ## Troubleshooting
 

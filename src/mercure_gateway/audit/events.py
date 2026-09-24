@@ -24,6 +24,12 @@ RETRY_MANUAL = "RETRY_MANUAL"
 # Retention maintenance (emitted by AuditLog.prune)
 PRUNE_AUDIT = "PRUNE_AUDIT"
 
+# Scheduled integrity check (emitted by the composition root's chain verifier)
+AUDIT_CHAIN_FAILED = "AUDIT_CHAIN_FAILED"
+
+# Scheduled authenticity check (emitted by the composition root's anchor verifier)
+AUDIT_ANCHOR_FAILED = "AUDIT_ANCHOR_FAILED"
+
 # Report retrieval (emitted by the ReportRetriever, Sprint 05)
 REPORT_REQUESTED = "REPORT_REQUESTED"
 REPORT_RETRIEVING = "REPORT_RETRIEVING"
@@ -43,6 +49,8 @@ ALL_EVENTS = (
     FORWARD_ERROR,
     RETRY_MANUAL,
     PRUNE_AUDIT,
+    AUDIT_CHAIN_FAILED,
+    AUDIT_ANCHOR_FAILED,
     REPORT_REQUESTED,
     REPORT_RETRIEVING,
     REPORT_RETRIEVED,
@@ -60,6 +68,8 @@ __all__ = [
     "FORWARD_ERROR",
     "RETRY_MANUAL",
     "PRUNE_AUDIT",
+    "AUDIT_CHAIN_FAILED",
+    "AUDIT_ANCHOR_FAILED",
     "REPORT_REQUESTED",
     "REPORT_RETRIEVING",
     "REPORT_RETRIEVED",

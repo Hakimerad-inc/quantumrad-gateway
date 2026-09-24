@@ -142,12 +142,12 @@ commit: 976 tests, 89.71% coverage, web/ lint + `tsc -b` + 93/93 vitest,
 
 | Item | Status | Notes |
 |---|---|---|
-| `test-fast` CI job | todo | |
+| `test-fast` CI job | done | `test-fast` job (`ci.yml:145`) runs `-m "not slow and not integration"` — 1030 of 1036 tests, 6 deselected. Its selector is guarded: `tests/conftest.py` resolves the `-m` expression against the declared markers and raises `pytest.UsageError` on an unknown name, because `--strict-markers` does not validate names *inside* a `-m` expression, so a typo silently degraded to the full selection and still passed. Pinned by `tests/test_marker_selection.py` (`1a13bb9`) |
 | Perf gate `--real` in CI (E2a) | done | `perf-gates-real` job in `ci.yml`; `continue-on-error` on PRs, blocking on `main`. Needs no Orthanc — `--real` ships its own in-process pynetdicom SCP on an ephemeral loopback port |
 | Receive-scaling ratio (E2b) | done, report-only | `scripts/check_receive_scaling.py` re-establishes the missing benchmark. Ships ungated: the 3× floor would fail on shipped code (measured 1.77–2.18× at 5 assoc), and the floor's premise — that US-01 requires *scaling* — conflates "accepts" with "scales". See the script docstring and §"Genuinely blocked" below |
-| Staged rollout / update channel | todo | |
-| `eslint` / `globals` / `whatwg-encoding` bumps | todo | |
-| Runbook §4 Windows flake wording | todo | |
+| Staged rollout / update channel | done | `UpdateConfig.channel` (`config/__init__.py:428`) + the `channel` field and `_channel_for_version` gate in `update.py`: a stable install is never offered a higher prerelease, and a manifest whose channel field is absent counts as stable. `tauri.conf.json` untouched — `tauri-plugin-updater` 2.11.0 ignores unknown keys. Mutation-verified in both directions; `channel` also threaded through `main.py`'s update check |
+| `eslint` / `globals` / `whatwg-encoding` bumps | done, partly declined | eslint stays at 9.39.5: the 10.x bump is blocked by `eslint-plugin-react-hooks`'s peer cap (^9) and by the `@eslint/js@^10.11.0` range never being published; the 7 findings it would surface are deliberate documented patterns in 6 files, so the correct fix is a source refactor, not a bump. `whatwg-encoding` is dropped only by jsdom ≥27.7.0, and the jsdom ^24→^28 bump was reverted after a cold-cache A/B (3/3 red on 28 vs 3/3 green on 24) — recorded in `web/README.md` so the experiment is not repeated blind |
+| Runbook §4 Windows flake wording | done | rewritten as a ratchet, not blanket re-run advice: §4.1 tables the three timing tests against the jobs that can actually see them, documents the `--cov` timeout-budget inversion (10 s untraced vs 60 s traced), and makes "it passes in isolation" explicitly *not* flake evidence. The old Windows attribution was stale — those tests have been `skipif(win32)` since `eb80a58` |
 
 ### Gate
 
@@ -205,20 +205,17 @@ DestinationsView's stateful load resets, the two polling pages under
 boilerplate. The line above is corrected to 3 and each exclusion is
 recorded in the `useAsync.ts` header, so the reason travels with the code.
 
-**Tally after Wave E:** 58 done · 0 todo · 0 dropped · 0 blocked of 64 tracked.
-The sole blocked row (E2) closed when its stated premise — that the perf gate's
-`--real` mode needs a test-rig Orthanc — turned out to be false; it splits to
-E2a (the `perf-gates-real` CI job) and E2b (`scripts/check_receive_scaling.py`,
-report-only), both landed.
+**Tally after Wave E:** 58 done · 0 todo · 0 dropped · 0 blocked of 64 tracked
 lines (51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11
 findings were dropped up front as stale (see the DROPPED table below), so
-these 51 represent the open surface of the original 81. Step 8's CI/release
+those 51 represent the open surface of the original 81. Step 8's CI/release
 cluster (E1/E3/E4/E5, counted as one line in the tally but four batches) is
-done; E2 is closed — E2a (the `--real` CI job) landed and E2b (the
-receive-scaling measurement) shipped as `scripts/check_receive_scaling.py`,
-deliberately report-only. The block was attributed to a missing test-rig
-Orthanc, which was never the real dependency: `--real` ships its own
-in-process pynetdicom SCP.
+done; E2 is closed — its sole blocked row turned out to rest on a false premise
+(that the perf gate's `--real` mode needs a test-rig Orthanc). It splits to E2a
+(the `perf-gates-real` CI job, landed) and E2b (the receive-scaling measurement,
+shipped as `scripts/check_receive_scaling.py`, deliberately report-only). The
+block was attributed to a missing test-rig Orthanc, which was never the real
+dependency: `--real` ships its own in-process pynetdicom SCP.
 
 Wave D (documentation aligns to shipped behaviour) — gate re-run in full:
 
@@ -277,17 +274,30 @@ mechanism (fixed 8080, overridable by `MERCURE_BACKEND_PORT`) nearby, so
 correcting decision history in place would defeat the convention the wave
 adopted.
 
-**Residue recorded, not acted on** (out of scope for a docs wave): PRD §5.5
-declares `audit.encrypt: true` and `AuditConfig.encrypt` exists in the shipped
-model, but no code reads it — the DB key comes from `load_master_password()`
-at `main.py:756`. And `main.py:753`'s "documented as a follow-up" comment is
-stale relative to the 2026-09-09 amendment that declined the follow-up; it is
-one of the swap-point docstrings that same amendment retains, so it is a
-wording nit, not a defect. Both are candidates for a later wave. — of 64
-tracked lines
-(51 implementation + Step 0 + 7 gate checks + tray sub-items). ~11 findings were
-dropped up front as stale (see the DROPPED table below), so these 51 represent the
-open surface of the original 81.
+**Residue closed out** (`01d3f06`, 2026-09-23) — the three items recorded above
+as "not acted on" were all closed by that commit, independent of E2:
+
+- **R1 — `-m` marker validation.** pytest's `--strict-markers` validates markers
+  *applied to a test* but not the names *inside* a `-m` expression, so a typo in
+  the `test-fast` selector silently degraded to the full selection and still
+  passed (`-m "not sloww and not integration"` collected 1030/3-deselected vs
+  the correct 1027/6). A `tests/conftest.py` hook resolves the expression
+  against the markers declared in `pyproject.toml` and raises `UsageError` for
+  any unknown name. Subprocess-based tests because the guard fires at configure
+  time; the typo test is mutation-verified.
+- **R2 — `AuditConfig.encrypt`.** Documented honestly rather than wired: the
+  field is marked reserved-not-wired in the model
+  (`config/__init__.py:376-383`), since presenting it as enabling encryption
+  would overstate ADR-0004's guard. Kept, not removed, so an existing operator
+  config that sets it still loads under `extra="forbid"`. PRD §5.5's example and
+  the US-07 AC are aligned to the same wording.
+- **R3 — the stale `main.py` comment** claiming SQLite encryption "still
+  requires SQLCipher — documented as a follow-up", contradicted by ADR-0004's
+  2026-09-09 amendment that declined it. Rewritten to state the shipped posture.
+
+The 64 tracked lines are 51 implementation + Step 0 + 7 gate checks + tray
+sub-items. ~11 findings were dropped up front as stale (see the DROPPED table
+below), so those 51 represent the open surface of the original 81.
 
 Wave E (CI and release) — gate re-run in full:
 

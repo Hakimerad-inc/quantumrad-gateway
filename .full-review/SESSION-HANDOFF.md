@@ -1,8 +1,8 @@
 # Session handoff — dicom-gateway P2/P3 sweep
 
-**Purpose:** let a fresh, clean session pick up the remaining waves of the P2/P3
+**Purpose:** let a fresh, clean session pick up the state of the P2/P3
 implementation with no archaeology. Read this, then read
-`.full-review/P2-P3-BACKLOG.md` (the source of truth), then start.
+`.full-review/P2-P3-BACKLOG.md` (the source of truth).
 
 **Standing user request (verbatim, still governing):** *"next i have planned out
 the P2 & P3 in a paralel session. i want you to reconcile and update it basesd on
@@ -10,50 +10,56 @@ the last three tasks we commited and create a propper implimentation with maped
 out dependency tree, to do list along with the tracking for the implimentation. i
 want the implimentation to follow a multi-agent orchestrated workflow."*
 
-The reconciliation is done (the tracker). The implementation is in flight. Waves
-A, B and C have landed. **D, E and the final gate remain.**
+**The sweep is COMPLETE (2026-09-24).** All waves A–E have landed, the residue is
+closed, and the exit-criterion gate is green on record. §1 records the finish.
+§2–§3 are durable and apply to any future work on this repo, not just the sweep.
+§4 is the wave history.
 
 ---
 
-## 1. Where things stand
+## 1. Where things stand — finished
 
 ```
+3a151d0 docs: record the final gate run — the P2/P3 sweep's exit criterion is met
+b7d9fa7 docs: reconcile the P2/P3 tracker — Step 8 rows and residue notes match what shipped
+1f23f0f fix: Wave E — E2 unblocked (false Orthanc premise), US-01 re-sized to 5 associations
+01d3f06 fix: close out the P2/P3 residue — -m marker validation, audit.encrypt doc, stale comment
+458d361 docs: Wave D of the P2/P3 sweep — align documentation to shipped behaviour
+9c1d9ef fix: Wave E of the P2/P3 sweep — update channel gate, test-fast CI job, runbook flake ratchet
 c58fbeb fix: Wave C of the P2/P3 sweep — useAsync, route-level code splitting, a11y parametrization
-8f9a57a fix: Wave B of the P2/P3 sweep — spool atomicity, report retrieval, web layer, tray state
-082d97a docs: mark Wave A landed in the P2/P3 tracker (29 done, 25 todo, 1 blocked)
-2e2c83f fix: Wave A of the P2/P3 sweep — middleware order, hot-path queries, hygiene
-979f682 docs: reconcile the P2/P3 backlog with the three landed commits
-6d9815e fix: make the frozen-sidecar provenance check load-bearing in the build
 ```
 
-**Working tree: clean.** `git status --short` is empty at the time of writing.
+**Working tree: clean.** Only `main` exists locally; all four former topic branches
+were merged and deleted.
 
-**Tally:** `46 done · 8 todo · 0 dropped · 1 blocked` of 64 tracked lines.
+**Final tally:** `58 done · 0 todo · 0 dropped · 0 blocked` of 64 tracked lines.
+The sole blocked row (E2) closed when its Orthanc premise proved false.
 
-Remaining todo rows in the tracker (Step 6 = Wave D, Step 8 = Wave E):
+**Final gate (2026-09-24, `3a151d0`):** ruff clean; mypy clean; 1028 passed /
+5 skipped / 3 deselected at 90.19% cov (serial run); web/ lint + `tsc -b` +
+105/105 vitest; `gen-api-check` clean; `cargo test` 20/20 + fmt + clippy clean;
+`cargo tauri build` produced 3 bundles — the first full Rust build since Wave B,
+across the five commits in between.
 
-| Row | Wave |
-|---|---|
-| Update tray docs once behaviour is real | D (was D1's gate; B11 made the behaviour real, so this is now unblocked) |
-| ADR-0002 rewrite (Method 2 as shipped) | D1 |
-| ADR-0005 stale vs sprint board | D2 |
-| PRD + PRODUCT_BRIEF SQLCipher claims | D3 |
-| README operator entry point | D4 |
-| `web/README.md` + delete stray JSONs | D5 |
-| Monitoring config as real YAML files | D6 |
-| `test-fast` CI job | E1 |
-| Staged rollout / update channel | E3 |
-| `eslint` / `globals` / `whatwg-encoding` bumps | E4 |
-| Runbook §4 Windows flake wording | E5 |
+**Carried forward, never backlog items** (the honest remainder — pick these up
+next, or deliberately drop them):
 
-**E2 is closed** — it was blocked on a false premise. The block said the perf
-gate's `--real` mode needs a live Orthanc on the CI runner; it does not.
-`--real` ships its own in-process pynetdicom SCP (`_CountingScp`, bound to an
-ephemeral loopback port — `grep -i orthanc` over `scripts/` and `tests/`
-returns no hit in the perf code). E2a (the `perf-gates-real` CI job) and E2b
-(`scripts/check_receive_scaling.py`, report-only) both landed; see
-`P2-P3-BACKLOG.md`'s "No wave-E item is blocked" for why the 3× scaling floor
-was declined rather than gated.
+1. **The anchor verifier only runs on hub-anchored deployments.** `_start_anchor_verification`
+   (`main.py:495`) is gated on `hub.enabled and hub.bookkeeper_url and hub.anchor_public_key`
+   and returns `None` otherwise — deliberately, per its own docstring: without the hub's
+   public key there is no signature to check, and chain *integrity* is already covered by
+   the on-demand `/api/audit/verify` endpoint. The half that is arguably still open: a
+   plain file-anchor deployment gets integrity checks only *on demand*, never on a
+   schedule, so a tampered anchor file sits unnoticed until someone asks. That is a
+   monitoring-posture question, not a defect in the gate — the gate's no-op branch is
+   correct given what it has to work with.
+2. **No chain-continuity assertion.** `verify_anchor_signatures` never checks
+   that consecutive anchored heads form a chain, so the `prune()` re-anchor
+   discontinuity (`audit/__init__.py:431`, where surviving events' hashes are
+   recomputed from the genesis hash) is undetectable.
+3. **The receive-scaling 3× floor was declined, correctly.** A better ratio is
+   an ADR that changes the durability posture (the store-before-ack fsync
+   barrier, PRD §3.4), not a residue item.
 
 ---
 
@@ -81,14 +87,16 @@ These are all lessons learned the hard way. None of them are in the repo's docs.
   stretch. `sleep 20–45` and retry. It also got in the way of a workflow's own
   subagent review once — always re-verify a wave's work yourself after it lands.
 - **Long-running gates exceed the 120s default Bash timeout.** The full pytest suite
-  is ~390–440s; `cargo tauri build` is >600s. Run them in the background
-  (`run_in_background: true`) or with an extended `timeout`.
-- **`test_receiver_wire.py::test_5_concurrent_associations` (formerly
-  `test_25_concurrent_associations`) is flaky under full-suite load.** It passes
-  in isolation and in its own file. If it is the only failure in a full run,
-  re-run it alone before treating it as real. Note the flake was observed at
-  25 associations; the 2026-09-24 re-size to 5 makes it far less likely, but
-  the watch-item stands until a few full runs confirm it.
+  is ~370–700 s depending on load; `cargo tauri build` is >600 s. Run them in the
+  background (`run_in_background: true`) or with an extended `timeout`.
+- **Do NOT run the legs of the gate in parallel.** The 2026-09-24 final run did:
+  pytest alongside `cargo tauri build`'s release compile (load average 5.55) broke
+  two wall-clock assertions — `assert elapsed < 0.5` measured 5.39 s, and a uvicorn
+  stub missed its 15 s startup deadline. Both passed serially. Release compiles are
+  CPU-saturating; run the backend suite on a quiet machine or expect false reds.
+- **`test_receiver_wire.py::test_5_concurrent_associations` is a watch item.** It
+  was flaky at 25 associations; the 2026-09-24 re-size to 5 makes it far less
+  likely, but confirm across a few full runs before treating a failure as real.
 
 ### The serial gate — run after each wave, never inside an agent
 
@@ -132,7 +140,7 @@ the check (clean). Never run the regen while frontend agents are editing `web/sr
 
 ## 3. The methodology that is working
 
-Keep it. Three waves have now landed on it and two real defects were caught by it.
+Keep it. Five waves have landed on it and real defects were caught by it.
 
 ### Shape of a wave
 
@@ -188,104 +196,45 @@ Same shape in Wave C: jsdom cannot observe chunk latency, so "Dashboard is not b
 a Suspense boundary" is unobservable behaviourally and the test has to pin the
 observable part of the decision instead.
 
----
-
-## 4. Safety constraints
+### Safety constraints
 
 - **Never commit the Tauri signer private key, never log it in CI.** Standing user
   constraint, verbatim. Check what a release-related batch touches before committing.
-- **`*.master-password` is a live secret.** `.gitignore:89` documents it: it is the
+- **`*.master-password` is a live secret.** `.gitignore` documents it: it is the
   0600 key to every encrypted secret in the config beside it. Deleting it locks an
   operator out of their own appliance.
-- **D5's "delete stray JSONs" needs care.** Recon as of this commit — none of these
-  are tracked by git; all are gitignored local runtime artifacts:
-  - `mercure-gateway.json` (repo root, 1643 B) — local scratch config, gitignore:56.
-  - `web/mercure-gateway.json` (1612 B) — the **running gateway's live config**,
-    also gitignore:56. Not stray. Deleting it wipes a local operator config.
-  - `mercure-gateway.json.master-password` (43 B) — the live secret above.
-  - `mercure-gateway.json.bak-20260911-023759`, `.bak-20260913-200447`,
-    `.bak-20260913-201355` — gitignore:102 (`*.bak-*`). These are the genuine
-    strays.
-
-  The original finding was written when the tree looked different; re-scope it. The
-  defensible action is to delete only the `.bak-*` files, leave the live config and
-  the master-password sidecar alone, and say exactly why in the commit. Note that
-  `product-refinement-spec.md` and `usb-dongle-gateway-spec.md` refer to
-  `mercure-gateway.json` as a *concept* (the config filename, not these files), so
-  no doc link breaks.
-- **Do not implement SQLCipher.** D3 corrects the docs to match ADR-0004, which
+- **The live config files are not strays.** `mercure-gateway.json` (repo root) and
+  `web/mercure-gateway.json` are gitignored local runtime artifacts — the latter is
+  a running gateway's live config. Only the `.bak-*` files are genuine strays, and
+  those were already deleted by D5. Re-verify before deleting anything.
+- **Do not implement SQLCipher.** D3 corrected the docs to match ADR-0004, which
   formally declined it. The fix is to the prose, not the code.
 
 ---
 
-## 5. Wave D — what's left, and the recon already done
+## 4. Wave history (retained for context)
 
-All six are file-disjoint documentation work, which parallelizes cleanly. Every one
-requires **reading the shipped code and verifying claims against it** — a docs batch
-that copies an existing claim is how the drift started. The verifier for a docs wave
-must independently confirm each claim against code, not just against the diff.
+Waves A–E all landed. The per-batch detail lives in
+`.full-review/P2-P3-BACKLOG.md` (the wave DAG at §"Dependency tree and execution
+waves" and the per-wave gate tables). Summary:
 
-| Batch | Files | Notes |
+| Wave | Commit | Content |
 |---|---|---|
-| D1 | `docs/adr/ADR-0002-desktop-shell-architecture.md` | Describes Method 1 ("chosen for MVP", FastAPI on `:8080`) while Method 2 ships (`tauri.conf.json:10` `frontendDist`, `lib.rs:202` `WebviewUrl::App`). Also credits Tauri notification/auto-start plugins absent from `Cargo.toml:16-25`, and lists 4 tray states against Rust's 3 — **B11 made the 4th state real**, so re-verify against current `derive_state` before writing. Rewrite as superseded-by-Method-2. |
-| D2 | `docs/adr/ADR-0005-report-retrieval-strategy.md` | Stale against its own sprint board. Read the ADR, find what it claims, check each claim against `reports/`. |
-| D3 | `mercure-gateway-PRD.md:200,421`, `PRODUCT_BRIEF.md:35,75,139`, `main.py:711` | SQLCipher AES-256 claims that `docs/adr/ADR-0004-at-rest-encryption.md:85` formally declined. Align docs to the ADR. |
-| D4 | `README.md` | 46 lines, developer-only front door; links none of the 7 guides, no ADR index, architecture diagram omits the Tauri shell (the primary distribution form). |
-| D5 | `web/README.md` (new) + the `.bak-*` deletions above | Document the four load-bearing traps (build output path, `tsc -b` not `--noEmit`, vitest must run from `web/`, `just gen-api` after model changes) — they live only in the root justfile today. **See §4 before deleting anything.** |
-| D6 | `monitoring/prometheus.yml` + alert rules (new dir) + `docs/guides/admin-guide.md:211-258` | The scrape config and a 6-rule alert group are inline markdown every site hand-transcribes. Ship them as files and point the doc at them. The rule set has grown since the review (`GatewayHubNotDelivering`, `GatewayAuditAnchorBroken`) — derive from the actual metrics, not from the prose. |
+| A | `2e2c83f` | Cheap sweep — middleware order, hot-path queries, hygiene, CI plumbing |
+| B | `8f9a57a` | Spool atomicity, report retrieval, web layer, tray state |
+| C | `c58fbeb` | useAsync, route-level code splitting, a11y parametrization |
+| D | `458d361` | Documentation aligns to shipped behaviour |
+| E | `9c1d9ef`, `1f23f0f` | CI and release — test-fast, perf-gates-real, update channel, runbook ratchet |
+| Residue | `01d3f06` | -m marker validation, audit.encrypt doc, stale comment |
+| Gate | `3a151d0` | Final full gate on record |
 
-Wave D's gate is cheap: docs-only, so the Python/frontend suites should be
-unchanged, but run ruff (D3 touches `main.py`) and the full pytest anyway. Deleting a
-file D5 thought was referenced is the thing to check.
+### Pointers
 
-**Ordering:** D1's gate was B11, which has landed — it is unblocked. Everything in D
-is width; there is no critical path inside it.
-
----
-
-## 6. Wave E — what's left
-
-| Batch | Files | Notes |
-|---|---|---|
-| E1 | `.github/workflows/ci.yml` | Add a `-m "not slow and not integration"` job. The `slow`/`integration` markers are genuinely used (8 decorators across 4 files); integration is already deselected but `slow` is deselected nowhere, so there is no unit-only fast loop. |
-| E2a | `.github/workflows/ci.yml` | **Landed.** `perf-gates-real` job runs `scripts/check_perf_gates.py --real`; `continue-on-error` on PRs, blocking on `main`. The Orthanc dependency was a false attribution — `--real` ships its own in-process pynetdicom SCP. |
-| E2b | `scripts/check_receive_scaling.py` (new) | **Landed, report-only.** Re-establishes the receive-path benchmark that was never committed. Measured 1.77–2.18× at 5 assoc; the 3× floor is declined — it would bake the store-before-ack fsync ceiling in as a target, and US-01's AC requires *accepting* concurrent associations, not scaling throughput. |
-| E3 | `src-tauri/tauri.conf.json`, `update.py`, `.github/workflows/release.yml` | Single global `latest.json` (`tauri.conf.json:36-38`, `release.yml:189`); `PublishedUpdate`/`_is_newer` (`update.py:109,147`) have no channel field to filter on. Runbook §7 is documented discipline, not enforcement. **Touches Rust — the gate needs `cargo tauri build`.** |
-| E4 | `web/package.json` + lockfile | `eslint` 9.39.5 carries a deprecation notice; `globals` a major behind (15.x vs 16.x); `whatwg-encoding` also deprecated. eslint already runs in CI, so this is toolchain currency. |
-| E5 | the runbook | §4 prescribes "re-run the job before treating it as a regression" for two timing flakes — the exact property that makes a red gate carry no information. |
-
-E3 is the only one with real risk (Rust + release plumbing). Run it last and gate it
-with the full build.
-
----
-
-## 7. After the waves
-
-Task #10 in the tracker: a full gate run across everything — ruff, mypy, pytest with
-coverage, the whole frontend gate, `just gen-api-check`, and `cargo test` +
-`cargo tauri build`. Expect the pytest suite to take ~7 minutes and the Tauri build
-longer; background them.
-
-Then update `.full-review/P2-P3-BACKLOG.md` to the final tally, which should read
-`58 done · 0 todo · 0 dropped · 0 blocked` — the sole blocked row (E2) closed when
-its Orthanc premise turned out to be false; it splits to E2a/E2b, both landed.
-
----
-
-## 8. Pointers
-
-- **Source of truth:** `.full-review/P2-P3-BACKLOG.md` — the wave DAG, per-step
-  detail with file:line, the "Dropped as STALE" table (do not re-do those), and the
-  per-wave gate-results tables appended as waves land. Keep it current: flip rows as
-  they land, and if a wave honestly changed its own scope (Wave C did), correct the
-  tracker line rather than leaving it aspirational.
+- **Source of truth:** `.full-review/P2-P3-BACKLOG.md` — closed at 58 done, with the
+  final gate table and the load-induced-failure note.
 - **Final review report:** `.full-review/05-final-report.md` — the findings the whole
-  sweep is built from. Its caveats are worth quoting at agents (Wave C quoted the
+  sweep was built from. Its caveats are worth quoting at agents (Wave C quoted the
   code-splitting one verbatim).
 - **Agent memory:** `~/.claude/projects/-home-dev/memory/MEMORY.md` — index of
   durable facts, including `gate-frontend-on-tsc-b`, `bash-cwd-reset` and
   `p2p3-backlog-reconciled`.
-- **Wave scripts:** `/tmp/wave-c-script.js` (and Wave B's, if still present) are
-  worked examples of the sweep+verify shape — schemas, collision detection, and how
-  the "must not touch" constraints are phrased. They are in `/tmp`, so they may be
-  gone; the shape is also recoverable from this document.

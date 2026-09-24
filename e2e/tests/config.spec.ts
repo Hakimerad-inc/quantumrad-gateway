@@ -20,8 +20,12 @@ test.describe("Config", () => {
   test("invalid JSON blocks the save and shows the parse error", async ({ page }) => {
     const editor = page.getByLabel("Configuration JSON");
     await editor.fill("{ not json");
-    await page.getByRole("button", { name: "Save" }).click();
-    await expect(page.locator(".error-banner")).toContainText("Invalid JSON");
+    // c383f3d: the lint runs on every keystroke, so the parse error appears
+    // under the editor immediately — not only after a save attempt.
+    await expect(page.locator(".lint-error")).toContainText("Invalid JSON");
+    // And the document is never sent: `canSave` excludes parse errors, so the
+    // gateway cannot be handed a body that would fail server-side.
+    await expect(page.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
   test("saving a rename persists and arms the restart banner", async ({ page }) => {
@@ -41,13 +45,17 @@ test.describe("Config", () => {
     await expect(page.getByRole("button", { name: "Save" })).toBeEnabled({ timeout: 5_000 });
     await page.getByRole("button", { name: "Save" }).click();
     await expect(page.getByText("Config saved — restart the gateway")).toBeVisible();
-    // The H5 banner appears app-wide without a reload.
-    await expect(page.getByText("Configuration changed — restart the gateway")).toBeVisible();
-    // Reload: the saved rename is the config on disk now (GET reflects it);
-    // the restart banner is gone on the fresh page load because the signal is
-    // module-scope (session-only).
+    // The app-wide banner appears without a reload: the shell subscribes to the
+    // module-scope restart signal.
+    await expect(page.getByText("Configuration saved but not yet active")).toBeVisible();
+    // Reload: the saved rename is the config on disk now (GET reflects it).
     await page.reload();
     await expect(page.getByLabel("Configuration JSON")).toHaveValue(/"appliance_name":\s*"E2E-Renamed"/, { timeout: 10_000 });
+    // b4a4f00: the banner is server-sourced now (`config_pending_restart` —
+    // the saved config differs from the one the running components hold), so it
+    // survives the reload. The old client-only flag cleared on reload and let an
+    // operator believe a saved change was already live.
+    await expect(page.getByText("Configuration saved but not yet active")).toBeVisible();
   });
 
   test("service card is hidden on non-Windows (available=false contract)", async ({ page }) => {

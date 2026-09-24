@@ -37,6 +37,7 @@ uses the same defaults.
 | Spec | Covers |
 |---|---|
 | `auth.spec.ts` | login flow incl. C1 loop, 401 gating, logout |
+| `backend-down.spec.ts` | `b0e74d4` guard: refused connection vs 401, Retry recovery |
 | `dashboard.spec.ts` | live status/queue/storage from real endpoints |
 | `queue.spec.ts` | seeded studies, state badges, report/retry contracts |
 | `wizard.spec.ts` | server-side validation, echo probe, back-preserve |
@@ -50,7 +51,7 @@ uses the same defaults.
 |---|---|
 | `api.base.test.ts` | Pure functions (`apiUrl` resolution) — unit-test territory. |
 | `api.saveconfig.test.ts` | Pure client logic (error-detail extraction, single fake fetch); the save *flow* is covered E2E. |
-| `ui/UpdaterBanner.test.tsx` | Tauri-only plugin surface — the plugin modules only exist inside the Tauri shell; no browser/E2E can exercise the update path. |
+| `ui/UpdaterBanner.test.tsx` | Tauri-only plugin surface — the plugin modules only exist inside the Tauri shell; no browser/E2E can exercise the update path. Verified 2026-09-24: `UpdaterBanner` returns `null` outside `inTauri()` and the mount effect early-returns the same way, and there is no `/api/update` route in the web layer, so there is no browser-reachable surface to assert against. The version/channel/downgrade logic (`update.py`) is covered by `tests/test_updater.py`; the in-app banner half stays a Windows-UAT step. |
 | `ui/ErrorBoundary.test.tsx` | Deliberate child crash — cannot be triggered safely through E2E without corrupting a real session. |
 
 Everything else that used to be a jsdom component test (Login, App auth,

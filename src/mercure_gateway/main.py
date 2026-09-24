@@ -43,11 +43,13 @@ from mercure_gateway.disk import DiskMonitor
 from mercure_gateway.forwarder import Forwarder
 from mercure_gateway.hotplug import (
     HotplugDetector,
+    has_shutdown_marker,
     run_shutdown_sequence,
     write_shutdown_marker,
 )
 from mercure_gateway.hub_client import HubClient
 from mercure_gateway.hub_events import HubEventStreamer
+from mercure_gateway.led import LedDriver, LedStatus, build_led
 from mercure_gateway.receiver import Receiver
 from mercure_gateway.recovery import recover
 from mercure_gateway.spool import Spool
@@ -777,10 +779,79 @@ def _run_web_admin(
     )
 
 
+def _start_led_indicator(
+    config: GatewayConfig,
+    spool: Spool,
+    receiver: Receiver,
+    forwarder: Forwarder,
+    disk_monitor: DiskMonitor,
+) -> LedDriver | None:
+    """Wire the hardware LED to live gateway state (spec §3.3).
+
+    ``led.py`` shipped complete and fully tested but nothing in the
+    composition root constructed it, so ``usb_mode.led_enabled`` / ``led_pin``
+    were read by no code: an operator who enabled the indicator got silence,
+    and on a headless USB appliance that LED is the only at-a-glance signal.
+    ``build_led`` degrades to ``NoopLed`` on any hardware or config fault, so
+    this never becomes a boot dependency.
+
+    Returns None when the indicator is disabled so the caller can skip the
+    thread; an enabled config with no hardware still runs the driver against
+    the no-op LED, so the state machine is exercised uniformly.
+    """
+    led = build_led(config.usb_mode)
+    if not config.usb_mode.led_enabled:
+        return None
+
+    def _snapshot() -> LedStatus:
+        # Mirrors the /queue/stats and system_status readers so the LED, the
+        # API and the metrics all agree about what "sending" means. RECEIVING
+        # counts as active: a C-STORE association that has not committed yet is
+        # data in motion, and without it the LED reads idle while a large study
+        # streams in (spec §3.3: GREEN = receiving *or* forwarding).
+        counts = spool.count_states()
+        reading = disk_monitor.last_reading
+        return LedStatus(
+            receiver_running=receiver.is_running,
+            forwarder_running=forwarder.is_running,
+            queued=counts.get("QUEUED", 0) + counts.get("RECEIVED", 0),
+            sending=counts.get("RECEIVING", 0) + counts.get("SENDING", 0),
+            errors=counts.get("ERROR", 0) + counts.get("FAILED", 0),
+            disk_over_threshold=reading.over_threshold if reading is not None else False,
+            purge_armed=config.storage.purge_on_disk_full,
+            safe_to_remove=has_shutdown_marker(spool.spool_dir),
+        )
+
+    driver = LedDriver(_snapshot, led)
+    driver.start()
+    logger.info(
+        "LED indicator enabled on %s", config.usb_mode.led_pin or "(default pin)"
+    )
+    return driver
+
+
+def configure_logging(level: str) -> int:
+    """Apply ``general.log_level`` to the root logger; returns the numeric level.
+
+    The field is pattern-validated by the config model but was long unread:
+    main() called ``basicConfig(level=logging.INFO)`` unconditionally, so the
+    one documented verbosity knob was dead config and an operator who set DEBUG
+    still got INFO. Extracted so the mapping is unit-testable.
+    """
+    numeric = int(getattr(logging, level.upper()))
+    logging.basicConfig(
+        level=numeric, format="%(levelname)s %(name)s: %(message)s", force=True
+    )
+    return numeric
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the gateway console entry point; returns a process exit code."""
     args = _build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # Boot logging uses the default level; once the file is loaded (or an env
+    # override lands) it is re-applied below with the configured value.
+    default_level = default_config().general.log_level
+    configure_logging(default_level)
 
     if args.write_default_config:
         save_config(default_config(), args.config)
@@ -800,6 +871,12 @@ def main(argv: list[str] | None = None) -> int:
     # 12-factor overrides: MERCURE_GATEWAY_* env vars win over the config file
     # (secrets such as the hub api_key can be injected without touching disk).
     config = apply_env_overrides(config)
+
+    # Re-apply when the file (or an env override) asked for something other than
+    # the default, so --write-default-config and --set-web-password keep plain
+    # INFO while a real boot honours general.log_level.
+    if config.general.log_level != default_level:
+        configure_logging(config.general.log_level)
 
     # USB variant auto-detection (S10-T5): when the spool directory lives on
     # removable media, adopt the USB profile — aggressive retention, disk-full
@@ -935,6 +1012,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     disk_monitor.start()
 
+    # The LED is built but was never constructed from config; on a headless USB
+    # appliance it is the only at-a-glance status signal (spec §3.3).
+    led_driver = _start_led_indicator(config, spool, receiver, forwarder, disk_monitor)
+
     print(f"QuantumRAD Gateway {__version__}")
     print(f"  receiver  : AET={config.receiver.ae_title} port={config.receiver.port}")
     print(f"  forwarder : {forwarder.is_running and 'running' or 'stopped'}")
@@ -975,6 +1056,9 @@ def main(argv: list[str] | None = None) -> int:
                 while not shutdown_done.wait(timeout=1.0):
                     pass
     finally:
+        if led_driver is not None:
+            led_driver.stop()
+            led_driver.close()
         disk_monitor.stop()
         hotplug.stop()
         forwarder.stop()

@@ -202,6 +202,27 @@ def test_monitor_below_threshold_does_not_purge(
     assert spool._db.get_study(study_id) is not None
 
 
+def test_last_reading_exposes_the_measured_percentage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The LED indicator samples disk state without running its own stat call.
+
+    ``check_once`` already measures; ``last_reading`` exposes the result so a
+    second consumer (the LED snapshot) does not re-measure the filesystem or
+    diverge from what the monitor itself acted on.
+    """
+    spool = make_spool(tmp_path)
+    monkeypatch.setattr("mercure_gateway.disk.shutil.disk_usage", lambda _p: usage(93.0))
+    monitor = DiskMonitor(spool, warning_pct=90, purge_on_full=True)
+
+    assert monitor.last_reading is None  # nothing measured yet
+    monitor.check_once()
+
+    assert monitor.last_reading is not None
+    assert monitor.last_reading.pct == 93.0
+    assert monitor.last_reading.over_threshold is True
+
+
 # ── Spool-size cap (storage.max_spool_gb — review M3) ────────────────────
 
 

@@ -25,10 +25,11 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from mercure_gateway.spool import Spool
 
-__all__ = ["DiskMonitor"]
+__all__ = ["DiskMonitor", "DiskReading"]
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,24 @@ _MAX_PURGE_ITERATIONS = 100
 # Pause between purge iterations so a long purge yields the database write lock
 # to the receiver between studies instead of holding it for the whole run.
 _PURGE_PAUSE_SEC = 0.05
+
+
+@dataclass(frozen=True)
+class DiskReading:
+    """One capacity measurement, exposed for consumers that sample disk state.
+
+    The LED indicator needs to know whether the spool filesystem is over the
+    warning threshold without running its own ``disk_usage`` (a second stat
+    that could disagree with what the monitor actually purged on).  ``pct`` is
+    the post-purge figure, matching what the monitor itself acted on.
+    """
+
+    pct: float
+    warning_pct: int
+
+    @property
+    def over_threshold(self) -> bool:
+        return self.pct >= self.warning_pct
 
 
 class DiskMonitor:
@@ -96,6 +115,9 @@ class DiskMonitor:
         # not a lifetime quota (a lifetime cap would stop purging forever after
         # the first 100).
         self._purges_this_check = 0
+        # Last measurement (None until the first check). Sampled by the LED
+        # indicator so it does not stat the filesystem itself.
+        self.last_reading: DiskReading | None = None
 
     @property
     def is_running(self) -> bool:
@@ -154,6 +176,9 @@ class DiskMonitor:
                     disk = shutil.disk_usage(self._spool.spool_dir)
                     pct = disk.used * 100.0 / max(1, disk.total)
         self._enforce_spool_cap()
+        # Post-purge figure, so a sampling consumer sees the same state the
+        # monitor acted on rather than a pre-purge peak.
+        self.last_reading = DiskReading(pct=pct, warning_pct=self._warning_pct)
         return pct
 
     def _enforce_spool_cap(self) -> None:

@@ -21,11 +21,15 @@ only.
 from __future__ import annotations
 
 import enum
+import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "LedColor",
@@ -33,6 +37,8 @@ __all__ = [
     "Led",
     "NoopLed",
     "SysfsLed",
+    "LedDriver",
+    "build_led",
     "gpio_number",
     "resolve_led_state",
 ]
@@ -154,3 +160,123 @@ def gpio_number(pin: str) -> int:
     if not pin.startswith("GPIO") or not pin[4:].isdigit():
         raise ValueError(f"invalid led_pin {pin!r} — expected 'GPIO<N>' (BCM numbering)")
     return int(pin[4:])
+
+
+def build_led(
+    usb_mode: object,
+    *,
+    base_dir: Path | None = None,
+) -> Led:
+    """Construct the configured LED, degrading to :class:`NoopLed` on any failure.
+
+    This is the bridge that was missing: ``led.py`` was complete and tested but
+    nothing in the composition root ever called it, so ``usb_mode.led_enabled``
+    and ``usb_mode.led_pin`` were read by no code and an operator who enabled
+    the indicator got silence.  Every failure path — disabled config, a typo'd
+    pin, absent GPIO channels — lands on ``NoopLed``, because a broken or
+    unpopulated indicator must never stop a medical appliance from booting.
+
+    ``base_dir`` is the sysfs-style channel tree; production resolves it from
+    the parsed BCM pin, tests point it at a ``tmp_path``.
+    """
+    enabled = bool(getattr(usb_mode, "led_enabled", False))
+    if not enabled:
+        return NoopLed()
+    try:
+        pin = gpio_number(str(getattr(usb_mode, "led_pin", "")))
+    except ValueError as exc:
+        logger.warning("LED disabled — %s; indicator will be a no-op", exc)
+        return NoopLed()
+    if base_dir is None:
+        base_dir = Path(f"/sys/class/gpio/gpio{pin}")
+    try:
+        return SysfsLed(base_dir)
+    except OSError as exc:
+        logger.warning("LED disabled — %s; indicator will be a no-op", exc)
+        return NoopLed()
+
+
+class LedDriver:
+    """Samples gateway state on a timer and pushes the resolved color.
+
+    ``resolve_led_state`` is a pure function over a snapshot; something has to
+    take the snapshot.  This is that thing — a daemon thread that reads the
+    live gateway state, resolves it, and calls :meth:`Led.set`, so an operator
+    watching a headless appliance sees the transition without polling.
+
+    On stop it drives the safe-to-remove signal (white): the USB shutdown
+    sequence is complete and the stick can be pulled.  A snapshot that raises
+    is logged and skipped, never propagated — losing the thread would silently
+    revert the LED to "stopped" and hide exactly the state it exists to show.
+    """
+
+    def __init__(
+        self,
+        status_fn: Callable[[], LedStatus],
+        led: Led,
+        *,
+        interval_sec: float = 5.0,
+        initial_delay_sec: float = 1.0,
+    ) -> None:
+        self._status_fn = status_fn
+        self._led = led
+        self._interval = interval_sec
+        self._initial_delay = initial_delay_sec
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def interval_sec(self) -> float:
+        return self._interval
+
+    def start(self) -> None:
+        """Idempotent: a second call is a no-op."""
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._work, name="led-driver", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, *, join_timeout: float = 5.0) -> None:
+        """Join the thread, then hold the safe-to-remove color.
+
+        ``stop`` is the driver's part of the §7.2 shutdown sequence: the
+        components are down and the marker is about to be written, so white is
+        the last thing an operator sees — the stick can be pulled.  Emitted
+        after the join so no late sampler can overwrite it.
+        """
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=join_timeout)
+        self._thread = None
+        try:
+            self._led.set(LedColor.WHITE)
+        except Exception:  # noqa: BLE001 — best-effort signal on the way out
+            logger.exception("could not drive the safe-to-remove LED color")
+
+    def _work(self) -> None:
+        self._stop_event.wait(self._initial_delay)
+        while not self._stop_event.is_set():
+            self.update_once()
+            self._stop_event.wait(self._interval)
+
+    def update_once(self) -> None:
+        """Resolve one snapshot and push it. Never raises."""
+        try:
+            status = self._status_fn()
+        except Exception:  # noqa: BLE001 — the indicator must outlive its sources
+            logger.exception("LED status snapshot failed; keeping the last color")
+            return
+        try:
+            self._led.set(resolve_led_state(status))
+        except Exception:  # noqa: BLE001 — a dead LED must not kill the driver
+            logger.exception("LED hardware rejected a color update")
+
+    def close(self) -> None:
+        """Drive the safe-to-remove signal, then release the hardware."""
+        try:
+            self._led.close()
+        except Exception:  # noqa: BLE001 — best-effort on the way out
+            logger.exception("LED close failed")

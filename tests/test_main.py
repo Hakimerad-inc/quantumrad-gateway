@@ -473,6 +473,118 @@ def test_boot_is_silent_when_encryption_is_on(monkeypatch, caplog):  # type: ign
     assert not any("cleartext" in r.message.lower() for r in caplog.records)
 
 
+def _boot_with_log_level(
+    tmp_path: Path, level: str | None
+) -> tuple[subprocess.Popen[str], int]:
+    """Boot the gateway from a config carrying *level* (None ⇒ field absent).
+
+    Returns the running process and the receiver port it was configured with;
+    the caller waits for that port, then SIGINTs the process and reads stderr.
+    """
+    cfg = default_config()
+    port = free_port()
+    cfg.receiver = ReceiverConfig(ae_title="GATEWAY", port=port)
+    cfg.storage.spool_dir = str(tmp_path / "spool")
+    cfg.destinations = []
+    if level is not None:
+        cfg.general.log_level = level
+    config_path = tmp_path / "mercure-gateway.json"
+    write_config(config_path, cfg)
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "mercure_gateway.main", "--config", str(config_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return proc, port
+
+
+def _stop_and_drain(proc: subprocess.Popen[str]) -> str:
+    """SIGINT the gateway and return its captured stderr.
+
+    The graceful-shutdown handler installs late in boot (after the receiver
+    binds), so a SIGINT that races ahead of it terminates the process with -2
+    instead of exit 0. That race is irrelevant to what these tests assert — the
+    log output was written long before — so any exit code is accepted.
+    """
+    proc.send_signal(signal.SIGINT)
+    try:
+        _, stderr = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _, stderr = proc.communicate(timeout=5)
+    return stderr
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="send_signal(SIGINT) is POSIX",
+)
+def test_main_honors_the_configured_log_level(tmp_path: Path) -> None:
+    """``general.log_level`` reaches the root logger, not just the config model.
+
+    main() used to call ``logging.basicConfig(level=logging.INFO)`` unconditionally,
+    so the one documented verbosity knob was dead: an operator who set DEBUG still
+    got INFO and had no way to ask for it. Probed end to end through a real boot —
+    hotplug is disabled on a non-USB install, and that path logs its "not starting"
+    notice at DEBUG, so the line surfacing in stderr means the configured level
+    actually took effect rather than the hardcoded one.
+    """
+    proc, port = _boot_with_log_level(tmp_path, "DEBUG")
+    try:
+        wait_for_port("127.0.0.1", port, timeout=20.0)
+        # The DEBUG notice is logged a few steps after the port opens; let boot
+        # get there before sampling stderr.
+        time.sleep(0.5)
+    finally:
+        stderr = _stop_and_drain(proc)
+
+    assert "Hotplug detection disabled; not starting" in stderr
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="send_signal(SIGINT) is POSIX",
+)
+def test_default_log_level_stays_at_info(tmp_path: Path) -> None:
+    """DEBUG must be opt-in: a stock install logs nothing at DEBUG level."""
+    cfg = default_config()
+    assert cfg.general.log_level == "INFO", "the documented default is INFO"
+
+    proc, port = _boot_with_log_level(tmp_path, None)
+    try:
+        wait_for_port("127.0.0.1", port, timeout=20.0)
+        time.sleep(0.5)
+    finally:
+        stderr = _stop_and_drain(proc)
+
+    assert "Hotplug detection disabled; not starting" not in stderr
+
+
+def test_configure_logging_maps_the_configured_level() -> None:
+    """The validated config string resolves to the stdlib numeric level.
+
+    The model already rejects anything outside the five levels (test_config.py);
+    this pins the mapping so a case or name typo in main() fails loudly instead
+    of silently leaving the root logger wherever it happened to be.
+    """
+    import logging
+
+    import mercure_gateway.main as main_mod
+
+    root = logging.getLogger()
+    previous = root.level
+    try:
+        for name in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            applied = main_mod.configure_logging(name)
+            expected = getattr(logging, name)
+            assert applied == expected
+            assert root.level == expected
+    finally:
+        logging.getLogger().setLevel(previous)
+
+
 def _fake_getpass(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> None:
     """Answer getpass prompts in order; an extra prompt is a test bug."""
     import getpass

@@ -376,6 +376,37 @@ subprocess because the hook fires at configure time; the typo test is
 mutation-verified to fail when the guard is disabled, while the two
 false-positive controls pass either way.
 
+### FINAL GATE (2026-09-24, after the tracker reconciliation `b7d9fa7`)
+
+The sweep's exit criterion (§7, task #10) — the first full gate run across all
+five commits since Wave B, which was the last wave to touch `src-tauri/`.
+
+| Check | Status | Notes |
+|---|---|---|
+| `ruff check .` | pass | clean |
+| `mypy .` | pass | no issues |
+| `pytest -m "not integration"` + cov | pass | 1028 passed / 5 skipped / 3 deselected, serially on a quiet machine — see the load note below |
+| coverage ≥ 80 | pass | 90.22% |
+| `web/`: eslint + `tsc -b` + vitest | pass | lint clean, tsc -b exit 0, 105/105 tests in 17 files |
+| `just gen-api-check` | pass | api-schema.ts matches; no response-model change since Wave E, so no regen |
+| `cargo test` | pass | 20/20 |
+| `cargo fmt --check` + clippy | pass | fmt clean, clippy clean |
+| `cargo tauri build` | pass | 3 bundles (deb/rpm/AppImage), 11m 59s release compile |
+
+**Load-induced failures, correctly diagnosed and not shipped as regressions.**
+Running the full pytest suite concurrently with `cargo tauri build`'s
+release-optimized compile (load average 5.55) broke two wall-clock assertions:
+`test_persistence_failure_degrades_to_memory` (`assert elapsed < 0.5` measured
+5.39 s, a 10× slowdown) and `test_hub_client_registers_against_stub` (the
+uvicorn bookkeeper stub missed its 15 s startup deadline). Both pass in
+isolation — 16/16 in 4.13 s across both files — and neither the tests nor
+`hub_events.py` were touched by the sweep (last substantive change `30c3d05`,
+P0-10, ~10 commits back). Per §4.1's own ratchet "it passes in isolation" is
+not flake evidence, so the mechanism was confirmed rather than assumed: the
+assertions are wall-clock bounds with no instrumentation, and the load was
+self-inflicted (the parallel gate), not a code change. The full suite was
+re-run serially on a quiet machine to close the gate.
+
 ### Known blockers
 
 | # | Blocker | Status | Notes |

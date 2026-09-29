@@ -9,8 +9,9 @@
  */
 import { cleanup, render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import ConfigView from './ConfigView';
+import { stubDownloads, clearDownloads } from '../test/downloads';
 
 // Mirrors the shape GET /api/config really emits: ae_title is a ReceiverConfig
 // field, and GeneralConfig forbids extras, so a `general.ae_title` document can
@@ -30,18 +31,57 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+// The export endpoints answer with an attachment Content-Disposition that the
+// client reads for the download filename.
+function attachment(body: unknown, filename: string): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    },
+  });
+}
+
 // One stub serves every route the page touches, keyed by URL and method.
-function stubFetch(opts: { config?: unknown; warnings?: unknown[]; saveResult?: unknown } = {}) {
+function stubFetch(
+  opts: {
+    config?: unknown;
+    warnings?: unknown[];
+    saveResult?: unknown;
+    importResult?: unknown;
+  } = {},
+) {
   const {
     config = CLEAN_CONFIG,
     warnings = [],
     saveResult = { status: 'ok', message: 'Config update saved', restart_required: true },
+    importResult = {
+      status: 'ok',
+      message: 'Config import saved',
+      restart_required: true,
+      ignored_keys: [],
+    },
   } = opts;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url.endsWith('/api/config/warnings')) return json({ warnings, config_version: '1.0' });
+    if (url.endsWith('/api/config/import') && init?.method === 'POST') return json(importResult);
     if (url.endsWith('/api/config') && init?.method === 'PUT') return json(saveResult);
     if (url.endsWith('/api/config')) return json(config);
+    if (url.endsWith('/api/config/export')) return attachment(config, 'mercure-gateway.json');
+    if (url.endsWith('/api/diagnostics/export')) {
+      return attachment(
+        {
+          config: {},
+          audit: { events: [], count: 0, head_hash: 'abc123' },
+          spool: { total: 0, states: {} },
+          generated_at: '2026-09-25T00:00:00Z',
+          version: '1.0.0',
+        },
+        'mercure-diagnostics.json',
+      );
+    }
     return json({});
   });
 }
@@ -65,8 +105,19 @@ async function loaded() {
 }
 
 describe('ConfigView', () => {
+  beforeEach(() => {
+    // The export/import/diagnostics buttons hand a fetched blob to a
+    // synthesized anchor; jsdom never implements the blob URL calls.
+    stubDownloads();
+    // Import replaces the running config, so the handler asks first. jsdom's
+    // confirm returns true anyway but logs "not implemented" per call.
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    clearDownloads();
     cleanup();
   });
 
@@ -181,5 +232,160 @@ describe('ConfigView', () => {
     );
     render(<ConfigView />);
     expect(await screen.findByText(/unknown destination\(s\) ghost/)).toBeInTheDocument();
+  });
+
+  // ── Export / import / diagnostics (US-08c, S09-T5) ───────────────────
+  // The controls the admin guide documents ("Config → Export", "Import",
+  // "Config → Diagnostics") — review found the endpoints wired to no UI.
+
+  it('downloads the redacted config on Export config', async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<ConfigView />);
+    await loaded();
+
+    await user.click(screen.getByText('Export config'));
+
+    await waitFor(() => {
+      const exports = fetchStub.mock.calls.filter(([url]) => url.toString().endsWith('/api/config/export'));
+      expect(exports).toHaveLength(1);
+    });
+    // The body reached the blob URL path, so the fetch result was actually
+    // handed to a download rather than only requested.
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/secrets are redacted in the downloaded file/)).toBeInTheDocument();
+  });
+
+  it('imports a config file, reports dropped keys, and reloads the editor', async () => {
+    // Distinct from the pre-import document so the reload is observable.
+    const IMPORTED = {
+      config_version: '1.0',
+      receiver: { ae_title: 'IMPORTED' },
+      destinations: [],
+    };
+    let imported = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/config/import') && init?.method === 'POST') {
+          imported = true;
+          return json({
+            status: 'ok',
+            message: 'Config import saved',
+            restart_required: true,
+            ignored_keys: ['legacy.shim'],
+          });
+        }
+        if (url.endsWith('/api/config/warnings')) return json({ warnings: [], config_version: '1.0' });
+        if (url.endsWith('/api/config')) return json(imported ? IMPORTED : CLEAN_CONFIG);
+        return json({});
+      }),
+    );
+    render(<ConfigView />);
+    await loaded();
+
+    const input = screen.getByLabelText('Import configuration file') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(CLEAN_CONFIG)], 'mercure-gateway.json', { type: 'application/json' })] },
+    });
+
+    // The server names the keys its schema did not carry.
+    expect(await screen.findByText(/unknown key\(s\) not applied: legacy\.shim/)).toBeInTheDocument();
+    // The editor now shows the imported config, not the document it replaced —
+    // a later Save would otherwise silently revert the import.
+    const ta = screen.getByLabelText('Configuration JSON') as HTMLTextAreaElement;
+    expect(ta.value).toContain('IMPORTED');
+    expect(ta.value).not.toContain('pacs-a');
+    // Reloaded clean: nothing to save over the file just applied.
+    expect(screen.getByText('Save')).toBeDisabled();
+  });
+
+  it('surfaces an import rejection from the server', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/config/import') && init?.method === 'POST') {
+          return json({ detail: 'Unsupported config_version: 2.0. Expected \'1.0\'.' }, 400);
+        }
+        if (url.endsWith('/api/config/warnings')) return json({ warnings: [], config_version: '1.0' });
+        if (url.endsWith('/api/config')) return json(CLEAN_CONFIG);
+        return json({});
+      }),
+    );
+    render(<ConfigView />);
+    await loaded();
+
+    const input = screen.getByLabelText('Import configuration file') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(['{"config_version": "2.0"}'], 'bad.json', { type: 'application/json' })] },
+    });
+
+    expect(await screen.findByText(/Unsupported config_version/)).toBeInTheDocument();
+  });
+
+  it('does not import when the operator cancels the confirmation', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<ConfigView />);
+    await loaded();
+
+    const input = screen.getByLabelText('Import configuration file') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(CLEAN_CONFIG)], 'mercure-gateway.json', { type: 'application/json' })] },
+    });
+
+    await waitFor(() => {
+      const imports = fetchStub.mock.calls.filter(
+        ([url, init]) => url.toString().endsWith('/api/config/import') && init?.method === 'POST',
+      );
+      expect(imports).toHaveLength(0);
+    });
+  });
+
+  it('downloads the support bundle from the Diagnostics card', async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubFetch();
+    vi.stubGlobal('fetch', fetchStub);
+    render(<ConfigView />);
+    await loaded();
+
+    await user.click(screen.getByText('Download support bundle'));
+
+    await waitFor(() => {
+      const bundles = fetchStub.mock.calls.filter(([url]) =>
+        url.toString().endsWith('/api/diagnostics/export'),
+      );
+      expect(bundles).toHaveLength(1);
+    });
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Support bundle downloaded/)).toBeInTheDocument();
+  });
+
+  it('reports an export failure without treating it as a save', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/config/export')) return json({ detail: 'Not authenticated' }, 401);
+        if (url.endsWith('/api/config/warnings')) return json({ warnings: [], config_version: '1.0' });
+        if (url.endsWith('/api/config')) return json(CLEAN_CONFIG);
+        return json({});
+      }),
+    );
+    render(<ConfigView />);
+    await loaded();
+
+    await user.click(screen.getByText('Export config'));
+
+    // 401 detail surfaces, and the failure is announced as an error, not a
+    // status — the message no longer classifies by string prefix.
+    expect(await screen.findByText(/Not authenticated/)).toBeInTheDocument();
+    expect(screen.getByText(/Not authenticated/)).toHaveClass('error-banner');
+    expect(screen.getByRole('alert')).toBeInTheDocument();
   });
 });

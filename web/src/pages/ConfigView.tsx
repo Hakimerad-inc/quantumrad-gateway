@@ -1,5 +1,12 @@
-import { useState, useEffect, useMemo } from "react";
-import { fetchConfig, saveConfig, fetchConfigWarnings } from "../api";
+import { useState, useEffect, useMemo, useRef } from "react";
+import {
+  fetchConfig,
+  saveConfig,
+  fetchConfigWarnings,
+  exportConfig,
+  importConfig,
+  exportDiagnostics,
+} from "../api";
 import type { ConfigWarning } from "../api";
 import { lintConfigDocument } from "../config/lint";
 import ServiceCard from "../ui/ServiceCard";
@@ -10,8 +17,16 @@ export default function ConfigView() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
+  // Explicit kind alongside msg: the prefix test ("starts with 'Config'") was
+  // fine for one success string, but export/import add their own and an error
+  // message can legitimately begin with the same word.
+  const [msgKind, setMsgKind] = useState<"ok" | "error">("ok");
   const [loadError, setLoadError] = useState("");
   const [serverWarnings, setServerWarnings] = useState<ConfigWarning[]>([]);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [bundling, setBundling] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(function loadConfigOnMount() {
     fetchConfig()
@@ -49,6 +64,7 @@ export default function ConfigView() {
         // The running components hold their own config refs, so a saved change
         // only applies after a restart (review H5).
         const found = result.warnings?.length ?? 0;
+        setMsgKind("ok");
         setMsg(
           found > 0
             ? `Config saved — ${found} lint warning${found > 1 ? "s" : ""} below; restart the gateway to apply.`
@@ -60,15 +76,96 @@ export default function ConfigView() {
       }
     } catch (e) {
       if (e instanceof SyntaxError) {
+        setMsgKind("error");
         setMsg(`Invalid JSON: ${e.message}`);
       } else if (e instanceof Error) {
         // saveConfig throws with the server's 400 detail (review M8).
+        setMsgKind("error");
         setMsg(e.message);
       } else {
+        setMsgKind("error");
         setMsg(String(e));
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Download the redacted config. The file carries '***' sentinels where
+  // secrets were, so it is safe to attach to a ticket but is not itself a
+  // restorable backup (see import below).
+  const handleExport = async () => {
+    setExporting(true);
+    setMsg("");
+    try {
+      await exportConfig();
+      setMsgKind("ok");
+      setMsg("Config exported — secrets are redacted in the downloaded file.");
+    } catch (e) {
+      setMsgKind("error");
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleImport = async (file: File) => {
+    setImporting(true);
+    setMsg("");
+    try {
+      const result = await importConfig(file);
+      // Unknown keys the appliance's schema does not carry are dropped, not
+      // stored — name them so a settings gap does not pass silently.
+      const dropped = result.ignored_keys ?? [];
+      setMsgKind("ok");
+      setMsg(
+        dropped.length > 0
+          ? `Config imported — restart to apply. ${dropped.length} unknown key(s) not applied: ${dropped.join(", ")}`
+          : "Config imported — restart the gateway to apply.",
+      );
+      // The import replaced the running config. Reload it into the editor, or
+      // the textarea still holds the pre-import document and a later Save
+      // would silently write it back over the file just applied.
+      const reloaded = await fetchConfig();
+      setConfig(reloaded);
+      setText(JSON.stringify(reloaded, null, 2));
+      setDirty(false);
+    } catch (e) {
+      setMsgKind("error");
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleFileChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Reset first so a rejected import can be re-selected immediately — a file
+    // input that still holds the same path will not fire onChange twice.
+    e.target.value = "";
+    if (!file) return;
+    if (
+      !window.confirm(
+        "Importing replaces the current configuration and only takes effect after a restart. Continue?",
+      )
+    ) {
+      return;
+    }
+    await handleImport(file);
+  };
+
+  const handleDiagnostics = async () => {
+    setBundling(true);
+    setMsg("");
+    try {
+      await exportDiagnostics();
+      setMsgKind("ok");
+      setMsg("Support bundle downloaded.");
+    } catch (e) {
+      setMsgKind("error");
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBundling(false);
     }
   };
 
@@ -91,14 +188,33 @@ export default function ConfigView() {
         <button className="btn primary" onClick={handleSave} disabled={!canSave}>
           {saving ? "Saving..." : "Save"}
         </button>
+        <button className="btn" onClick={handleExport} disabled={exporting}>
+          {exporting ? "Exporting..." : "Export config"}
+        </button>
+        <button
+          className="btn"
+          onClick={() => fileInput.current?.click()}
+          disabled={importing}
+        >
+          {importing ? "Importing..." : "Import config…"}
+        </button>
+        {/* Visually hidden but focusable and labelled: the Import button drives
+          it, but a keyboard or assistive-tech user reaching the input directly
+          still gets a name for it. */}
+        <input
+          ref={fileInput}
+          type="file"
+          accept="application/json,.json"
+          onChange={handleFileChosen}
+          style={{ display: "none" }}
+          aria-label="Import configuration file"
+        />
         {msg ? (
-          // Success messages begin "Config saved…"; anything else is a parse
-          // or server rejection, which renders as an error.
+          // msgKind says whether the message is a status update or an error,
+          // so an operator's screen reader announces each appropriately.
           <span
-            className={msg.startsWith("Config") ? "ok-note" : "error-banner"}
-            // An error surfaced here must be announced (4.1.3); the ok-note is
-            // a status message and gets the same treatment.
-            role={msg.startsWith("Config") ? "status" : "alert"}
+            className={msgKind === "ok" ? "ok-note" : "error-banner"}
+            role={msgKind === "ok" ? "status" : "alert"}
             style={{ margin: 0 }}
           >
             {msg}
@@ -132,6 +248,20 @@ export default function ConfigView() {
           spellCheck={false}
           aria-label="Configuration JSON"
         />
+      </div>
+      <div className="card">
+        <div className="card-header">Diagnostics</div>
+        <div style={{ padding: 16 }}>
+          <p className="hint" style={{ marginTop: 0 }}>
+            Download a support bundle — redacted configuration, audit events, spool summary, and
+            version — to send with any support request. Credentials are stripped; patient
+            identifiers follow <code>audit.phi_scope</code> and are reduced, not removed, by
+            default.
+          </p>
+          <button className="btn" onClick={handleDiagnostics} disabled={bundling}>
+            {bundling ? "Preparing..." : "Download support bundle"}
+          </button>
+        </div>
       </div>
       <ServiceCard />
     </div>

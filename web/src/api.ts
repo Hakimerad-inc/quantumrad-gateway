@@ -17,6 +17,7 @@ import type {
   AuditEvent,
   AuditVerifyResult,
   ConfigWarning,
+  ConfigImportResponse,
   ConfigWarningsResult,
   DestinationHealth,
   DestinationNode,
@@ -43,6 +44,7 @@ export type {
   AuditEvent,
   AuditVerifyResult,
   ConfigWarning,
+  ConfigImportResponse,
   ConfigWarningsResult,
   DestinationHealth,
   DestinationNode,
@@ -101,6 +103,21 @@ async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> 
   // harmless for same-origin. `init` may carry `signal` so callers can
   // cancel a superseded request (see usePoll, review P1-20).
   return fetch(apiUrl(url), { ...init, credentials: "include" });
+}
+
+// Build an Error carrying the server's 400/500 `detail` when there is one, so
+// the operator sees "Invalid config: port: Input should be greater than 0"
+// instead of a bare "400 Bad Request" (review M8). A non-JSON body keeps the
+// status line.
+async function errorFromResponse(res: Response): Promise<Error> {
+  let detail = `${res.status} ${res.statusText}`;
+  try {
+    const body = (await res.json()) as { detail?: string };
+    if (body && typeof body.detail === "string" && body.detail) detail = body.detail;
+  } catch {
+    // non-JSON error body — keep the status-line detail
+  }
+  return new Error(detail);
 }
 
 async function getJson<T>(url: string, init: RequestInit = {}): Promise<T> {
@@ -257,14 +274,7 @@ export async function saveConfig(
   if (!res.ok) {
     // Surface the server's 400 detail ("Invalid config: …") instead of a bare
     // "Save failed" — the operator cannot fix what they cannot see (review M8).
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body && typeof body.detail === "string" && body.detail) detail = body.detail;
-    } catch {
-      // non-JSON error body — keep the status-line detail
-    }
-    throw new Error(detail);
+    throw await errorFromResponse(res);
   }
   const data = (await res.json()) as SaveConfigResult;
   if (data.restart_required) {
@@ -278,6 +288,70 @@ export async function saveConfig(
 
 export function fetchConfigWarnings(): Promise<ConfigWarningsResult> {
   return getJson<ConfigWarningsResult>("/api/config/warnings");
+}
+
+// ── Export / import (US-08c) and the support bundle (S09-T5) ──────────
+
+// The export endpoints answer JSON with an attachment Content-Disposition.
+// The body is fetched and handed to a synthesized anchor rather than
+// window.open: inside the packaged Tauri shell a relative URL would resolve
+// against the tauri:// origin and never reach the backend (review C2), and
+// this path carries the session cookie the authed case needs.
+function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const match = /filename="?([^";]+)"?/i.exec(header);
+  return match ? match[1] : null;
+}
+
+async function downloadJson(url: string, fallbackName: string): Promise<void> {
+  const res = await apiFetch(url);
+  if (!res.ok) throw await errorFromResponse(res);
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download =
+    filenameFromDisposition(res.headers.get("Content-Disposition")) ?? fallbackName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  // Revoking on the next macrotask lets the browser process the navigation the
+  // click queued before the blob URL is pulled out from under it.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+}
+
+// Download the redacted running config (secrets are '***', so the file is safe
+// to hand around but cannot be restored verbatim — import keeps the secrets
+// the appliance already holds).
+export function exportConfig(): Promise<void> {
+  return downloadJson("/api/config/export", "mercure-gateway.json");
+}
+
+// Download the audit chain — events with their hashes and the current head —
+// for offline anchoring or for archiving before retention prunes it.
+export function exportAuditLog(): Promise<void> {
+  return downloadJson("/api/audit/export", "audit-log.json");
+}
+
+// Download the one-click support bundle: redacted config, PHI-scoped audit
+// events, spool summary, version (S09-T5).
+export function exportDiagnostics(): Promise<void> {
+  return downloadJson("/api/diagnostics/export", "mercure-diagnostics.json");
+}
+
+// Apply a previously exported config file. The server restores '***' secrets
+// from the running config and reports any keys its schema does not know, so
+// the caller surfaces `ignored_keys` rather than letting them vanish.
+export async function importConfig(file: File): Promise<ConfigImportResponse> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await apiFetch("/api/config/import", { method: "POST", body: form });
+  if (!res.ok) {
+    // Surface the 400 detail ("Invalid config: …") — the operator cannot fix
+    // what they cannot see (review M8).
+    throw await errorFromResponse(res);
+  }
+  return (await res.json()) as ConfigImportResponse;
 }
 
 // ── Pipeline flow view ───────────────────────────────────────────────

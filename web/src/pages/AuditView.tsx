@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { AuditEvent, AuditVerifyResult } from "../api";
-import { fetchAudit, verifyAudit } from "../api";
+import { fetchAudit, verifyAudit, exportAuditLog } from "../api";
 import { useAsync } from "../hooks/useAsync";
 import { IconList, IconCheck, IconX } from "../ui/icons";
 
@@ -11,6 +11,10 @@ export default function AuditView() {
   const events = data ?? [];
   const [verify, setVerify] = useState<AuditVerifyResult | null>(null);
   const [checking, setChecking] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  // Separate from the list's load error: the banner text names the audit log,
+  // so an export failure reported there would read as a load failure.
+  const [exportError, setExportError] = useState("");
 
   const doVerify = async () => {
     setChecking(true);
@@ -21,6 +25,18 @@ export default function AuditView() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setChecking(false);
+    }
+  };
+
+  const doExport = async () => {
+    setExporting(true);
+    setExportError("");
+    try {
+      await exportAuditLog();
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -35,9 +51,15 @@ export default function AuditView() {
     <div>
       <h2>Audit Log</h2>
       {error ? <div className="error-banner" role="alert">Failed to load audit log: {error}</div> : null}
+      {exportError ? (
+        <div className="error-banner" role="alert">Audit export failed: {exportError}</div>
+      ) : null}
       <div className="toolbar">
         <button className="btn primary" onClick={doVerify} disabled={checking}>
           {checking ? "Verifying..." : "Verify Chain Integrity"}
+        </button>
+        <button className="btn" onClick={doExport} disabled={exporting}>
+          {exporting ? "Exporting..." : "Export audit log"}
         </button>
         {verify && (
           verify.valid

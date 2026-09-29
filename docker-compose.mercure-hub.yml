@@ -1,0 +1,142 @@
+# Vendored mercure-hub bookkeeper, for gateway interop testing.
+#
+# The `bookkeeper` service and the `db` it migrates against are copied from
+# ../mercure/docker-compose.yml (the `bookkeeper:` block at lines 224-244 and
+# `db:` at 60-80) plus the matching `bookkeeper:` block in that repo's
+# docker-compose.override.yml. This file exists so the gateway repo can bring
+# the real hub up without reaching into the mercure repo for the definition.
+#
+# It is NOT a hermetic copy. Two couplings are inherited deliberately:
+#
+#   1. Build context. The image is built from ../mercure with
+#      docker/Dockerfile.dev, and the running process is
+#      /opt/mercure/app/bookkeeper.py from that context. The code is mercure's,
+#      not the gateway's.
+#
+# The image tag is this project's own (${HUB_TAG:-mercure-hub-dev:latest}),
+# NOT the mercure stack's mercure-dev:latest. The two stacks share a build
+# context but must not share a tag: a rebuild on either side would otherwise
+# retag the image the other side's containers were started from, so a
+# `docker compose build` here would silently change what ../mercure is
+# running, and vice versa. Building under a separate tag costs disk (a second
+# copy of a ~2.3GB image) and buys isolation. Change HUB_TAG in .env to pin a
+# variant; the two stacks can then run different mercure revisions.
+#
+#   2. Bind volumes. `data` and `config` resolve to ../mercure/mercure-dev/*.
+#      The config dir carries bookkeeper.env, which hardcodes DATABASE_URL
+#      with the mercure dev password. DB_PASSWORD in this repo's .env MUST
+#      match ../mercure/mercure-dev/config/db.env or the bookkeeper starts,
+#      migrates, then fails every query on authentication.
+#
+# Because the data and config dirs are shared with the mercure repo's own
+# stack, only ONE bookkeeper may run against them at a time. Starting this
+# while ../mercure's bookkeeper is up gives two containers writing the same
+# /opt/mercure/data. Stop that one first:
+#
+#   docker stop mercure-bookkeeper-1
+#
+# Usage:
+#   cp .env.example .env      # then set DB_PASSWORD per the note above
+#   docker compose -p mercure-hub -f docker-compose.mercure-hub.yml up -d
+#   docker compose -p mercure-hub -f docker-compose.mercure-hub.yml ps
+#   docker compose -p mercure-hub -f docker-compose.mercure-hub.yml down
+#
+# -p mercure-hub is not cosmetic: without it the project name is derived from
+# the directory (dicom-gateway) and the containers are named
+# dicom-gateway-bookkeeper-1, which reads as if the gateway owned the hub.
+#
+# Nothing here is published to the host. bookkeeper sits only on two internal
+# networks, matching upstream: the gateway reaches it over the compose network
+# or, in tests, via ../mercure's own stack. db keeps upstream's 5433 publish
+# (cloudpacs already owns 5432).
+
+x-build: &build
+  context: ../mercure
+  dockerfile: docker/Dockerfile.dev
+
+x-env: &env
+  environment:
+    MERCURE_RUNNER: docker
+    MERCURE_ENV: DEV
+    MERCURE_CONFIG_FOLDER: /opt/mercure/config
+
+x-user: &user
+  user: "${UID}:${GID}"
+
+networks:
+  datastore:
+    internal: true
+  services:
+    internal: true
+
+services:
+  db:
+    image: library/postgres:14-alpine
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: mercure
+      POSTGRES_DB: mercure
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5433:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mercure"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - datastore
+
+  bookkeeper:
+    <<: [*user, *env]
+    image: ${HUB_TAG:-mercure-hub-dev:latest}
+    build:
+      <<: *build
+    command: ["python3", "/opt/mercure/app/bookkeeper.py"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ../mercure/app:/opt/mercure/app
+      - ../mercure/deploy:/opt/mercure/deploy
+      - config:/opt/mercure/config
+      - data:/opt/mercure/data
+      # dev-only stopgap: pip --user packages until the image is rebuilt
+      # (Dockerfile.dev installs requirements.txt, which now has cryptography)
+      - ../mercure/local-py311-site-packages:/home/mercure/.local/lib/python3.11/site-packages
+    networks:
+      - datastore
+      - services
+
+volumes:
+  db-data:
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: '../mercure/mercure-dev/db'
+
+  data:
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: '../mercure/mercure-dev/data'
+
+  config:
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: '../mercure/mercure-dev/config'
